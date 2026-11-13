@@ -1,5 +1,5 @@
 """
-NeuraChess OpenVINO IR Exporter & NPU Parity Verifier (`scripts/export_openvino.py`).
+NeuraChess OpenVINO IR Exporter & NPU Parity Verifier (`neurachess.scripts.export_openvino`).
 
 Exports PyTorch SE-ResNet checkpoints (`.pt`) or pre-folded `.npz` weights to OpenVINO IR
 (`FP16`, or optional `W8A16` / `W8A8` via NNCF PTQ) and optionally verifies output parity

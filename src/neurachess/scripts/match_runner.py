@@ -1,5 +1,5 @@
 """
-NeuraChess Match Runner & Pentanomial SPRT Harness (`scripts/match_runner.py`).
+NeuraChess Match Runner & Pentanomial SPRT Harness (`neurachess.scripts.match_runner`).
 
 Subcommands:
   - `vs-stockfish`: Balanced colour-reversed opening pairs against an external UCI engine

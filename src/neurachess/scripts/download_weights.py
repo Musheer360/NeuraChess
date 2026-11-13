@@ -1,5 +1,5 @@
 """
-NeuraChess Model Weight Downloader (`scripts/download_weights.py`).
+NeuraChess Model Weight Downloader (`neurachess.scripts.download_weights`).
 
 Downloads official NeuraChess OpenVINO FP16 IR and folded NumPy weights from GitHub Releases
 and verifies integrity via SHA-256 checksums before placement in `weights/`.

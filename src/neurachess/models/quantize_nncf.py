@@ -3,7 +3,7 @@ NNCF Quantization Helper for OpenVINO SE-ResNet Models.
 
 Supports INT8 weight compression and calibration using bitboard shards or binary
 datasets, targeting OpenVINO NPU/CPU execution. For full IR export + parity checks,
-see `scripts/export_openvino.py`.
+see `neurachess.scripts.export_openvino`.
 """
 
 import argparse

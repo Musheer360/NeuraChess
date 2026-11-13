@@ -61,9 +61,9 @@ Both top Pareto shapes were trained across 346M Lichess evaluation positions (`e
 | `in_region_v2` CE / Top-1 / Top-3 / Sign% | 1.6466 / 48.48% / 77.59% / 94.61% | **1.5887 / 50.16% / 79.13% / 95.12%** | -0.0579 CE |
 | `heldout_400m` CE / Top-1 / Top-3 / Sign% | 1.6057 / 48.29% / 77.76% / 95.49% | **1.5522 / 49.92% / 79.41% / 96.03%** | -0.0535 CE |
 | 1,979 Clean Puzzles (`1n` policy / 50n / 200n / 800n) | 67.61% / 77.36% / 82.82% / 94.34%* | **71.45% / 79.38% / 84.03% / 95.96%** | +3.84% (1n) |
-| Equal-time H2H (`400 ms/move`, 100g, Ponder OFF) | 45.50% (4,810.4 eff NPS) | **54.50% (`38W-33D-29L`, CI `[44.75%, 63.91%]`, 3,290.3 eff NPS)** | **+9.00%** |
+| Equal-time H2H (`400 ms/move`, 100g, Ponder OFF) | 45.50% (4,810.4 eff NPS) | **54.50% (`38W-33D-29L`, CI `[44.75%, 63.91%]`, 3,290.3 eff NPS)** | +9.00% (n.s., CI crosses 50%) |
 
-On a separate 2,000-puzzle stratified slice, `Full 346M 10x192` achieved **71.45%** policy Top-1 overall (**92.00%** on `<1200` rating, **56.25%** on `2100+` rating) and **79.40%** at 50 PUCT nodes. For `Cont 346M 10x128`, `1n` denotes raw policy top-1 (`67.61%`), and `50n`/`200n` (`77.36%` / `82.82%`) reflect sequential production defaults (`use_async_overlap=False, nireq=1, fpu_reduction=0.20`); `*` `800n` (`94.34%`) is from the earlier `nireq=2` run (Section 3.5).
+Across the three 50k evaluation splits, `Full 346M 10x192` lowers legal-masked cross-entropy by `-0.0508`, `-0.0579`, and `-0.0535` (mean `-0.0541` CE). Because the `n=100` equal-time H2H 95% Wilson CI (`[44.75%, 63.91%]`) spans `50.0%`, it does **not** establish a statistically significant playing-strength advantage over `10x128`; `10x192` was selected on consistent offline policy/value improvements and clean puzzle solve rate (`95.96%` at `800n`). On a separate 2,000-puzzle stratified slice, `Full 346M 10x192` achieved **71.45%** policy Top-1 overall (**92.00%** on `<1200` rating, **56.25%** on `2100+` rating) and **79.40%** at 50 PUCT nodes. For `Cont 346M 10x128`, `1n` denotes raw policy top-1 (`67.61%`), and `50n`/`200n` (`77.36%` / `82.82%`) reflect sequential production defaults (`use_async_overlap=False, nireq=1, fpu_reduction=0.20`); `*` `800n` (`94.34%`) is from the earlier `nireq=2` run (Section 3.5).
 
 ---
 
@@ -134,3 +134,7 @@ All 44 lost games from the 150-game Stockfish 19 calibration (`2800 / 3000 / 319
 | Opening (`ply <= 20`) | 27 | 61.36% |
 | Middlegame (`20 < ply <= 60`) | 13 | 29.55% |
 | Endgame (`ply > 60`) | 4 | 9.09% |
+
+**Calibration & Interval Notes (`v1.0.0` Baseline):**
+- Each 50-game Stockfish `UCI_Elo` ladder rung carries a wide 95% Wilson interval (roughly `±95 Elo` binomial half-width, ~190 Elo CI width at `n=50`) and should be read alongside the cumulative 150-game result (`50.00%`, 95% Wilson CI `[42.10%, 57.90%]`) and fixed-node Stockfish rungs.
+- All `v1.0.0` Stockfish 19 calibration matches in this document and `README.md` ran with `OwnBook=False` (no opening book) under fixed `movetime=400 ms` (prior to adding the `v1.0.2` CC0 Lichess opening book and cold-start `1.30x` `wtime`/`btime` buffer).

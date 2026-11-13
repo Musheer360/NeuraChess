@@ -1,5 +1,5 @@
 """
-NeuraChess Unified Evaluation CLI (`scripts/evaluate.py`).
+NeuraChess Unified Evaluation CLI (`neurachess.scripts.evaluate`).
 
 Subcommands:
   - `dataset`: Offline evaluation on 107B or 691B `.bin` test splits (masked CE,

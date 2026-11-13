@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-title: "NeuraChess: An NPU-Native Chess Engine"
+title: "NeuraChess: An NPU-Accelerated Chess Engine"
 message: "If you use NeuraChess or its empirical findings in your work, please cite it as below."
 type: software
 authors:

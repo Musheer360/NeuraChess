@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Musheer Alam. Licensed under GPL-3.0.
 /*
  * Native C++23 Bitboard Chess Engine with AVX2 + BMI2 PEXT Intrinsics
- * (engine/fast_tree/bitboard_chess.hpp)
+ * (src/neurachess/engine/fast_tree/bitboard_chess.hpp)
  * ===================================================================
  * Implements bit-for-bit `python-chess` legal move generation (exact move set
  * and exact `scan_reversed` MSB-first move order), BMI2 `_pext_u64` O(1) slider

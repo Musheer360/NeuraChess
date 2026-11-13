@@ -1,5 +1,5 @@
 """
-search/ponder_manager.py
+neurachess/search/ponder_manager.py
 ========================
 NeuraChess Pondering & Permanent Brain Manager (P1 Implementation).
 

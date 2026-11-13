@@ -9,7 +9,7 @@ Instead of relying on traditional alpha-beta hand-crafted heuristics, NeuraChess
 ## Key Highlights
 
 - **Hardware-Matched Backbone (`10x192` & `10x128` FP16):** Trained on ~346M Lichess evaluation positions (`ema_09999`), achieving **1.5522** legal-masked cross-entropy (**49.92% Top-1 / 79.41% Top-3 / 96.03% decisive value sign agreement**) on the 50k held-out split (`heldout_400m`), and **95.96%** solve rate at 800 search nodes on 1,979 clean tactical puzzles.
-- **C++23 `fast_tree` Search (`engine/fast_tree`):** Zero-allocation cache-aligned SoA bitboard node arena with AVX2/BMI2 legal move generation, 64-bit Zobrist canonical transposition neural cache (`64 MB`), safe subtree reuse across moves (with path-dependent draw invalidation), and exact minimax mate-distance propagation.
+- **C++23 `fast_tree` Search (`src/neurachess/engine/fast_tree`):** Zero-allocation cache-aligned SoA bitboard node arena with AVX2/BMI2 legal move generation (CPW Perft & 2,000-position differential fuzzer verified), Polyglot legal-EP 64-bit Zobrist canonical transposition neural cache (`64 MB`), safe subtree reuse across moves (with path-dependent draw invalidation), and exact minimax mate-distance propagation.
 - **Sustained NPU Throughput:** **~3,275 effective NPS** (`10x192`, `400 ms/move` with internal pondering enabled) and **~4,810 effective NPS** (`10x128`, Ponder OFF) under OpenVINO `V0_FP16 [LATENCY]` compilation.
 - **Empirical Rigor:** Every architectural choice (Conv73 vs dense policy, CNN vs transformer attention latency on NPU 3720, `B=16` vs `B=32`/`64`, FP16 vs PTQ/QAT W8A8, and Stockfish 19 calibration) is documented with confidence intervals and ablation data in [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
 
@@ -20,12 +20,12 @@ Instead of relying on traditional alpha-beta hand-crafted heuristics, NeuraChess
 ```text
 +-----------------------------------------------------------------------+
 |                       UCI / CLI / FastAPI Frontend                     |
-|    uci/engine_uci.py  |  play_terminal.py  |  web/server.py           |
+|   neurachess.uci  |  play_terminal.py  |  neurachess.web.server       |
 +-----------------------------------+-----------------------------------+
                                     |
                                     v
 +-----------------------------------------------------------------------+
-|              Search Orchestrator (search/npu_batched_puct.py)         |
+|       Search Orchestrator (src/neurachess/search/npu_batched_puct.py) |
 |  - Dynamic UCI time & PonderManager (search/ponder_manager.py)        |
 |  - Exact minimax solver (mate_plies tracking, draw-safe propagation)  |
 |  - 64 MB Zobrist canonical NN cache (FPU=0.20, c_puct=1.5, T=1.0)     |
@@ -36,8 +36,8 @@ Instead of relying on traditional alpha-beta hand-crafted heuristics, NeuraChess
           v                                                   v
 +-----------------------------------+   +-------------------------------+
 |  C++23 fast_tree (AVX2/BMI2 SoA)  |   |  OpenVINO NPUModel (B=1 / 16) |
-|  engine/fast_tree/fast_tree.cpp   |   |  models/npu_compiler.py       |
-|  engine/fast_tree/bitboard_chess  |   |  SE-ResNet (FP16 IR) + Cache  |
+|  src/.../fast_tree/fast_tree.cpp  |   |  src/.../npu_compiler.py      |
+|  src/.../fast_tree/bitboard_chess |   |  SE-ResNet (FP16 IR) + Cache  |
 +-----------------------------------+   +-------------------------------+
 ```
 
@@ -49,9 +49,17 @@ For full details on board tensor layouts (`gpu_unpack` vs `legacy_flip`), Conv73
 
 ### 1. Environment & Dependencies
 
-NeuraChess requires Python 3.10+, OpenVINO Runtime, PyTorch (for training/export), and a C++23 compiler (`g++` / MinGW-w64 / Clang) to build `fast_tree` on first launch.
+NeuraChess requires Python 3.10+ and bundles OpenVINO Runtime plus `ziglang` in its base install so `fast_tree` compiles automatically on first launch without external C++ toolchain setup (`NEURACHESS_ARCH=native` by default, or `NEURACHESS_ARCH=x86-64-v3` for a portable AVX2+BMI2+FMA build without AVX-512). PyTorch and NNCF are optional and only needed for training, dataset generation, and IR export:
 
 ```bash
+# Lightweight UCI / search / OpenVINO inference install (no PyTorch required)
+pip install -e .
+
+# Optional extras for training/export (`[train]`) or the FastAPI web UI (`[web]`)
+pip install -e ".[train]"
+pip install -e ".[web]"
+
+# Or install all dependencies together
 pip install -r requirements.txt
 ```
 
@@ -61,10 +69,10 @@ Model weights are tracked via GitHub Releases (not committed to Git) and verifie
 
 ```bash
 # Download default 10x192 FP16 OpenVINO IR + folded NumPy weights
-python scripts/download_weights.py --model 10x192
+python -m neurachess.scripts.download_weights --model 10x192
 
 # Or download both 10x192 and high-speed 10x128
-python scripts/download_weights.py --model all
+python -m neurachess.scripts.download_weights --model all
 ```
 
 | Model Asset | Purpose | Size (Bytes) | SHA-256 |
@@ -82,16 +90,17 @@ python scripts/download_weights.py --model all
 
 - **UCI Protocol (Arena, Cutechess, BanksiaGUI):**
   ```bash
-  python uci/engine_uci.py
+  neurachess-uci
+  # or: python -m neurachess.uci
   ```
-  Supported UCI options: `Hash` (default `64` MB), `Ponder` (`false`/`true`), `EncoderLayout` (`gpu_unpack`/`legacy_flip`).
+  Supported UCI options: `Hash` (default `64` MB), `Ponder` (`false`/`true`), `EncoderLayout` (`gpu_unpack`/`legacy_flip`), `OwnBook` (`true`/`false`, default `true`). `OwnBook` uses [`assets/opening_book.json`](assets/opening_book.json) (`1,877` EPDs built cleanly via `python -m neurachess.scripts.build_opening_book` from **CC0-1.0** [`lichess-org/chess-openings`](https://github.com/lichess-org/chess-openings), `a.tsv`–`e.tsv`), and dynamic `wtime`/`btime` search applies a `1.30x` cold-start buffer when `retained_visits < 100`.
 - **Interactive Terminal:**
   ```bash
   python play_terminal.py
   ```
-- **Web Match UI (FastAPI):**
+- **Web Match UI (FastAPI, requires `[web]`):**
   ```bash
-  uvicorn web.server:app --host 127.0.0.1 --port 8000
+  uvicorn neurachess.web.server:app --host 127.0.0.1 --port 8000
   ```
   *(Note: interactive Stockfish web sparring looks for `STOCKFISH_PATH` environment variable, `stockfish` on `PATH`, or `bin/stockfish/`.)*
 
@@ -99,22 +108,25 @@ python scripts/download_weights.py --model all
 
 ```bash
 # Offline dataset benchmark on packed bitboard shards
-python scripts/evaluate.py dataset --checkpoint path/to/ckpt.pt --datasets test_split.bin --layout gpu_unpack
+python -m neurachess.scripts.evaluate dataset --checkpoint path/to/ckpt.pt --datasets test_split.bin --layout gpu_unpack
 
 # Tactical puzzle benchmark across node budgets
-python scripts/evaluate.py puzzles --puzzles-json puzzles.json --device NPU --budgets 1 50 200 800
+python -m neurachess.scripts.evaluate puzzles --puzzles-json puzzles.json --device NPU --budgets 1 50 200 800
 
-# Stockfish paired match & bidirectional pentanomial SPRT
-python scripts/match_runner.py vs-stockfish --sf-elo 3000 --pairs 25 --movetime-ms 400 --ponder
+# Stockfish paired match & bidirectional pentanomial SPRT (`--own-book` defaults to False)
+python -m neurachess.scripts.match_runner vs-stockfish --sf-elo 3000 --pairs 25 --movetime-ms 400 --ponder
 
-# Export PyTorch checkpoint or folded NPZ to OpenVINO FP16 / W8A16 IR
-python scripts/export_openvino.py --pt ckpt.pt --blocks 10 --channels 192 --out-xml weights/model.xml --verify-device NPU
+# Rebuild the bundled CC0 Lichess ECO opening book
+python -m neurachess.scripts.build_opening_book
 
-# Build bitboard shards from Lichess eval dumps or Stockfish
-python training/build_dataset.py from-lichess --input lichess_db_eval.jsonl.zst --out-dir data/shards --write-sidecar
+# Export PyTorch checkpoint or folded NPZ to OpenVINO FP16 / W8A16 IR (requires `[train]`)
+python -m neurachess.scripts.export_openvino --pt ckpt.pt --blocks 10 --channels 192 --out-xml weights/model.xml --verify-device NPU
 
-# Train Conv73 SE-ResNet with GPU VRAM shard mixing and Boltzmann soft targets
-python training/train.py --shards-dir data/shards --blocks 10 --channels 192 --out-dir weights/runs/exp1
+# Build bitboard shards from Lichess eval dumps or Stockfish (requires `[train]`)
+python -m neurachess.training.build_dataset from-lichess --input lichess_db_eval.jsonl.zst --out-dir data/shards --write-sidecar
+
+# Train Conv73 SE-ResNet with GPU VRAM shard mixing and Boltzmann soft targets (requires `[train]`)
+python -m neurachess.training.train --shards-dir data/shards --blocks 10 --channels 192 --out-dir weights/runs/exp1
 ```
 
 ### 5. Run Unit Tests
@@ -136,7 +148,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 | `Cont 346M (10x128)` | 3.20M | 1.6163 (49.72%) | 1.6466 (48.48%) | 1.6057 (48.29%) | 0.0457 (95.49%) | 67.61% / 77.36% / 82.82% / 94.34%* |
 | **`Full 346M (10x192)`** | **7.01M** | **1.5655 (51.43%)** | **1.5887 (50.16%)** | **1.5522 (49.92%)** | **0.0402 (96.03%)** | **71.45% / 79.38% / 84.03% / 95.96%** |
 
-*(All dataset splits contain 50,000 positions except `test_in_region_v2` with 49,998. Cross-entropy masks illegal move logits to `-10000.0`. In the puzzle column, `1n` denotes raw policy top-1 accuracy without tree search. `Cont 346M (10x128)` `50n`/`200n` reflect sequential production defaults `use_async_overlap=False, nireq=1, fpu_reduction=0.20`; `*` `800n` (`94.34%`) is from the archived `nireq=2` run, see [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md). Notice the clean head-to-head match between `10x192` and `10x128` at equal `400 ms/move` without pondering favored `10x192` by **54.50%**, `38W-33D-29L`, 95% Wilson CI `[44.75%, 63.91%]` over 100 paired games despite `10x128` searching at 4,810 vs 3,290 eff NPS.)*
+*(All dataset splits contain 50,000 positions except `test_in_region_v2` with 49,998. Cross-entropy masks illegal move logits to `-10000.0`. In the puzzle column, `1n` denotes raw policy top-1 accuracy without tree search. `Cont 346M (10x128)` `50n`/`200n` reflect sequential production defaults `use_async_overlap=False, nireq=1, fpu_reduction=0.20`; `*` `800n` (`94.34%`) is from the archived `nireq=2` run, see [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md). Notice the equal-time `400 ms/move` match without pondering over `n=100` paired games scored **54.50%** (`38W-33D-29L`, 95% Wilson CI `[44.75%, 63.91%]`) for `10x192` vs `10x128` (`3,290` vs `4,810` eff NPS); because the CI spans `50.0%`, that match does **not** establish a statistically significant playing-strength advantage over `10x128`, and `10x192` is selected on consistent offline CE improvements (`-0.0508 / -0.0579 / -0.0535` across splits, mean `-0.0541` CE) and clean puzzle solve rate (`95.96%` vs `94.34%*` at `800n`).)*
 
 ### Stockfish 19 Calibration (`400 ms/move`, `Ponder=True`, `fast_tree`)
 
@@ -151,7 +163,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 | Stockfish 19 Fixed `10,000` nodes (uncapped) | 40 | `1W - 12D - 27L` | **17.50%** | `[8.75%, 31.95%]` | 3,260.2 |
 | Stockfish 19 Fixed `100,000` nodes (uncapped) | 40 | `0W - 6D - 34L` | **7.50%** | `[2.58%, 19.86%]` | 3,215.6 |
 
-**Scope & Caveat:** Stockfish `UCI_Elo` reflects Stockfish's internal calibrated node/time limiter rather than human tournament ratings or external CCRL pools. Under fixed-node uncapped Stockfish 19 (`Threads=1, Hash=16`), 400 ms NeuraChess sits between the 1,000-node and 3,500-node Stockfish strength bands (~1,300 effective NPU tree visits per move).
+**Scope & Caveat:** Stockfish `UCI_Elo` reflects Stockfish's internal calibrated node/time limiter rather than human tournament ratings or external CCRL pools, and individual 50-game rungs carry wide 95% Wilson intervals (`~±95 Elo` binomial half-width, ~190 Elo CI width at `n=50`). Under fixed-node uncapped Stockfish 19 (`Threads=1, Hash=16`), 400 ms NeuraChess sits between the 1,000-node and 3,500-node Stockfish strength bands (~1,300 effective NPU tree visits per move). All Stockfish 19 matches above reflect the `v1.0.0` baseline without an opening book (`OwnBook=False`) under fixed `400 ms/move` (`movetime`, without `v1.0.2` cold-start `wtime`/`btime` buffering).
 
 ---
 

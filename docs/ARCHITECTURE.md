@@ -4,7 +4,7 @@ This document covers the neural representation, OpenVINO NPU compilation pipelin
 
 ---
 
-## 1. Board Tensor Encoding (`core/board_tensor.py`)
+## 1. Board Tensor Encoding (`src/neurachess/core/board_tensor.py`)
 
 Positions are encoded as `(18, 8, 8)` `float32` spatial tensors (`NUM_PLANES = 18`). NeuraChess supports two explicit layouts controlled via `encoder_layout` (`weights/*.npz` metadata or UCI `EncoderLayout`):
 
@@ -14,14 +14,14 @@ Positions are encoded as `(18, 8, 8)` `float32` spatial tensors (`NUM_PLANES = 1
    - Plane `12`: Broadcast scalar turn indicator (`0.0` for White, `1.0` for Black).
    - Planes `13..16`: Broadcast castling rights (`WK, WQ, BK, BQ`).
    - Plane `17`: Normalized half-move clock (`halfmove_clock / 100.0`).
-   - Rationale: Matches bitboard GPU chunk unpacking directly (`training/train.py::gpu_unpack_v1`), eliminating host-side bitboard decoding overhead during training.
+   - Rationale: Matches bitboard GPU chunk unpacking directly (`src/neurachess/training/train.py::gpu_unpack_v1`), eliminating host-side bitboard decoding overhead during training.
 
 2. **`legacy_flip` (Canonical Side-to-Move Flip):**
-   - Ranks and friendly/enemy piece order flip vertically whenever `board.turn == chess.BLACK`. Retained for pilot compatibility and `core/tensor_transitions.py` unit validation.
+   - Ranks and friendly/enemy piece order flip vertically whenever `board.turn == chess.BLACK`. Retained for pilot compatibility and `src/neurachess/core/tensor_transitions.py` unit validation.
 
 ---
 
-## 2. Action Space & Conv73 Policy Head (`core/constants.py`, `models/pytorch_se_resnet.py`)
+## 2. Action Space & Conv73 Policy Head (`src/neurachess/core/constants.py`, `src/neurachess/models/pytorch_se_resnet.py`)
 
 NeuraChess uses the AlphaZero canonical **4,672-action encoding** (`64` source squares x `73` move planes):
 
@@ -35,7 +35,7 @@ Rather than flattening `C x 8 x 8 -> 4,672` with a giant fully connected project
 
 ---
 
-## 3. Backbone & OpenVINO NPU Compilation (`models/se_resnet_backbone.py`, `models/npu_compiler.py`)
+## 3. Backbone & OpenVINO NPU Compilation (`src/neurachess/models/se_resnet_backbone.py`, `src/neurachess/models/npu_compiler.py`)
 
 Each backbone is a pre-folded Squeeze-and-Excitation ResNet (`10x192` or `10x128`):
 - Initial `3x3` stem convolution (`18 -> C`) + folded BatchNorm bias + ReLU.
@@ -50,23 +50,32 @@ During `.npz` export (`ChessSEResNet.export_to_npz`), running `BatchNorm2d` mean
 
 ---
 
-## 4. C++23 `fast_tree` Batched PUCT Engine (`engine/fast_tree/`, `search/npu_batched_puct.py`)
+## 4. C++23 `fast_tree` Batched PUCT Engine (`src/neurachess/engine/fast_tree/`, `src/neurachess/search/npu_batched_puct.py`)
 
 To saturate batched NPU execution without Python `chess.Board` allocation bottlenecks:
 
-1. **Bitboard State Representation (`bitboard_chess.hpp`):**
-   Header-only C++23 bitboard engine using BMI2 PEXT/AVX2 intrinsics when supported, generating legal moves and incremental Zobrist keys in sub-microsecond per-node time.
+1. **Bitboard State Representation & Zobrist Convention (`bitboard_chess.hpp`):**
+   - Header-only C++23 bitboard engine using BMI2 PEXT/AVX2 intrinsics when supported, generating legal moves and incremental Zobrist keys (`zobrist_hi` / `zobrist_lo`) in sub-microsecond per-node time.
+   - **Polyglot Legal En-Passant Zobrist Convention:** `ep_square` is XORed into the Zobrist key **only when a legal en-passant capture actually exists** (`board_legal_ep_square()`), not unconditionally after every double pawn push. Verified across the 6 canonical CPW Perft positions and a 2,000-position fixed-seed differential fuzzer (`tests/test_perft_and_fuzz.py`).
+   - **Keyed Zig C++23 Compilation:** Compiled via bundled `ziglang` (`-ffast-math -fno-finite-math-only` to keep `std::isnan`/`std::isinf` guards active), with DLL filename and `.stamp` keyed on the full flag string and `NEURACHESS_ARCH` (`native` default vs `x86-64-v3` portable AVX2+BMI2+FMA baseline with zero AVX-512 instructions).
 2. **Cache-Aligned Structure-of-Arrays (SoA) Tree (`fast_tree.cpp`):**
    - Fixed contiguous node arena (`alignas(64)`) storing child slices, prior probabilities, visit counts (`N`), cumulative values (`W`), virtual losses, exact solver tags (`mate_plies`), and edge moves.
    - Single C-ABI `select_leaf_batch` call gathers up to `B=16` unexpanded leaf states and encodes their 18-plane tensors straight into a caller-owned contiguous float32 staging buffer passed to OpenVINO zero-copy (`ov.Tensor(..., shared_memory=True)`).
 3. **Production Search Configuration:**
-   - **Batch size:** `B=16` (empirical A/B vs `B=32`/`B=64` favored `B=16`; see `docs/EXPERIMENTS.md`).
+   - **Batch size:** `B=16` (empirical A/B vs `B=32`/`B=64` favored `B=16`; sequential `use_async_overlap=False, async_inflight=1` avoids fixed-node search-quality degradation).
    - **PUCT exploration & FPU:** `c_puct = 1.5`, `use_fpu_reduction = True` (`fpu_reduction = 0.20`, `root_fpu_reduction = 0.10`), `t_root = 1.0`, `contempt = 0.02`.
    - **Canonical 64 MB Zobrist NN Cache:** Stores quantized `(logits, value)` keyed by Zobrist hash inside `CanonicalNNCache` to short-circuit transpositions without redundant NPU calls.
-   - **Tree Reuse & Exact Solver:** Preserves valid subtrees after opponent replies while resetting `path_dep_draw` flags and pruning stale path-dependent repetition/50-move tags (`test_pondering.py`, `test_tree_reuse_and_nn_cache.py`). Forced mates propagate bottom-up prioritizing shortest `mate_plies` over longer mates or PUCT visits.
+   - **Tree Reuse & Exact Solver:** Preserves valid subtrees after opponent replies while resetting `path_dep_draw` flags and pruning stale path-dependent repetition/50-move tags (`tests/test_pondering.py`, `tests/test_tree_reuse_and_nn_cache.py`). Forced mates propagate bottom-up prioritizing shortest `mate_plies` over longer mates or PUCT visits.
 
 ---
 
-## 5. Runtime Auto-Tuner & Core Pinning (`engine/npu_autotuner.py`)
+## 5. Runtime Auto-Tuner & Core Pinning (`src/neurachess/engine/npu_autotuner.py`)
 
 At startup, `NPUAutoTuner` can probe OpenVINO runtime scheduling, pin worker threads to performance CPU cores (avoiding cross-CCX/E-core jitter on hybrid Intel Core Ultra processors) when HighQoS affinity is enabled, and calibrate batch-16 throughput against device thermal/power states.
+
+---
+
+## 6. UCI Opening Book & Time Management (`src/neurachess/uci/engine_uci.py`)
+
+- **CC0 ECO Opening Book (`assets/opening_book.json`):** Built reproducibly by `src/neurachess/scripts/build_opening_book.py` from `lichess-org/chess-openings` (`a.tsv`–`e.tsv`, **CC0-1.0** public domain, `1,877` EPDs, `<= 16` plies, weighted by ECO frequency support `>= 2`). Enabled by default in UCI via `OwnBook = true` (`false` in `neurachess.scripts.match_runner` unless `--own-book` is passed).
+- **Cold-Start Clock Buffer:** When moving out of an uncached or freshly initialized root (`retained_visits < 100`) under `wtime`/`btime` controls, time management applies a `1.30x` search time boost (capped at `0.25 * remaining_time`) to compensate for un-primed tree expansion.

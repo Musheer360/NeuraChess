@@ -2,10 +2,10 @@
 /*
  * NeuraChess Compiled Zero-GIL C++23 PUCT Search Arena, 64B-Aligned SoA AVX2
  * Selector, Win32 Hybrid P-Core Pinning & 64-bit Zobrist LRU Cache
- * (engine/fast_tree/fast_tree.cpp)
+ * (src/neurachess/engine/fast_tree/fast_tree.cpp)
  * ===========================================================================
  * Compiled with Clang 22 / Zig C++23:
- *   `-std=c++23 -O3 -ffast-math -march=native -flto -shared`
+ *   `-std=c++23 -O3 -ffast-math -fno-finite-math-only -march=native -shared`
  *
  * Key Upgrades (Step 2 + Steering Upgrade 1):
  *   1. Zero Legal-Move Pruning: 100% of legal moves are expanded at the root

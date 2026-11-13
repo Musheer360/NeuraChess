@@ -23,7 +23,7 @@ env/
 *.o
 *.stamp
 
-# Model weights, OpenVINO caches, and large datasets (download via scripts/download_weights.py)
+# Model weights, OpenVINO caches, and large datasets (download via python -m neurachess.scripts.download_weights)
 weights/*
 !weights/.gitkeep
 data/

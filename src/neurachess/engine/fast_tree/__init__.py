@@ -1,6 +1,6 @@
 """
 Compiled Zero-GIL C++23 PUCT Tree, 64B-Aligned SoA AVX2 Selector, P-Core Pinning &
-Zero-Copy OpenVINO Staging Wrapper (engine/fast_tree/__init__.py)
+Zero-Copy OpenVINO Staging Wrapper (src/neurachess/engine/fast_tree/__init__.py)
 ==================================================================================
 Compiles `fast_tree.cpp` + `bitboard_chess.hpp` with Zig/Clang 22 C++23:
   `-std=c++23 -O3 -ffast-math -fno-finite-math-only -march=native -shared`

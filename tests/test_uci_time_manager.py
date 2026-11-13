@@ -1,5 +1,5 @@
 """
-Unit tests for UCI Blitz/Rapid time management and ponder-hit scaling in `uci/engine_uci.py`.
+Unit tests for UCI Blitz/Rapid time management, CC0 opening book, and ponder-hit scaling in `neurachess.uci.engine_uci`.
 """
 
 import io

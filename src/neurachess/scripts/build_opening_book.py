@@ -1,5 +1,5 @@
 """
-Build NeuraChess CC0 Opening Book (scripts/build_opening_book.py)
+Build NeuraChess CC0 Opening Book (neurachess.scripts.build_opening_book)
 =================================================================
 Generates a compact, polyglot-style EPD opening book (`assets/opening_book.json`)
 directly from official Lichess CC0 ECO opening data (`lichess-org/chess-openings`,
