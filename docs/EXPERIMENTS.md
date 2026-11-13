@@ -60,10 +60,10 @@ Both top Pareto shapes were trained across 346M Lichess evaluation positions (`e
 | `far_test` CE / Top-1 / Top-3 / Sign% | 1.6163 / 49.72% / 78.80% / 94.70% | **1.5655 / 51.43% / 80.17% / 95.32%** | -0.0508 CE |
 | `in_region_v2` CE / Top-1 / Top-3 / Sign% | 1.6466 / 48.48% / 77.59% / 94.61% | **1.5887 / 50.16% / 79.13% / 95.12%** | -0.0579 CE |
 | `heldout_400m` CE / Top-1 / Top-3 / Sign% | 1.6057 / 48.29% / 77.76% / 95.49% | **1.5522 / 49.92% / 79.41% / 96.03%** | -0.0535 CE |
-| 1,979 Clean Puzzles (1n / 50n / 200n / 800n) | 67.61% / 58.16% / 74.89% / 94.34% | **71.45% / 79.38% / 84.03% / 95.96%** | +3.84% (1n) |
+| 1,979 Clean Puzzles (`1n` policy / 50n / 200n / 800n) | 67.61% / 77.36% / 82.82% / 94.34%* | **71.45% / 79.38% / 84.03% / 95.96%** | +3.84% (1n) |
 | Equal-time H2H (`400 ms/move`, 100g, Ponder OFF) | 45.50% (4,810.4 eff NPS) | **54.50% (`38W-33D-29L`, CI `[44.75%, 63.91%]`, 3,290.3 eff NPS)** | **+9.00%** |
 
-On a separate 2,000-puzzle stratified slice, `Full 346M 10x192` achieved **71.45%** policy Top-1 overall (**92.00%** on `<1200` rating, **56.25%** on `2100+` rating) and **79.40%** at 50 PUCT nodes.
+On a separate 2,000-puzzle stratified slice, `Full 346M 10x192` achieved **71.45%** policy Top-1 overall (**92.00%** on `<1200` rating, **56.25%** on `2100+` rating) and **79.40%** at 50 PUCT nodes. For `Cont 346M 10x128`, `1n` denotes raw policy top-1 (`67.61%`), and `50n`/`200n` (`77.36%` / `82.82%`) reflect sequential production defaults (`use_async_overlap=False, nireq=1, fpu_reduction=0.20`); `*` `800n` (`94.34%`) is from the earlier `nireq=2` run (Section 3.5).
 
 ---
 
@@ -84,6 +84,15 @@ On a separate 2,000-puzzle stratified slice, `Full 346M 10x192` achieved **71.45
 
 4. **Opening Root Top-K Guard (`use_opening_root_guard`, Rejected):**
    Gating opening root expansion to raw Policy Top-4 + `prior >= 0.08` recovered only **22 / 28** opening blunder positions (below the pre-registered `24 / 28` threshold; both arms scored `100 / 100` on Mate-in-1/2 and `291 / 300` on Mate-in-3). Per decision rule, `use_opening_root_guard` remains `False` by default.
+
+5. **Root-Cause Diagnosis of Archived `Cont 346M 10x128` 50-Node Dip (`58.16%` -> `77.36%`):**
+   Comparing exact archived benchmark configs showed why only `Cont 346M 10x128` dipped at `50n` (`58.16%`, `200n=74.89%`) while `6x128` (`70.54%`) and `Full 346M 10x192` (`79.38%`) did not: both `6x128` and `10x192` ran sequentially with `nireq=1` (`use_async_overlap=False`), whereas the archived `10x128` run used Step-3 autotuned `nireq=2` (`use_async_overlap=True, async_inflight=2`) with `fpu_reduction=0.25`. Controlled single-parameter ablation on the 1,979 clean puzzles (`50n`, `batch_size=16`) isolated the cause:
+   - Sequential production defaults (`use_async_overlap=False, async_inflight=1, fpu_reduction=0.20`): **77.36%** (`1,531 / 1,979`, `avg_nodes=74.87`, `4.40` batches, `40.09s`), rising to **82.82%** at `200n` (`1,639 / 1,979`, `99.69s`).
+   - Sequential control with `fpu_reduction=0.25` (`use_async_overlap=False, async_inflight=1`): **77.36%** (`1,531 / 1,979`, `avg_nodes=74.85`, `4.40` batches, `39.56s`) — zero regression from `fpu_reduction=0.25`.
+   - Single-parameter flip to async double-buffering (`use_async_overlap=True, async_inflight=2, fpu_reduction=0.20`): **58.67%** (`1,161 / 1,979`, `avg_nodes=61.57`, `3.57` batches, `33.03s`).
+   - Archived config (`use_async_overlap=True, async_inflight=2, fpu_reduction=0.25`): **58.16%** (`1,151 / 1,979`, `avg_nodes=61.57`, `3.57` batches, `33.01s`), reproducing the published figure exactly.
+
+   Under `max_nodes=50`, `use_async_overlap=True` (`nireq=2`) alone accounts for the ~19-point drop (`avg_nodes=61.57` over `3.57` async batches vs `74.87` over `4.40` sequential batches). Sequential execution (`use_async_overlap=False, nireq=1`) is the uniform production default.
 
 ---
 

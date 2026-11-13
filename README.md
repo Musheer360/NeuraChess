@@ -133,10 +133,10 @@ python -m unittest discover -s tests -p "test_*.py" -v
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `1M Pilot (6x128)` | 11.55M | 2.2476 (33.15%) | — | — | — | 43.15% / 56.44% / 68.22% / 82.16% |
 | `S5a (6x128, 70M)` | 1.99M | 1.7971 (45.47%) | 1.8337 (43.78%) | — | — | 57.10% / 70.54% / 78.73% / 91.81% |
-| `Cont 346M (10x128)` | 3.20M | 1.6163 (49.72%) | 1.6466 (48.48%) | 1.6057 (48.29%) | 0.0457 (95.49%) | 67.61% / 58.16% / 74.89% / 94.34% |
+| `Cont 346M (10x128)` | 3.20M | 1.6163 (49.72%) | 1.6466 (48.48%) | 1.6057 (48.29%) | 0.0457 (95.49%) | 67.61% / 77.36% / 82.82% / 94.34%* |
 | **`Full 346M (10x192)`** | **7.01M** | **1.5655 (51.43%)** | **1.5887 (50.16%)** | **1.5522 (49.92%)** | **0.0402 (96.03%)** | **71.45% / 79.38% / 84.03% / 95.96%** |
 
-*(All dataset splits contain 50,000 positions except `test_in_region_v2` with 49,998. Cross-entropy masks illegal move logits to `-10000.0`. Notice the clean head-to-head match between `10x192` and `10x128` at equal `400 ms/move` without pondering favored `10x192` by **54.50%**, `38W-33D-29L`, 95% Wilson CI `[44.75%, 63.91%]` over 100 paired games despite `10x128` searching at 4,810 vs 3,290 eff NPS.)*
+*(All dataset splits contain 50,000 positions except `test_in_region_v2` with 49,998. Cross-entropy masks illegal move logits to `-10000.0`. In the puzzle column, `1n` denotes raw policy top-1 accuracy without tree search. `Cont 346M (10x128)` `50n`/`200n` reflect sequential production defaults `use_async_overlap=False, nireq=1, fpu_reduction=0.20`; `*` `800n` (`94.34%`) is from the archived `nireq=2` run, see [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md). Notice the clean head-to-head match between `10x192` and `10x128` at equal `400 ms/move` without pondering favored `10x192` by **54.50%**, `38W-33D-29L`, 95% Wilson CI `[44.75%, 63.91%]` over 100 paired games despite `10x128` searching at 4,810 vs 3,290 eff NPS.)*
 
 ### Stockfish 19 Calibration (`400 ms/move`, `Ponder=True`, `fast_tree`)
 
