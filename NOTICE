@@ -1,0 +1,13 @@
+NeuraChess
+Copyright (c) 2026 Musheer Alam (https://github.com/Musheer360/NeuraChess)
+
+This software and its associated pretrained neural network weights
+(OpenVINO IR `.xml`/`.bin` and NumPy `.npz` archives) are licensed under the
+GNU General Public License v3.0 (`LICENSE`).
+
+GNU GPL-3.0 Section 7(b) Attribution Notice:
+Any derivative work, redistribution, deployment, or use of the source code
+or pretrained weights must preserve this notice and retain explicit
+attribution to the original author:
+
+    Musheer Alam (https://github.com/Musheer360/NeuraChess)

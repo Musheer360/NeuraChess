@@ -1,0 +1,11 @@
+numpy>=2.0.0
+python-chess>=1.999
+openvino>=2026.0.0
+torch>=2.5.0
+nncf>=3.0.0
+psutil>=6.0.0
+ziglang>=0.14.0
+zstandard>=0.23.0
+fastapi>=0.115.0
+uvicorn>=0.32.0
+pydantic>=2.9.0

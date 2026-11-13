@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NeuraChess: NPU vs CPU Arena</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --card-border: #30363d;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --teal: #58a6ff;
+      --green: #3fb950;
+      --amber: #d29922;
+      --purple: #bc8cff;
+      --sq-light: #e0e6ed;
+      --sq-dark: #4b6584;
+      --highlight: rgba(88, 166, 255, 0.45);
+      --last-move: rgba(255, 235, 59, 0.4);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      background: var(--card-bg);
+      border-bottom: 1px solid var(--card-border);
+      padding: 16px 28px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand h1 {
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+    .badge-npu {
+      background: linear-gradient(135deg, #0969da, #1f6feb);
+      color: white;
+      font-size: 0.72rem;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .container {
+      max-width: 1300px;
+      margin: 24px auto;
+      padding: 0 20px;
+      display: grid;
+      grid-template-columns: 540px 1fr;
+      gap: 28px;
+      flex: 1;
+    }
+    /* Board Area */
+    .board-container {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .player-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .player-card.active {
+      border-color: var(--teal);
+      box-shadow: 0 0 12px rgba(88, 166, 255, 0.25);
+    }
+    .player-info {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .player-avatar {
+      width: 44px;
+      height: 44px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+      background: #21262d;
+    }
+    .player-name {
+      font-size: 1.05rem;
+      font-weight: 600;
+    }
+    .player-hardware {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    .player-stats {
+      text-align: right;
+    }
+    .player-latency {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--green);
+    }
+    .player-eval {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+    #chessboard {
+      width: 540px;
+      height: 540px;
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      grid-template-rows: repeat(8, 1fr);
+      border: 3px solid var(--card-border);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      position: relative;
+    }
+    .square {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2.8rem;
+      cursor: default;
+      user-select: none;
+      position: relative;
+      transition: background 0.15s ease;
+    }
+    .square.light { background: var(--sq-light); }
+    .square.dark { background: var(--sq-dark); }
+    .square.highlight { background: var(--highlight) !important; }
+    .square.last-move { background: var(--last-move) !important; }
+    .coord-file {
+      position: absolute;
+      bottom: 2px;
+      right: 4px;
+      font-size: 0.65rem;
+      font-weight: 700;
+      opacity: 0.65;
+    }
+    .coord-rank {
+      position: absolute;
+      top: 2px;
+      left: 4px;
+      font-size: 0.65rem;
+      font-weight: 700;
+      opacity: 0.65;
+    }
+    /* Controls & Move Log Panel */
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 18px 20px;
+    }
+    .card-title {
+      font-size: 0.92rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 14px;
+    }
+    .btn-group {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .btn {
+      flex: 1;
+      padding: 10px 16px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .btn-primary { background: #238636; color: white; }
+    .btn-primary:hover { background: #2ea043; }
+    .btn-secondary { background: #21262d; color: var(--text); border: 1px solid var(--card-border); }
+    .btn-secondary:hover { background: #30363d; }
+    .btn-danger { background: #da3633; color: white; }
+    .btn-danger:hover { background: #f85149; }
+    .control-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 10px;
+      font-size: 0.88rem;
+    }
+    .control-row label { color: var(--text-muted); }
+    .control-row select, .control-row input {
+      background: #0d1117;
+      color: var(--text);
+      border: 1px solid var(--card-border);
+      padding: 6px 10px;
+      border-radius: 6px;
+    }
+    .status-banner {
+      background: #1f242c;
+      border-left: 4px solid var(--teal);
+      padding: 12px 16px;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      font-weight: 500;
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+    }
+    .status-banner.winner {
+      border-left-color: var(--amber);
+      background: rgba(210, 153, 34, 0.15);
+      font-weight: 700;
+      color: #f0883e;
+    }
+    .movelist {
+      height: 280px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 0.92rem;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      background: #0d1117;
+    }
+    .movelist table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .movelist th {
+      background: #161b22;
+      padding: 8px 12px;
+      text-align: left;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--card-border);
+    }
+    .movelist td {
+      padding: 6px 12px;
+      border-bottom: 1px solid #1f242c;
+    }
+    .movelist tr:hover { background: #161b22; }
+    .move-num { color: var(--text-muted); width: 45px; }
+    .piece-white { color: #ffffff; text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
+    .piece-black { color: #1e1e1e; text-shadow: 0 1px 1px rgba(255,255,255,0.4); }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <span style="font-size: 1.8rem;">♟️</span>
+      <h1>NeuraChess Live Arena</h1>
+      <span class="badge-npu">⚡ NPU Accelerated</span>
+    </div>
+    <div style="font-size: 0.85rem; color: var(--text-muted);">
+      Hardware: <strong>Intel(R) AI Boost NPU</strong> vs <strong>Intel Core Ultra CPU</strong>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Chessboard Side -->
+    <div class="board-container">
+      <!-- Player 2 (Black - CPU) -->
+      <div class="player-card" id="card-black">
+        <div class="player-info">
+          <div class="player-avatar">🖥️</div>
+          <div>
+            <div class="player-name">Stockfish 19</div>
+            <div class="player-hardware">Intel Core Ultra 5 125U (CPU)</div>
+          </div>
+        </div>
+        <div class="player-stats">
+          <div class="player-latency" id="black-latency">-- ms</div>
+          <div class="player-eval" id="black-eval">Eval: 0.00</div>
+        </div>
+      </div>
+
+      <!-- 8x8 Board -->
+      <div id="chessboard"></div>
+
+      <!-- Player 1 (White - NPU) -->
+      <div class="player-card active" id="card-white">
+        <div class="player-info">
+          <div class="player-avatar">🧠</div>
+          <div>
+            <div class="player-name">NeuraChess v2.0</div>
+            <div class="player-hardware">
+              <span id="npu-badge" style="background:#1f6feb;color:#fff;padding:2px 6px;border-radius:4px;font-weight:700;font-size:0.7rem;">NPU 3720 ONLY</span>
+              <span id="npu-status" style="margin-left:6px;color:#3fb950;font-weight:600;">IDLE</span>
+            </div>
+          </div>
+        </div>
+        <div class="player-stats">
+          <div class="player-latency" id="white-latency">-- ms</div>
+          <div class="player-eval" id="white-eval">Eval: 0.00 | Nodes: 0</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Controls & Logs Side -->
+    <div class="sidebar">
+      <!-- Match Status Banner -->
+      <div class="status-banner" id="status-text">
+        Ready to start match. NeuraChess (NPU) plays White, Stockfish (CPU) plays Black.
+      </div>
+
+      <!-- Controls Card -->
+      <div class="card">
+        <div class="card-title">Match Controls</div>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="btn-start" onclick="startMatch()">▶ Start Match</button>
+          <button class="btn btn-secondary" id="btn-pause" onclick="pauseMatch()">⏸ Pause</button>
+          <button class="btn btn-danger" id="btn-reset" onclick="resetMatch()">⏹ Reset</button>
+        </div>
+
+        <div class="control-row">
+          <label for="npu-think-time">NPU Sustained Think Time (Max Saturation):</label>
+          <select id="npu-think-time" onchange="updateSettings()">
+            <option value="200">200 ms (Rapid)</option>
+            <option value="600" selected>600 ms (Sustained ~4,000 pos)</option>
+            <option value="1200">1,200 ms (Max NPU ~8,000 pos)</option>
+            <option value="2000">2,000 ms (Extreme NPU Saturation)</option>
+          </select>
+        </div>
+
+        <div class="control-row">
+          <label for="stockfish-skill">Stockfish CPU Strength:</label>
+          <select id="stockfish-skill" onchange="updateSettings()">
+            <option value="1">Skill Level 1 (Casual ~1200)</option>
+            <option value="3" selected>Skill Level 3 (Club ~1450)</option>
+            <option value="5">Skill Level 5 (Intermediate ~1650)</option>
+            <option value="10">Skill Level 10 (Advanced ~1900)</option>
+            <option value="20">Skill Level 20 (Grandmaster Max)</option>
+          </select>
+        </div>
+
+        <div class="control-row">
+          <label for="move-delay">Move Speed:</label>
+          <select id="move-delay" onchange="updateSettings()">
+            <option value="0.3">Fast (0.3s)</option>
+            <option value="0.8" selected>Normal (0.8s)</option>
+            <option value="1.5">Cinematic (1.5s)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Move Notation Table -->
+      <div class="card" style="flex: 1; display: flex; flex-direction: column;">
+        <div class="card-title">Live Move Notation</div>
+        <div class="movelist" id="movelist-container">
+          <table>
+            <thead>
+              <tr>
+                <th class="move-num">#</th>
+                <th>White (NeuraChess NPU)</th>
+                <th>Black (Stockfish CPU)</th>
+              </tr>
+            </thead>
+            <tbody id="movelist-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const PIECE_SYMBOLS = {
+      'P': '♙', 'N': '♘', 'B': '♗', 'R': '♖', 'Q': '♕', 'K': '♔',
+      'p': '♟', 'n': '♞', 'b': '♝', 'r': '♜', 'q': '♛', 'k': '♚'
+    };
+
+    let ws = null;
+    let currentState = null;
+
+    function initBoard() {
+      const boardEl = document.getElementById('chessboard');
+      boardEl.innerHTML = '';
+      for (let r = 7; r >= 0; r--) {
+        for (let f = 0; f < 8; f++) {
+          const sq = document.createElement('div');
+          const isLight = (r + f) % 2 !== 0;
+          sq.className = `square ${isLight ? 'light' : 'dark'}`;
+          sq.id = `sq-${String.fromCharCode(97 + f)}${r + 1}`;
+          
+          if (r === 0) {
+            const coordF = document.createElement('span');
+            coordF.className = 'coord-file';
+            coordF.innerText = String.fromCharCode(97 + f);
+            sq.appendChild(coordF);
+          }
+          if (f === 0) {
+            const coordR = document.createElement('span');
+            coordR.className = 'coord-rank';
+            coordR.innerText = r + 1;
+            sq.appendChild(coordR);
+          }
+          boardEl.appendChild(sq);
+        }
+      }
+    }
+
+    function renderFen(fen, lastMove) {
+      document.querySelectorAll('.square').forEach(sq => {
+        sq.classList.remove('last-move');
+        const pieceSpan = sq.querySelector('.piece');
+        if (pieceSpan) pieceSpan.remove();
+      });
+
+      const parts = fen.split(' ');
+      const rows = parts[0].split('/');
+
+      for (let r = 7; r >= 0; r--) {
+        const rowStr = rows[7 - r];
+        let fileIdx = 0;
+        for (let i = 0; i < rowStr.length; i++) {
+          const char = rowStr[i];
+          if (char >= '1' && char <= '8') {
+            fileIdx += parseInt(char);
+          } else {
+            const sqId = `sq-${String.fromCharCode(97 + fileIdx)}${r + 1}`;
+            const sqEl = document.getElementById(sqId);
+            if (sqEl) {
+              const p = document.createElement('span');
+              p.className = `piece ${char === char.toUpperCase() ? 'piece-white' : 'piece-black'}`;
+              p.innerText = PIECE_SYMBOLS[char];
+              sqEl.appendChild(p);
+            }
+            fileIdx++;
+          }
+        }
+      }
+
+      if (lastMove) {
+        const fromEl = document.getElementById(`sq-${lastMove.from}`);
+        const toEl = document.getElementById(`sq-${lastMove.to}`);
+        if (fromEl) fromEl.classList.add('last-move');
+        if (toEl) toEl.classList.add('last-move');
+      }
+    }
+
+    function updateUI(state) {
+      currentState = state;
+      renderFen(state.fen, state.last_move);
+
+      // Latencies & Telemetry
+      if (state.npu_latency_ms > 0) {
+        document.getElementById('white-latency').innerText = `${state.npu_latency_ms} ms (${state.npu_nps || 0} pos/s)`;
+        document.getElementById('white-eval').innerText = `Eval: ${state.npu_eval > 0 ? '+' : ''}${state.npu_eval} | Nodes: ${state.npu_nodes || 0}`;
+      }
+      
+      const npuStatus = document.getElementById('npu-status');
+      if (npuStatus) {
+        if (state.npu_active) {
+          npuStatus.innerText = '⚡ ACTIVE (NPU COMPUTING)';
+          npuStatus.style.color = '#58a6ff';
+        } else {
+          npuStatus.innerText = 'IDLE';
+          npuStatus.style.color = '#3fb950';
+        }
+      }
+      if (state.cpu_latency_ms > 0) {
+        document.getElementById('black-latency').innerText = `${state.cpu_latency_ms} ms`;
+        document.getElementById('black-eval').innerText = `Eval: ${state.cpu_eval > 0 ? '+' : ''}${state.cpu_eval}`;
+      }
+
+      // Active player card
+      const cardW = document.getElementById('card-white');
+      const cardB = document.getElementById('card-black');
+      if (state.turn === 'white') {
+        cardW.classList.add('active');
+        cardB.classList.remove('active');
+      } else {
+        cardB.classList.add('active');
+        cardW.classList.remove('active');
+      }
+
+      // Status Banner
+      const statusEl = document.getElementById('status-text');
+      if (state.game_over) {
+        statusEl.className = 'status-banner winner';
+        statusEl.innerText = `🏆 ${state.termination}`;
+      } else if (state.is_running) {
+        statusEl.className = 'status-banner';
+        const actor = state.turn === 'white' ? '🧠 NeuraChess calculating on Intel AI Boost NPU...' : '🖥️ Stockfish calculating on CPU...';
+        statusEl.innerText = `Move ${state.move_number}: ${actor}`;
+      }
+
+      // Move list
+      renderMoveList(state.moves_san);
+    }
+
+    function renderMoveList(moves) {
+      const tbody = document.getElementById('movelist-body');
+      tbody.innerHTML = '';
+      for (let i = 0; i < moves.length; i += 2) {
+        const moveNum = Math.floor(i / 2) + 1;
+        const wMove = moves[i] || '';
+        const bMove = moves[i + 1] || '';
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td class="move-num">${moveNum}.</td><td>${wMove}</td><td>${bMove}</td>`;
+        tbody.appendChild(tr);
+      }
+      const container = document.getElementById('movelist-container');
+      container.scrollTop = container.scrollHeight;
+    }
+
+    async function fetchState() {
+      try {
+        const res = await fetch('/api/state');
+        if (res.ok) {
+          const state = await res.json();
+          updateUI(state);
+        }
+      } catch (e) {
+        console.error("Fetch state error:", e);
+      }
+    }
+
+    function connectWebSocket() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      try {
+        ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+        ws.onmessage = (event) => {
+          const state = JSON.parse(event.data);
+          updateUI(state);
+        };
+        ws.onerror = () => {
+          // If WS has any issue, fast polling handles it
+        };
+      } catch (err) {
+        console.log("WebSocket init error, falling back to polling");
+      }
+    }
+
+    async function sendControl(action) {
+      const skill = parseInt(document.getElementById('stockfish-skill').value);
+      const delay = parseFloat(document.getElementById('move-delay').value);
+      const thinkTime = parseInt(document.getElementById('npu-think-time').value || 600);
+      await fetch('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action,
+          stockfish_skill: skill,
+          move_delay: delay,
+          think_time_ms: thinkTime
+        })
+      });
+      fetchState();
+    }
+
+    function startMatch() { sendControl('start'); }
+    function pauseMatch() { sendControl('pause'); }
+    function resetMatch() { sendControl('reset'); }
+    function updateSettings() {
+      if (currentState && currentState.is_running) {
+        sendControl('update');
+      }
+    }
+
+    window.onload = () => {
+      initBoard();
+      fetchState();
+      connectWebSocket();
+      setInterval(fetchState, 350);
+    };
+  </script>
+</body>
+</html>

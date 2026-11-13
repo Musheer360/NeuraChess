@@ -1,0 +1,50 @@
+# Python bytecode / packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Compiled native extensions (built locally on demand via engine.fast_tree.ensure_compiled)
+*.dll
+*.so
+*.dylib
+*.lib
+*.exp
+*.pdb
+*.obj
+*.o
+
+# Model weights, OpenVINO caches, and large datasets (download via scripts/download_weights.py)
+weights/*
+!weights/.gitkeep
+data/
+bin/
+eval_results/*.bin
+eval_results/cache/
+
+# Archives & checkpoints
+*.tar.gz
+*.zip
+*.zst
+*.pt
+*.pth
+*.npz
+*.onnx
+*.xml
+*.bin
+
+# Scratch / IDE / OS
+scratch/
+.env
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
