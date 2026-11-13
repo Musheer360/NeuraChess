@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neurachess"
-version = "1.0.0"
+version = "1.0.2"
 description = "NPU-Accelerated Neural Chess Engine with AVX2/BMI2 C++23 Batched PUCT Search"
 readme = "README.md"
 license = "GPL-3.0-only"
