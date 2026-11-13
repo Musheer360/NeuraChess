@@ -18,18 +18,17 @@ import sys
 import time
 import math
 import ctypes
+import logging
 import threading
 import subprocess
 import numpy as np
 import chess
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+logger = logging.getLogger(__name__)
 
-from core.constants import TOTAL_ACTIONS, NUM_PLANES, uci_to_action, action_to_uci, move_to_action
-from core.board_tensor import board_to_tensor, ENCODER_LAYOUT_GPU_UNPACK
-from search.candidate_selector import PIECE_VALUES, select_opening_guarded_root_act
+from neurachess.core.constants import TOTAL_ACTIONS, NUM_PLANES, uci_to_action, action_to_uci, move_to_action
+from neurachess.core.board_tensor import board_to_tensor, ENCODER_LAYOUT_GPU_UNPACK
+from neurachess.search.candidate_selector import PIECE_VALUES, select_opening_guarded_root_act
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _CPP_PATH = os.path.join(_THIS_DIR, "fast_tree.cpp")
@@ -474,7 +473,7 @@ def get_lib() -> ctypes.CDLL:
                         a = move_to_action(mv, canonical_flip=cflip)
                         act_arr[is_blk, f_sq, t_sq, promo] = a
                     except KeyError:
-                        pass
+                        continue  # Non-geometric square pair has no policy plane mapping
     lib.ft_init_action_table(act_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)))
 
     _LIB = lib
@@ -594,8 +593,8 @@ class FastLruEvalCache:
         if getattr(self, "_ptr", None):
             try:
                 self.lib.ft_cache_destroy(self._ptr)
-            except Exception:
-                pass
+            except (OSError, ctypes.ArgumentError, AttributeError):
+                logger.debug("FastLruEvalCache destroy failed during cleanup", exc_info=True)
             self._ptr = None
 
     def clear(self):
@@ -747,8 +746,8 @@ class FastTreeSearchBackend:
         if getattr(self, "_tree_ptr", None):
             try:
                 self.lib.ft_tree_destroy(self._tree_ptr)
-            except Exception:
-                pass
+            except (OSError, ctypes.ArgumentError, AttributeError):
+                logger.debug("FastTree destroy failed during cleanup", exc_info=True)
             self._tree_ptr = None
 
     def reconfigure(
@@ -776,8 +775,8 @@ class FastTreeSearchBackend:
         if getattr(self, "_tree_ptr", None):
             try:
                 self.lib.ft_tree_destroy(self._tree_ptr)
-            except Exception:
-                pass
+            except (OSError, ctypes.ArgumentError, AttributeError):
+                logger.debug("FastTree destroy failed during cleanup", exc_info=True)
             self._tree_ptr = None
 
         self._tree_ptr = self.lib.ft_tree_create(
@@ -834,8 +833,8 @@ class FastTreeSearchBackend:
                 entry = (req, in_ptr, out0_ptr, out1_ptr, val_cols, in_arr, out0_arr, out1_arr)
                 self._zc_req_cache[rid] = entry
                 return entry
-        except Exception:
-            pass
+        except (RuntimeError, AttributeError, TypeError, ValueError):
+            logger.debug("Zero-copy OpenVINO tensor binding unavailable; using staged arrays", exc_info=True)
         return None
 
     def _extract_cboard_args(self, board: chess.Board) -> tuple[int, int, int, int, int]:

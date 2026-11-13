@@ -7,12 +7,8 @@ from pathlib import Path
 
 import chess
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from core.constants import TOTAL_ACTIONS, action_to_uci, uci_to_action
-from core.tensor_movegen import action_to_move, get_legal_action_indices, get_legal_action_mask
+from neurachess.core.constants import TOTAL_ACTIONS, action_to_uci, uci_to_action
+from neurachess.core.tensor_movegen import action_to_move, get_legal_action_indices, get_legal_action_mask
 
 
 class TestMoveGen(unittest.TestCase):

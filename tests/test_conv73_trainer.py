@@ -7,18 +7,24 @@ from pathlib import Path
 
 import chess
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+except ImportError:
+    torch = None
+    nn = None
+    F = None
 
-from core.constants import move_to_action
-from models.pytorch_se_resnet import ChessSEResNet, ModelEMA, fold_conv_bn
+from neurachess.core.constants import move_to_action
+if torch is not None:
+    from neurachess.models.pytorch_se_resnet import ChessSEResNet, ModelEMA, fold_conv_bn
+else:
+    ChessSEResNet = ModelEMA = fold_conv_bn = None
 
 
+@unittest.skipIf(torch is None, "PyTorch not installed")
 class TestConv73Trainer(unittest.TestCase):
     def test_conv73_action_mapping_10000(self) -> None:
         t = torch.zeros(1, 73, 8, 8, dtype=torch.float32)

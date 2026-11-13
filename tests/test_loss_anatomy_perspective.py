@@ -5,11 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from scripts.evaluate import SF_PATH, StockfishAnalyzer, eval_stm_to_nc_drop, verify_perspective_sanity
+from neurachess.scripts.evaluate import SF_PATH, StockfishAnalyzer, eval_stm_to_nc_drop, verify_perspective_sanity
 
 
 def _has_stockfish_binary() -> bool:

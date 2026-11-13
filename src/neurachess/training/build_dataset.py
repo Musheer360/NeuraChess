@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import io
 import json
+import logging
 import os
 import random
 import shutil
@@ -20,18 +21,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 import chess
 import numpy as np
 import zstandard as zstd
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from core.constants import uci_to_action
-from core.tensor_movegen import get_legal_action_mask
-from training.binary_dataset import cp_to_wdl
-from training.bitboard_dataset import PACK_FORMAT, pack_position, pack_position_v2
+from neurachess.core.constants import uci_to_action
+from neurachess.core.tensor_movegen import get_legal_action_mask
+from neurachess.training.binary_dataset import cp_to_wdl
+from neurachess.training.bitboard_dataset import PACK_FORMAT, pack_position, pack_position_v2
 
 
 def _board_hash_from_107b(chunk: bytes) -> str:
@@ -48,7 +47,8 @@ def _extract_pv_move_and_cp(board: chess.Board, pv_entry: dict) -> tuple[str | N
     try:
         mv = board.parse_uci(first_uci)
         norm_uci = mv.uci()
-    except Exception:
+    except (chess.InvalidMoveError, chess.IllegalMoveError, chess.AmbiguousMoveError, ValueError):
+        logger.debug("Skipping unparseable Lichess PV move %r", first_uci, exc_info=True)
         return None, None
 
     if "cp" in pv_entry and pv_entry["cp"] is not None:
@@ -94,7 +94,8 @@ def build_from_lichess(args: argparse.Namespace) -> None:
                 continue
             try:
                 board = chess.Board(fen)
-            except Exception:
+            except ValueError:
+                logger.debug("Skipping invalid FEN %r", fen, exc_info=True)
                 continue
             pvs = evals[0].get("pvs") or []
             if not pvs:
@@ -252,7 +253,8 @@ def build_from_stockfish(args: argparse.Namespace) -> None:
             proc.stdin.write("quit\n")
             proc.stdin.flush()
             proc.wait(timeout=2)
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("Graceful Stockfish shutdown failed; terminating", exc_info=True)
             proc.terminate()
 
     out_file = args.out_dir / f"shard_000.bin"

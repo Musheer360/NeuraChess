@@ -20,15 +20,15 @@ from pathlib import Path
 import chess
 import chess.engine
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+from neurachess._paths import find_repo_root
 
-from core.board_tensor import board_to_tensor
-from models.npu_compiler import DEFAULT_CACHE_DIR, NPUModel, resolve_default_model_paths
-from search.npu_batched_puct import NPUBatchedPUCTSearch
-from search.ponder_manager import PonderManager
-from uci.engine_uci import UCIEngine
+ROOT_DIR = find_repo_root()
+
+from neurachess.core.board_tensor import board_to_tensor
+from neurachess.models.npu_compiler import DEFAULT_CACHE_DIR, NPUModel, resolve_default_model_paths
+from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch
+from neurachess.search.ponder_manager import PonderManager
+from neurachess.uci.engine_uci import UCIEngine
 
 OPENINGS_50 = [
     ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6"],

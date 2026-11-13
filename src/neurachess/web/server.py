@@ -7,20 +7,23 @@ import os
 import sys
 import time
 import asyncio
+import logging
 import chess
 import subprocess
+
+logger = logging.getLogger(__name__)
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
-pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if pkg_root not in sys.path:
-    sys.path.insert(0, pkg_root)
+from neurachess._paths import find_repo_root
 
-from core.board_tensor import board_to_tensor
-from search.npu_batched_puct import NPUBatchedPUCTSearch
-from core.tensor_movegen import action_to_move
+pkg_root = str(find_repo_root())
+
+from neurachess.core.board_tensor import board_to_tensor
+from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch
+from neurachess.core.tensor_movegen import action_to_move
 
 app = FastAPI(title="NeuraChess NPU Arena")
 
@@ -103,8 +106,8 @@ class MatchState:
         try:
             self.cpu_usage_pct = psutil.cpu_percent(interval=None)
             self.ram_usage_pct = psutil.virtual_memory().percent
-        except Exception:
-            pass
+        except (OSError, RuntimeError):
+            logger.debug("psutil CPU/RAM probe unavailable", exc_info=True)
 
         return {
             "fen": self.board.fen(),
@@ -143,7 +146,7 @@ async def broadcast_state():
     for ws in connected_websockets:
         try:
             await ws.send_json(state_data)
-        except Exception:
+        except (OSError, RuntimeError):
             to_remove.append(ws)
     for ws in to_remove:
         if ws in connected_websockets:
@@ -191,16 +194,16 @@ def get_stockfish_move(board: chess.Board, skill_level: int = 3, movetime_ms: in
                 try:
                     m_dist = int(parts[idx + 1])
                     side_to_move_score = 100.0 if m_dist > 0 else -100.0
-                except Exception:
-                    pass
+                except (ValueError, IndexError):
+                    logger.debug("Ignoring malformed Stockfish mate line: %r", line, exc_info=True)
         elif "score cp" in line:
             parts = line.split()
             if "cp" in parts:
                 idx = parts.index("cp")
                 try:
                     side_to_move_score = int(parts[idx + 1]) / 100.0
-                except Exception:
-                    pass
+                except (ValueError, IndexError):
+                    logger.debug("Ignoring malformed Stockfish cp line: %r", line, exc_info=True)
         if line.startswith("bestmove"):
             parts = line.split()
             if len(parts) >= 2:

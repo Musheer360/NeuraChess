@@ -7,15 +7,20 @@ persistent compiled-blob caching, LATENCY/THROUGHPUT execution hints, and thread
 `InferRequest` cloning.
 """
 
+import logging
 import time
 from pathlib import Path
 import numpy as np
 import openvino as ov
 
+logger = logging.getLogger(__name__)
+
 from .resnet_backbone import build_openvino_resnet
 from .se_resnet_backbone import build_openvino_se_resnet
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+from neurachess._paths import find_repo_root
+
+ROOT_DIR = find_repo_root()
 WEIGHTS_DIR = ROOT_DIR / "weights"
 DEFAULT_CACHE_DIR = str(WEIGHTS_DIR / "cache")
 DEFAULT_MODEL_XML = str(WEIGHTS_DIR / "neurachess-10x192-fp16.xml")
@@ -130,8 +135,8 @@ class NPUModel:
         if self.device == "NPU":
             try:
                 self.core.set_property(self.device, {"NPU_TURBO": bool(self.use_turbo)})
-            except Exception:
-                pass
+            except (RuntimeError, ValueError):
+                logger.debug("NPU_TURBO property not accepted by OpenVINO device; continuing without override", exc_info=True)
         self.core.set_property(self.device, {"INFERENCE_PRECISION_HINT": ov.Type.f16})
 
         if ov_model_override is not None:

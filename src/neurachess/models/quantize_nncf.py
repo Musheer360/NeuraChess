@@ -15,12 +15,12 @@ import numpy as np
 import openvino as ov
 import nncf
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+from neurachess._paths import find_repo_root
 
-from models.npu_compiler import DEFAULT_WEIGHTS_NPZ, infer_arch_from_npz
-from models.se_resnet_backbone import build_openvino_se_resnet
+ROOT_DIR = find_repo_root()
+
+from neurachess.models.npu_compiler import DEFAULT_WEIGHTS_NPZ, infer_arch_from_npz
+from neurachess.models.se_resnet_backbone import build_openvino_se_resnet
 
 
 def quantize_se_resnet(
@@ -52,8 +52,8 @@ def quantize_se_resnet(
 
     calibration_batches: list[np.ndarray] = []
     if calibration_data_path and Path(calibration_data_path).is_file():
-        from training.bitboard_dataset import unpack_position
-        from core.board_tensor import board_to_tensor
+        from neurachess.training.bitboard_dataset import unpack_position
+        from neurachess.core.board_tensor import board_to_tensor
 
         raw = Path(calibration_data_path).read_bytes()
         rec_size = 107 if len(raw) % 107 == 0 and len(raw) % 691 != 0 else 691

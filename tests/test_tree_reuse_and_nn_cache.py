@@ -21,14 +21,10 @@ import unittest
 import chess
 import numpy as np
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from core.constants import TOTAL_ACTIONS, NUM_PLANES, uci_to_action, move_to_action
-from core.board_tensor import board_to_tensor
-from search.candidate_selector import select_top_candidates
-from search.npu_batched_puct import CanonicalNNCache, TreeNode, NPUBatchedPUCTSearch
+from neurachess.core.constants import TOTAL_ACTIONS, NUM_PLANES, uci_to_action, move_to_action
+from neurachess.core.board_tensor import board_to_tensor
+from neurachess.search.candidate_selector import select_top_candidates
+from neurachess.search.npu_batched_puct import CanonicalNNCache, TreeNode, NPUBatchedPUCTSearch
 
 
 class DeterministicMockModel:

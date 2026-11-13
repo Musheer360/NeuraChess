@@ -12,7 +12,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+from neurachess._paths import find_repo_root
+
+ROOT_DIR = find_repo_root()
 DEFAULT_WEIGHTS_DIR = ROOT_DIR / "weights"
 
 MODEL_ASSETS = {

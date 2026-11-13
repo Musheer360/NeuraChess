@@ -18,14 +18,10 @@ import unittest
 import chess
 import numpy as np
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from core.constants import TOTAL_ACTIONS, uci_to_action, move_to_action
-from core.board_tensor import board_to_tensor
-from search.npu_batched_puct import NPUBatchedPUCTSearch, TreeNode
-from search.ponder_manager import PonderManager
+from neurachess.core.constants import TOTAL_ACTIONS, uci_to_action, move_to_action
+from neurachess.core.board_tensor import board_to_tensor
+from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch, TreeNode
+from neurachess.search.ponder_manager import PonderManager
 from tests.test_tree_reuse_and_nn_cache import DeterministicMockModel
 
 

@@ -17,19 +17,15 @@ from unittest import mock
 
 import chess
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from core.constants import move_to_action
-from engine.fast_tree import (
+from neurachess.core.constants import move_to_action
+from neurachess.engine.fast_tree import (
     c_perft,
     ensure_compiled,
     get_lib,
     pack_move,
     unpack_move,
 )
-import engine.fast_tree as fast_tree_mod
+import neurachess.engine.fast_tree as fast_tree_mod
 
 
 CANONICAL_CPW_PERFT = [

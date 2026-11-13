@@ -12,20 +12,25 @@ Features:
 import os
 import json
 import time
+import shutil
+import logging
 import subprocess
 import random
 import numpy as np
 import chess
-import torch
-from torch.utils.data import Dataset
 
 try:
-    from ..core.constants import TOTAL_ACTIONS, uci_to_action
-    from ..core.board_tensor import board_to_tensor
+    import torch
+    from torch.utils.data import Dataset as _TorchDataset
 except ImportError:
-    from core.constants import TOTAL_ACTIONS, uci_to_action
-    from core.board_tensor import board_to_tensor
-import shutil
+    torch = None  # type: ignore[assignment]
+    _TorchDataset = object
+
+from neurachess._paths import find_repo_root
+from neurachess.core.constants import TOTAL_ACTIONS, uci_to_action
+from neurachess.core.board_tensor import board_to_tensor
+
+logger = logging.getLogger(__name__)
 
 def _resolve_stockfish() -> str:
     env_p = os.environ.get("STOCKFISH_PATH")
@@ -34,7 +39,7 @@ def _resolve_stockfish() -> str:
     which_p = shutil.which("stockfish")
     if which_p:
         return which_p
-    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pkg_root = str(find_repo_root())
     for cand in (
         os.path.join(pkg_root, "bin", "stockfish", "stockfish-windows-x86-64-universal.exe"),
         os.path.join(pkg_root, "bin", "stockfish", "stockfish"),
@@ -69,12 +74,14 @@ def cp_to_wdl(score_cp: int, is_mate: bool = False, mate_dist: int = 0) -> np.nd
     return np.array([p_win / total, p_draw / total, p_loss / total], dtype=np.float32)
 
 
-class BinaryChessDataset(Dataset):
+class BinaryChessDataset(_TorchDataset):
     """
     High-Throughput Memory-Mapped Dataset.
     Streams positions directly from disk without loading dataset into system RAM.
     """
     def __init__(self, data_dir: str):
+        if torch is None:
+            raise ImportError("PyTorch is required for BinaryChessDataset (install `neurachess[train]`).")
         self.data_dir = data_dir
         meta_path = os.path.join(data_dir, "metadata.json")
         with open(meta_path, "r") as f:
@@ -123,7 +130,7 @@ def generate_binary_dataset(
     Generates tactical binary dataset annotated with Stockfish 19.
     """
     if out_dir is None:
-        pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        pkg_root = str(find_repo_root())
         out_dir = os.path.join(pkg_root, "data", f"binary_dataset_{num_positions}")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -189,8 +196,8 @@ def generate_binary_dataset(
                     idx = parts.index("cp")
                     try:
                         score_cp = int(parts[idx + 1])
-                    except Exception:
-                        pass
+                    except (ValueError, IndexError):
+                        logger.debug("Ignoring malformed Stockfish cp token in %r", line, exc_info=True)
             elif "score mate" in line:
                 parts = line.split()
                 if "mate" in parts:
@@ -198,8 +205,8 @@ def generate_binary_dataset(
                     try:
                         mate_dist = int(parts[idx + 1])
                         is_mate = True
-                    except Exception:
-                        pass
+                    except (ValueError, IndexError):
+                        logger.debug("Ignoring malformed Stockfish mate token in %r", line, exc_info=True)
             if line.startswith("bestmove"):
                 parts = line.split()
                 if len(parts) >= 2:

@@ -14,9 +14,14 @@ import os
 import sys
 import json
 import time
+import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+logger = logging.getLogger(__name__)
+
+from neurachess._paths import find_repo_root
+
+ROOT_DIR = str(find_repo_root())
 PONDER_JSON_PATH = os.path.join(ROOT_DIR, "eval_results", "ponder_ab.json")
 LADDER_JSON_PATH = os.path.join(ROOT_DIR, "eval_results", "stockfish_ladder.json")
 H2H_JSON_PATH = os.path.join(ROOT_DIR, "eval_results", "h2h_match.json")
@@ -571,8 +576,8 @@ def get_minimal_live_payload() -> dict:
                     score_str = f"{pts:.1f} / {cur_g}"
                     score_sub = f"{w}W - {d}D - {l}L ({lvl.get('score_pct', 0.0):.1f}%)"
                     break
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.debug("Optional ladder JSON telemetry probe failed", exc_info=True)
 
     # Check Stage 4.2 Ponder A/B
     if fallback_game is None and os.path.exists(PONDER_JSON_PATH):
@@ -597,8 +602,8 @@ def get_minimal_live_payload() -> dict:
                 pts = pon.get('points', 0.0)
                 score_str = f"{pts:.1f} / {cur_g}"
                 score_sub = f"{w}W - {d}D - {l}L ({pon.get('score_pct', 0.0):.1f}%)"
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.debug("Optional ponder JSON telemetry probe failed", exc_info=True)
 
     # Check H2H Match
     if fallback_game is None and os.path.exists(H2H_JSON_PATH):
@@ -615,8 +620,8 @@ def get_minimal_live_payload() -> dict:
                 w, d, l = s192.get('wins', 0), s192.get('draws', 0), s192.get('losses', 0)
                 score_str = f"{s192.get('points', 54.5):.1f} / 100"
                 score_sub = f"{w}W - {d}D - {l}L ({s192.get('score_pct', 54.5):.1f}%)"
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            logger.debug("Optional H2H JSON telemetry probe failed", exc_info=True)
 
     # Player names
     white_name = "NeuraChess 10x192 (FP16)"

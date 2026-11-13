@@ -11,11 +11,9 @@ from contextlib import redirect_stdout
 import chess
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
 
-from scripts.match_runner import _select_engine_move
-from uci.engine_uci import UCIEngine
+from neurachess.scripts.match_runner import _select_engine_move
+from neurachess.uci.engine_uci import UCIEngine
 
 
 class _RecordingSearchEngine:

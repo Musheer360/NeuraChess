@@ -6,22 +6,22 @@ Exports PyTorch SE-ResNet checkpoints (`.pt`) or pre-folded `.npz` weights to Op
 and batch throughput on the target OpenVINO device.
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import openvino as ov
-import torch
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+if TYPE_CHECKING:
+    import torch
 
-from models.npu_compiler import infer_arch_from_npz
-from models.pytorch_se_resnet import ChessSEResNet
-from models.se_resnet_backbone import build_openvino_se_resnet
+from neurachess.models.npu_compiler import infer_arch_from_npz
+from neurachess.models.se_resnet_backbone import build_openvino_se_resnet
 
 
 def verify_ir_parity(
@@ -50,6 +50,8 @@ def verify_ir_parity(
     metrics = {"device": device, "batch_size": batch_size}
 
     if pt_model is not None:
+        import torch
+
         pt_model.eval()
         with torch.no_grad():
             pol_pt, val_pt = pt_model(torch.from_numpy(sample))
@@ -87,6 +89,9 @@ def main() -> None:
 
     pt_model = None
     if args.pt is not None:
+        import torch
+        from neurachess.models.pytorch_se_resnet import ChessSEResNet
+
         ckpt = torch.load(args.pt, map_location="cpu", weights_only=False)
         sd = ckpt.get("ema_09999", ckpt.get("ema_09995", ckpt.get("model_state_dict", ckpt)))
         pt_model = ChessSEResNet(

@@ -17,13 +17,9 @@ import unittest
 import numpy as np
 import chess
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from core.board_tensor import board_to_tensor
-from core.constants import uci_to_action
-from search.npu_batched_puct import TreeNode, NPUBatchedPUCTSearch
+from neurachess.core.board_tensor import board_to_tensor
+from neurachess.core.constants import uci_to_action
+from neurachess.search.npu_batched_puct import TreeNode, NPUBatchedPUCTSearch
 
 
 class DummyModel:

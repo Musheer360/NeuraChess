@@ -21,12 +21,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+from neurachess._paths import find_repo_root
 
-from models.pytorch_se_resnet import ChessSEResNet
-from training.bitboard_dataset import RECORD_SIZE_V1, RECORD_SIZE_V2, unpack_position
+ROOT_DIR = find_repo_root()
+
+from neurachess.models.pytorch_se_resnet import ChessSEResNet
+from neurachess.training.bitboard_dataset import RECORD_SIZE_V1, RECORD_SIZE_V2, unpack_position
 
 _DEVICE_CONST_CACHE: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 _EVAL_CACHE: dict[tuple[str, int], tuple[np.ndarray, np.ndarray, int, int]] = {}
@@ -219,7 +219,7 @@ def _get_cached_eval_data(test_path: Path, max_eval: int):
     if key in _EVAL_CACHE:
         return _EVAL_CACHE[key]
 
-    from core.tensor_movegen import get_legal_action_mask
+    from neurachess.core.tensor_movegen import get_legal_action_mask
 
     f_size = test_path.stat().st_size
     rec_size = RECORD_SIZE_V2 if (f_size % RECORD_SIZE_V2 == 0 and f_size % RECORD_SIZE_V1 != 0) else RECORD_SIZE_V1

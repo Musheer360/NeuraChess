@@ -6,11 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from scripts.match_runner import compute_pentanomial_sprt_llr, elo_to_score
+from neurachess.scripts.match_runner import compute_pentanomial_sprt_llr, elo_to_score
 
 
 def _pentanomial_probs(true_elo: float, draw_rate: float = 0.40) -> tuple[np.ndarray, float]:

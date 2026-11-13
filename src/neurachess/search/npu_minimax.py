@@ -9,14 +9,10 @@ import sys
 import numpy as np
 import chess
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from core.constants import action_to_uci
-from core.tensor_movegen import get_legal_action_mask
-from core.tensor_transitions import apply_tensor_transition
-from models.npu_compiler import NPUModel
+from neurachess.core.constants import action_to_uci
+from neurachess.core.tensor_movegen import get_legal_action_mask
+from neurachess.core.tensor_transitions import apply_tensor_transition
+from neurachess.models.npu_compiler import NPUModel
 
 
 class NPUMinimaxSearch:

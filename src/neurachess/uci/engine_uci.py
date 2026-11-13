@@ -7,23 +7,24 @@ Supports pondering (`Ponder`, `bestmove X ponder Y`, `go ponder`, `ponderhit`, `
 """
 
 import json
+import logging
 import random
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+from neurachess._paths import find_repo_root
 
+logger = logging.getLogger(__name__)
+ROOT_DIR = find_repo_root()
 DEFAULT_OPENING_BOOK_PATH = ROOT_DIR / "assets" / "opening_book.json"
 
 import chess
 
-from core.board_tensor import board_to_tensor
-from core.constants import value_to_centipawns
-from models.npu_compiler import DEFAULT_CACHE_DIR, NPUModel, resolve_default_model_paths
-from search.npu_batched_puct import NPUBatchedPUCTSearch
-from search.ponder_manager import PonderManager
+from neurachess.core.board_tensor import board_to_tensor
+from neurachess.core.constants import value_to_centipawns
+from neurachess.models.npu_compiler import DEFAULT_CACHE_DIR, NPUModel, resolve_default_model_paths
+from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch
+from neurachess.search.ponder_manager import PonderManager
 
 
 class UCIEngine:
@@ -57,6 +58,7 @@ class UCIEngine:
             positions = payload.get("positions", {}) if isinstance(payload, dict) else {}
             self._opening_book = positions if isinstance(positions, dict) else {}
         except (OSError, json.JSONDecodeError, ValueError):
+            logger.debug("Failed loading opening book from %s", self.book_path, exc_info=True)
             self._opening_book = {}
         return self._opening_book
 
@@ -222,7 +224,8 @@ class UCIEngine:
                     break
 
             except Exception as e:
-                print(f"info string error: {e}", file=sys.stderr)
+                logger.debug("UCI command handling exception", exc_info=True)
+                print(f"info string error: {e}", file=sys.stderr, flush=True)
                 sys.stdout.flush()
 
     def handle_position(self, args: list[str]):
@@ -271,7 +274,7 @@ class UCIEngine:
                 try:
                     params[tok] = int(args[i + 1])
                 except ValueError:
-                    pass
+                    logger.debug("Ignoring invalid integer UCI go value for %s: %r", tok, args[i + 1], exc_info=True)
                 i += 2
                 continue
             i += 1
@@ -371,6 +374,9 @@ class UCIEngine:
 
 
 def main():
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        print("NeuraChess UCI engine (`python -m neurachess.uci` or `neurachess-uci`). Reads UCI commands from stdin.")
+        return
     engine = UCIEngine()
     engine.run()
 

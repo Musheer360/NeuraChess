@@ -10,19 +10,22 @@ import os
 import unittest
 import chess
 import numpy as np
-import torch
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+try:
+    import torch
+except ImportError:
+    torch = None
 
-from core.constants import move_to_action
-from core.board_tensor import (
+from neurachess.core.constants import move_to_action
+from neurachess.core.board_tensor import (
     board_to_tensor,
     ENCODER_LAYOUT_LEGACY_FLIP,
     ENCODER_LAYOUT_GPU_UNPACK,
 )
-from models.pytorch_se_resnet import ChessSEResNet
+if torch is not None:
+    from neurachess.models.pytorch_se_resnet import ChessSEResNet
+else:
+    ChessSEResNet = None
 
 
 class TestMirrorSymmetry(unittest.TestCase):
@@ -64,6 +67,7 @@ class TestMirrorSymmetry(unittest.TestCase):
 
         print("  [PASS] test_mirror_move_action_identity")
 
+    @unittest.skipIf(torch is None, "PyTorch not installed")
     def test_engine_inference_mirror_symmetry_legacy_flip(self):
         """Tests that a model evaluated on P and P.mirror() produces identical legal policy distribution and value."""
         torch.manual_seed(42)
@@ -103,8 +107,4 @@ class TestMirrorSymmetry(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    t = TestMirrorSymmetry()
-    t.test_mirror_tensor_identity_legacy_flip()
-    t.test_mirror_move_action_identity()
-    t.test_engine_inference_mirror_symmetry_legacy_flip()
-    print("\nALL 3 MIRROR SYMMETRY UNIT TESTS PASSED!")
+    unittest.main()

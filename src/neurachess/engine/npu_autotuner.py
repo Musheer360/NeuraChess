@@ -22,16 +22,19 @@ import sys
 import time
 import json
 import hashlib
+import logging
 import argparse
 import numpy as np
 import openvino as ov
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
+logger = logging.getLogger(__name__)
 
-from models.se_resnet_backbone import build_openvino_se_resnet
-from models.resnet_backbone import build_openvino_resnet
+from neurachess._paths import find_repo_root
+
+ROOT_DIR = find_repo_root()
+
+from neurachess.models.se_resnet_backbone import build_openvino_se_resnet
+from neurachess.models.resnet_backbone import build_openvino_resnet
 
 DEFAULT_PROFILE_CACHE_PATH = os.path.join(ROOT_DIR, "weights", "npu_profile_cache.json")
 DEFAULT_OV_BLOB_CACHE_DIR = os.path.join(ROOT_DIR, "weights", "cache")
@@ -84,7 +87,8 @@ def query_npu_capabilities(core: ov.Core | None = None, device: str = "NPU") -> 
 
     try:
         supported = list(core.get_property(device, "SUPPORTED_PROPERTIES"))
-    except Exception:
+    except (RuntimeError, ValueError, TypeError):
+        logger.debug("Querying SUPPORTED_PROPERTIES for %s failed", device, exc_info=True)
         supported = []
 
     def _safe_prop(prop_name: str, default=None):
@@ -92,7 +96,8 @@ def query_npu_capabilities(core: ov.Core | None = None, device: str = "NPU") -> 
             return default
         try:
             return core.get_property(device, prop_name)
-        except Exception:
+        except (RuntimeError, ValueError, TypeError, KeyError):
+            logger.debug("Querying OpenVINO property %s failed", prop_name, exc_info=True)
             return default
 
     device_name = str(_safe_prop("FULL_DEVICE_NAME") or _safe_prop("DEVICE_NAME") or device)
@@ -105,7 +110,8 @@ def query_npu_capabilities(core: ov.Core | None = None, device: str = "NPU") -> 
     if supports_turbo:
         try:
             core.set_property(device, {"NPU_TURBO": True})
-        except Exception:
+        except (RuntimeError, ValueError):
+            logger.debug("Setting NPU_TURBO=True during capability probe failed", exc_info=True)
             supports_turbo = False
 
     return {
@@ -138,7 +144,8 @@ def load_cached_profile(
         profiles = data.get("profiles", {})
         key = _make_cache_key(device_name, driver_version, model_sha256)
         return profiles.get(key)
-    except Exception:
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        logger.debug("Failed reading NPU profile cache at %s", cache_path, exc_info=True)
         return None
 
 
@@ -151,8 +158,8 @@ def save_cached_profile(profile: dict, cache_path: str = DEFAULT_PROFILE_CACHE_P
                 loaded = json.load(f)
                 if isinstance(loaded, dict) and "profiles" in loaded:
                     data = loaded
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, TypeError):
+            logger.debug("Starting fresh NPU profile cache; existing %s unreadable", cache_path, exc_info=True)
 
     key = _make_cache_key(
         profile["key"]["device_name"],
@@ -238,8 +245,8 @@ def _benchmark_single_config(
         for r in reqs:
             try:
                 r.wait()
-            except Exception:
-                pass
+            except RuntimeError:
+                logger.debug("Async InferRequest wait during drain raised RuntimeError", exc_info=True)
 
         elapsed = max(1e-6, time.perf_counter() - t_start)
         seq_ms = float(np.median(turnaround_ms))
@@ -340,8 +347,8 @@ def autotune_npu(
         if caps["supports_npu_turbo"]:
             try:
                 core.set_property(device, {"NPU_TURBO": bool(turbo_val)})
-            except Exception:
-                pass
+            except (RuntimeError, ValueError):
+                logger.debug("Setting NPU_TURBO=%s skipped", turbo_val, exc_info=True)
 
         for b_sz in batch_sizes:
             if use_se:
@@ -365,7 +372,8 @@ def autotune_npu(
             comp_ms = (time.perf_counter() - t_comp0) * 1000.0
             try:
                 compiled_opt_nireq = int(compiled.get_property("OPTIMAL_NUMBER_OF_INFER_REQUESTS"))
-            except Exception:
+            except (RuntimeError, ValueError, TypeError):
+                logger.debug("Compiled model OPTIMAL_NUMBER_OF_INFER_REQUESTS query unavailable", exc_info=True)
                 compiled_opt_nireq = caps["optimal_number_of_infer_requests"]
 
             for nireq in nireq_values:

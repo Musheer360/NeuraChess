@@ -8,32 +8,38 @@ Subcommands:
   - `loss-anatomy`: First-blunder game analysis via fixed-depth Stockfish + policy prior rank.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 import chess
 import numpy as np
 import openvino as ov
-import torch
-import torch.nn.functional as F
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+if TYPE_CHECKING:
+    import torch
 
-from core.board_tensor import board_to_tensor
-from core.constants import action_to_uci, uci_to_action
-from core.tensor_movegen import get_legal_action_mask
-from models.npu_compiler import NPUModel, resolve_default_model_paths
-from models.pytorch_se_resnet import ChessSEResNet
-from search.npu_batched_puct import NPUBatchedPUCTSearch
-from training.bitboard_dataset import RECORD_SIZE_V1, unpack_position
+from neurachess._paths import find_repo_root
+
+ROOT_DIR = find_repo_root()
+
+from neurachess.core.board_tensor import board_to_tensor
+from neurachess.core.constants import action_to_uci, uci_to_action
+from neurachess.core.tensor_movegen import get_legal_action_mask
+from neurachess.models.npu_compiler import NPUModel, resolve_default_model_paths
+from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch
+from neurachess.training.bitboard_dataset import RECORD_SIZE_V1, unpack_position
 
 PIECE_VALUES = {
     chess.PAWN: 1,
@@ -126,18 +132,18 @@ class StockfishAnalyzer:
         try:
             self._send("quit")
             self.proc.wait(timeout=2)
-        except Exception:
+        except (OSError, subprocess.SubprocessError, BrokenPipeError, ValueError):
             try:
                 self.proc.terminate()
                 self.proc.wait(timeout=2)
-            except Exception:
-                pass
+            except (OSError, subprocess.SubprocessError):
+                logger.debug("Stockfish process termination fallback wait failed", exc_info=True)
         for stream in (self.proc.stdin, self.proc.stdout):
             try:
                 if stream is not None:
                     stream.close()
-            except Exception:
-                pass
+            except (OSError, ValueError):
+                logger.debug("Stockfish stream close failed", exc_info=True)
 
 
 def eval_stm_to_nc_drop(eval_stm_before_cp: int, eval_stm_after_cp: int) -> tuple[int, int, int]:
@@ -174,6 +180,8 @@ def verify_perspective_sanity(sf: StockfishAnalyzer, depth: int = 14) -> dict[st
 
 
 def unpack_raw_to_gpu_inputs(raw_bytes: bytes, num_records: int) -> torch.Tensor:
+    import torch
+
     raw_arr = np.frombuffer(raw_bytes[: num_records * RECORD_SIZE_V1], dtype=np.uint8).reshape(num_records, RECORD_SIZE_V1)
     bbs = torch.from_numpy(raw_arr[:, :96].copy().view(np.int64))
     shifts = torch.arange(64, dtype=torch.int64)
@@ -189,6 +197,8 @@ def unpack_raw_to_gpu_inputs(raw_bytes: bytes, num_records: int) -> torch.Tensor
 
 
 def load_bitboard_eval_dataset(bin_path: Path, max_records: int = 50000, cache_dir: Path | None = None) -> dict:
+    import torch
+
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = cache_dir / f"{bin_path.stem}_{max_records}.pt"
@@ -212,8 +222,8 @@ def load_bitboard_eval_dataset(bin_path: Path, max_records: int = 50000, cache_d
                 m = b.parse_uci(action_to_uci(act, canonical_flip=is_black))
                 if m in b.legal_moves:
                     act = uci_to_action(m.uci(), canonical_flip=is_black)
-            except Exception:
-                pass
+            except (ValueError, KeyError, IndexError):
+                logger.debug("Action fallback remapping skipped for action index %s", act, exc_info=True)
         canonical_tensors.append(board_to_tensor(b, layout="legacy_flip"))
         masks.append(mask)
         acts.append(act)
@@ -240,8 +250,13 @@ def evaluate_model_on_data(
     ds: dict,
     input_repr: str = "gpu_unpack",
     batch_size: int = 512,
-    device: torch.device = torch.device("cpu"),
+    device: torch.device | None = None,
 ) -> dict:
+    import torch
+    import torch.nn.functional as F
+
+    if device is None:
+        device = torch.device("cpu")
     model.eval()
     inputs_all = ds["canonical_inputs"] if input_repr == "canonical" else ds["gpu_inputs"]
     n = ds["count"]
@@ -297,6 +312,9 @@ def evaluate_model_on_data(
 
 
 def _load_torch_model_from_pt_or_npz(weights_path: Path, blocks: int, channels: int, use_bn: bool, device: torch.device) -> torch.nn.Module:
+    import torch
+    from neurachess.models.pytorch_se_resnet import ChessSEResNet
+
     if weights_path.suffix == ".npz":
         raise ValueError("Offline PyTorch dataset evaluation requires a .pt checkpoint; pass .xml/.npz for OpenVINO evaluation.")
     ckpt = torch.load(weights_path, map_location=device, weights_only=False)
@@ -362,6 +380,8 @@ def evaluate_puzzle_suite(
 
 
 def cmd_dataset(args: argparse.Namespace) -> None:
+    import torch
+
     device = torch.device(args.device)
     model = _load_torch_model_from_pt_or_npz(args.checkpoint, args.blocks, args.channels, not args.no_bn, device)
     cache_dir = ROOT_DIR / "eval_results" / "cache" if args.use_cache else None

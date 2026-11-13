@@ -11,24 +11,20 @@ Implements mathematically sound batched tree search on Intel AI Boost NPU:
   - Multi-worker cloning: Up to 32 concurrent games saturate the Intel NPU.
 """
 
+import logging
 import time
 import math
 from collections import OrderedDict
 import numpy as np
 import chess
 
-try:
-    from ..core.constants import TOTAL_ACTIONS, NUM_PLANES, uci_to_action, action_to_uci, move_to_action
-    from ..core.board_tensor import board_to_tensor
-    from ..core.tensor_transitions import apply_tensor_transition
-    from ..models.npu_compiler import NPUModel
-    from .candidate_selector import select_top_candidates, select_opening_guarded_root_act, PIECE_VALUES
-except (ImportError, ValueError):
-    from core.constants import TOTAL_ACTIONS, NUM_PLANES, uci_to_action, action_to_uci, move_to_action
-    from core.board_tensor import board_to_tensor
-    from core.tensor_transitions import apply_tensor_transition
-    from models.npu_compiler import NPUModel
-    from search.candidate_selector import select_top_candidates, select_opening_guarded_root_act, PIECE_VALUES
+logger = logging.getLogger(__name__)
+
+from neurachess.core.constants import TOTAL_ACTIONS, NUM_PLANES, uci_to_action, action_to_uci, move_to_action
+from neurachess.core.board_tensor import board_to_tensor
+from neurachess.core.tensor_transitions import apply_tensor_transition
+from neurachess.models.npu_compiler import NPUModel
+from neurachess.search.candidate_selector import select_top_candidates, select_opening_guarded_root_act, PIECE_VALUES
 
 
 class CanonicalNNCache:
@@ -347,7 +343,7 @@ class NPUBatchedPUCTSearch:
         self.last_root_visits: dict[int, int] = {}
 
         if self.use_fast_tree:
-            from engine.fast_tree import FastTreeSearchBackend
+            from neurachess.engine.fast_tree import FastTreeSearchBackend
 
             self._fast_backend = FastTreeSearchBackend(
                 batch_size=self.batch_size,
@@ -376,8 +372,8 @@ class NPUBatchedPUCTSearch:
         if not hasattr(self.batch_model, "infer_request_async") and hasattr(self.batch_model, "compiled_model"):
             try:
                 self.batch_model.infer_request_async = self.batch_model.compiled_model.create_infer_request()
-            except Exception:
-                pass
+            except (RuntimeError, AttributeError):
+                logger.debug("Async OpenVINO InferRequest creation skipped; using sync request", exc_info=True)
 
     def clear_state(self):
         """Resets saved search tree, NN transposition cache, and seen-key tracker between games."""

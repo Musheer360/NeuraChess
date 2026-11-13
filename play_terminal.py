@@ -8,12 +8,8 @@ import time
 from pathlib import Path
 import chess
 
-ROOT_DIR = Path(__file__).resolve().parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from core.board_tensor import board_to_tensor
-from search.npu_batched_puct import NPUBatchedPUCTSearch
+from neurachess.core.board_tensor import board_to_tensor
+from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch
 
 UNICODE_PIECES = {
     "R": "♖", "N": "♘", "B": "♗", "Q": "♕", "K": "♔", "P": "♙",
@@ -67,7 +63,7 @@ def main():
                         board.push(move)
                         break
                     print("Illegal move! Legal moves:", [m.uci() for m in board.legal_moves])
-                except Exception:
+                except ValueError:
                     print("Invalid move format! Use standard UCI (e.g. e2e4, g1f3).")
             print_board(board)
         else:

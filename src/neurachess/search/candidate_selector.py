@@ -12,10 +12,7 @@ Selects candidate moves for tree expansion:
 
 import chess
 import numpy as np
-try:
-    from ..core.constants import TOTAL_ACTIONS, uci_to_action, move_to_action
-except (ImportError, ValueError):
-    from core.constants import TOTAL_ACTIONS, uci_to_action, move_to_action
+from neurachess.core.constants import TOTAL_ACTIONS, uci_to_action, move_to_action
 
 
 PIECE_VALUES = {

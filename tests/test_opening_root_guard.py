@@ -8,14 +8,10 @@ import unittest
 import chess
 import numpy as np
 
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from core.constants import TOTAL_ACTIONS, uci_to_action
-from engine.fast_tree import pack_move
-from search.candidate_selector import select_opening_guarded_root_act
-from search.npu_batched_puct import NPUBatchedPUCTSearch
+from neurachess.core.constants import TOTAL_ACTIONS, uci_to_action
+from neurachess.engine.fast_tree import pack_move
+from neurachess.search.candidate_selector import select_opening_guarded_root_act
+from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch
 
 
 class GuardTestMockModel:

@@ -23,7 +23,9 @@ from pathlib import Path
 import chess
 import chess.pgn
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
+from neurachess._paths import find_repo_root
+
+ROOT_DIR = find_repo_root()
 DEFAULT_OUT_PATH = ROOT_DIR / "assets" / "opening_book.json"
 LICHESS_OPENINGS_BASE = "https://raw.githubusercontent.com/lichess-org/chess-openings/master"
 TSV_FILES = ("a.tsv", "b.tsv", "c.tsv", "d.tsv", "e.tsv")

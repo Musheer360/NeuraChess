@@ -7,16 +7,20 @@ from pathlib import Path
 
 import numpy as np
 import openvino as ov
-import torch
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+try:
+    import torch
+except ImportError:
+    torch = None
 
-from models.pytorch_se_resnet import ChessSEResNet
-from models.se_resnet_backbone import build_openvino_se_resnet
+if torch is not None:
+    from neurachess.models.pytorch_se_resnet import ChessSEResNet
+else:
+    ChessSEResNet = None
+from neurachess.models.se_resnet_backbone import build_openvino_se_resnet
 
 
+@unittest.skipIf(torch is None, "PyTorch not installed")
 class TestBNFoldParity(unittest.TestCase):
     def test_bn_folded_npz_matches_openvino_cpu(self) -> None:
         torch.manual_seed(123)

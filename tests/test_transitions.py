@@ -7,13 +7,9 @@ from pathlib import Path
 import chess
 import numpy as np
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from core.board_tensor import board_to_tensor
-from core.constants import uci_to_action
-from core.tensor_transitions import apply_tensor_transition
+from neurachess.core.board_tensor import board_to_tensor
+from neurachess.core.constants import uci_to_action
+from neurachess.core.tensor_transitions import apply_tensor_transition
 
 
 class TestTransitions(unittest.TestCase):

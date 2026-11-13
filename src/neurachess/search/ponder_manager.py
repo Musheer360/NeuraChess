@@ -29,14 +29,9 @@ import threading
 import chess
 import numpy as np
 
-try:
-    from .npu_batched_puct import NPUBatchedPUCTSearch, TreeNode, CanonicalNNCache
-    from ..core.constants import uci_to_action, action_to_uci, move_to_action
-    from ..core.board_tensor import board_to_tensor
-except (ImportError, ValueError):
-    from search.npu_batched_puct import NPUBatchedPUCTSearch, TreeNode, CanonicalNNCache
-    from core.constants import uci_to_action, action_to_uci, move_to_action
-    from core.board_tensor import board_to_tensor
+from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch, TreeNode, CanonicalNNCache
+from neurachess.core.constants import uci_to_action, action_to_uci, move_to_action
+from neurachess.core.board_tensor import board_to_tensor
 
 
 class PonderManager:
@@ -169,7 +164,7 @@ class PonderManager:
 
             root_ch = fb._get_children_snapshot(0)
             if root_ch:
-                from engine.fast_tree import pack_move
+                from neurachess.engine.fast_tree import pack_move
 
                 actual_mp = pack_move(actual_move)
                 sorted_ch = sorted(root_ch, key=lambda c: c["visits"], reverse=True)

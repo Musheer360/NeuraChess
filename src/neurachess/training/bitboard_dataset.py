@@ -148,7 +148,7 @@ def pack_position_v2(
         packed_mask = np.packbits(mask_bool).tobytes()
     else:
         # Generate mask if not provided
-        from core.tensor_movegen import get_legal_action_mask
+        from neurachess.core.tensor_movegen import get_legal_action_mask
         m = get_legal_action_mask(board)
         packed_mask = np.packbits(m > 0.5).tobytes()
         

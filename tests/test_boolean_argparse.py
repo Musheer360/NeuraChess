@@ -5,11 +5,14 @@ import sys
 import unittest
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore[assignment]
 
-from search.npu_batched_puct import NPUBatchedPUCTSearch
+from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
 class _DummyModel:
@@ -25,12 +28,11 @@ class _DummyModel:
 class TestBooleanArgparse(unittest.TestCase):
     def test_cli_entrypoints_help_exit_zero(self) -> None:
         cli_scripts = [
-            ROOT_DIR / "scripts" / "evaluate.py",
-            ROOT_DIR / "scripts" / "match_runner.py",
-            ROOT_DIR / "scripts" / "export_openvino.py",
-            ROOT_DIR / "scripts" / "download_weights.py",
-            ROOT_DIR / "training" / "train.py",
-            ROOT_DIR / "training" / "build_dataset.py",
+            ROOT_DIR / "src" / "neurachess" / "scripts" / "evaluate.py",
+            ROOT_DIR / "src" / "neurachess" / "scripts" / "match_runner.py",
+            ROOT_DIR / "src" / "neurachess" / "scripts" / "export_openvino.py",
+            ROOT_DIR / "src" / "neurachess" / "scripts" / "download_weights.py",
+            ROOT_DIR / "src" / "neurachess" / "training" / "build_dataset.py",
         ]
         for script_path in cli_scripts:
             proc = subprocess.run(
@@ -41,6 +43,28 @@ class TestBooleanArgparse(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(proc.returncode, 0, f"{script_path.name} --help failed:\n{proc.stderr}")
+
+        for mod_name in ("neurachess.scripts.evaluate", "neurachess.scripts.export_openvino", "neurachess.uci"):
+            proc = subprocess.run(
+                [sys.executable, "-m", mod_name, "--help"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, f"-m {mod_name} --help failed:\n{proc.stderr}")
+
+    @unittest.skipIf(torch is None, "PyTorch not installed")
+    def test_train_cli_help_exit_zero(self) -> None:
+        train_script = ROOT_DIR / "src" / "neurachess" / "training" / "train.py"
+        proc = subprocess.run(
+            [sys.executable, str(train_script), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, f"{train_script.name} --help failed:\n{proc.stderr}")
 
     def test_search_boolean_flags_do_not_coerce_truthy_strings(self) -> None:
         s = NPUBatchedPUCTSearch(
