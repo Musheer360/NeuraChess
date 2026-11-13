@@ -28,6 +28,7 @@ from core.board_tensor import board_to_tensor
 from models.npu_compiler import DEFAULT_CACHE_DIR, NPUModel, resolve_default_model_paths
 from search.npu_batched_puct import NPUBatchedPUCTSearch
 from search.ponder_manager import PonderManager
+from uci.engine_uci import UCIEngine
 
 OPENINGS_50 = [
     ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6"],
@@ -173,10 +174,32 @@ def _build_engine(xml_path: str | None, batch_size: int = 16, device: str = "NPU
     return NPUBatchedPUCTSearch(root_model=root_m, batch_model=batch_m, batch_size=batch_size, use_fast_tree=use_fast_tree, encoder_layout=encoder_layout)
 
 
+def _select_engine_move(
+    board: chess.Board,
+    searcher: NPUBatchedPUCTSearch,
+    movetime_ms: int,
+    book_driver: UCIEngine | None,
+) -> tuple[str, int, list[str], float]:
+    """Return `(uci, nodes, pv, elapsed_s)` from the CC0 opening book if enabled and present, else PUCT."""
+    if book_driver is not None:
+        book_uci, book_ponder = book_driver.lookup_book_move(board)
+        if book_uci is not None:
+            pv = [book_uci, book_ponder] if book_ponder else [book_uci]
+            return book_uci, 0, pv, 0.0
+    t0 = time.perf_counter()
+    _, best_uci, _, nodes, pv, _ = searcher.search(
+        board,
+        board_to_tensor(board, layout=searcher.encoder_layout),
+        movetime_ms=movetime_ms,
+    )
+    return best_uci, int(nodes), list(pv), time.perf_counter() - t0
+
+
 def run_stockfish_match(args: argparse.Namespace) -> dict:
     sf_bin = _resolve_sf(args.stockfish_path)
     searcher = _build_engine(str(args.xml) if args.xml else None, batch_size=args.batch_size, device=args.device, use_fast_tree=not args.python_tree)
     ponder = PonderManager(searcher, use_ponder=args.ponder)
+    book_driver = UCIEngine(own_book=True, book_seed=42) if getattr(args, "own_book", False) else None
 
     sf_opts = {"Threads": 1, "Hash": 16}
     if args.sf_elo is not None:
@@ -205,9 +228,8 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
 
                 while not board.is_game_over(claim_draw=True) and board.ply() < args.max_plies:
                     if board.turn == nc_color:
-                        t0 = time.perf_counter()
-                        _, best_uci, _, nodes, pv, _ = searcher.search(board, board_to_tensor(board, layout=searcher.encoder_layout), movetime_ms=args.movetime_ms)
-                        total_search_s += time.perf_counter() - t0
+                        best_uci, nodes, pv, dt = _select_engine_move(board, searcher, args.movetime_ms, book_driver)
+                        total_search_s += dt
                         total_nodes += nodes
                         mv = chess.Move.from_uci(best_uci)
                         board.push(mv)
@@ -263,6 +285,7 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
 def run_h2h_match(args: argparse.Namespace) -> dict:
     eng_a = _build_engine(str(args.xml_a), batch_size=args.batch_size, device=args.device)
     eng_b = _build_engine(str(args.xml_b), batch_size=args.batch_size, device=args.device)
+    book_driver = UCIEngine(own_book=True, book_seed=42) if getattr(args, "own_book", False) else None
 
     wins_a = draws = losses_a = 0
     pent = [0, 0, 0, 0, 0]
@@ -279,7 +302,7 @@ def run_h2h_match(args: argparse.Namespace) -> dict:
 
             while not board.is_game_over(claim_draw=True) and board.ply() < args.max_plies:
                 active = eng_a if board.turn == a_color else eng_b
-                _, best_uci, _, _, _, _ = active.search(board, board_to_tensor(board, layout=active.encoder_layout), movetime_ms=args.movetime_ms)
+                best_uci, _, _, _ = _select_engine_move(board, active, args.movetime_ms, book_driver)
                 board.push_uci(best_uci)
 
             outcome = board.outcome(claim_draw=True)
@@ -331,6 +354,7 @@ def main() -> None:
     p_sf.add_argument("--max-plies", type=int, default=220)
     p_sf.add_argument("--device", type=str, default="NPU")
     p_sf.add_argument("--ponder", action="store_true")
+    p_sf.add_argument("--own-book", action="store_true", help="Use bundled CC0 Lichess opening book up to ply 15")
     p_sf.add_argument("--python-tree", action="store_true")
     p_sf.add_argument("--output", type=Path, default=None)
 
@@ -342,6 +366,7 @@ def main() -> None:
     p_h2h.add_argument("--batch-size", type=int, default=16)
     p_h2h.add_argument("--max-plies", type=int, default=220)
     p_h2h.add_argument("--device", type=str, default="NPU")
+    p_h2h.add_argument("--own-book", action="store_true", help="Use bundled CC0 Lichess opening book up to ply 15")
     p_h2h.add_argument("--output", type=Path, default=None)
 
     args = parser.parse_args()

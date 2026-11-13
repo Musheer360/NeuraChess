@@ -6,12 +6,16 @@ Supports pondering (`Ponder`, `bestmove X ponder Y`, `go ponder`, `ponderhit`, `
 `EncoderLayout` selection (`gpu_unpack`, `legacy_flip`).
 """
 
+import json
+import random
 import sys
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+DEFAULT_OPENING_BOOK_PATH = ROOT_DIR / "assets" / "opening_book.json"
 
 import chess
 
@@ -23,14 +27,75 @@ from search.ponder_manager import PonderManager
 
 
 class UCIEngine:
-    def __init__(self, encoder_layout: str = "gpu_unpack"):
+    def __init__(
+        self,
+        encoder_layout: str = "gpu_unpack",
+        own_book: bool = True,
+        book_path: Path | str | None = None,
+        book_seed: int | None = None,
+    ):
         self.board = chess.Board()
         self.history: list[chess.Board] = []
         self.encoder_layout = encoder_layout
         self.use_ponder = False
+        self.own_book = bool(own_book)
+        self.book_path = Path(book_path) if book_path is not None else DEFAULT_OPENING_BOOK_PATH
+        self._book_rng = random.Random(book_seed)
+        self._opening_book: dict[str, list] | None = None
         self.search_engine: NPUBatchedPUCTSearch | None = None
         self.ponder_manager: PonderManager | None = None
         self._pending_ponder_telemetry: dict | None = None
+
+    def _load_opening_book(self) -> dict[str, list]:
+        if self._opening_book is not None:
+            return self._opening_book
+        if not self.book_path.exists():
+            self._opening_book = {}
+            return self._opening_book
+        try:
+            payload = json.loads(self.book_path.read_text(encoding="utf-8"))
+            positions = payload.get("positions", {}) if isinstance(payload, dict) else {}
+            self._opening_book = positions if isinstance(positions, dict) else {}
+        except (OSError, json.JSONDecodeError, ValueError):
+            self._opening_book = {}
+        return self._opening_book
+
+    def lookup_book_move(self, board: chess.Board) -> tuple[str | None, str | None]:
+        """Look up a verified-legal CC0 opening book move (and optional reply hint) for ply < 16."""
+        if not self.own_book or board.ply() >= 16:
+            return None, None
+        positions = self._load_opening_book()
+        if not positions:
+            return None, None
+        entries = positions.get(board.epd())
+        if not entries:
+            return None, None
+
+        legal_ucis = {m.uci() for m in board.legal_moves}
+        candidates: list[str] = []
+        weights: list[float] = []
+        for item in entries:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            uci, weight = str(item[0]), float(item[1])
+            if uci in legal_ucis and weight > 0.0:
+                candidates.append(uci)
+                weights.append(weight)
+        if not candidates:
+            return None, None
+
+        chosen = self._book_rng.choices(candidates, weights=weights, k=1)[0]
+        ponder_uci = None
+        if board.ply() + 1 < 16:
+            after = board.copy(stack=False)
+            after.push_uci(chosen)
+            reply_entries = positions.get(after.epd(), [])
+            after_legals = {m.uci() for m in after.legal_moves}
+            for item in reply_entries:
+                if isinstance(item, (list, tuple)) and len(item) >= 2 and str(item[0]) in after_legals:
+                    ponder_uci = str(item[0])
+                    break
+        return chosen, ponder_uci
 
     def ensure_engine(self):
         if self.search_engine is None:
@@ -102,6 +167,7 @@ class UCIEngine:
                     print("id author Musheer Alam")
                     print("option name Hash type spin default 64 min 1 max 1024")
                     print("option name Ponder type check default false")
+                    print("option name OwnBook type check default true")
                     print("option name EncoderLayout type combo default gpu_unpack var gpu_unpack var legacy_flip")
                     print("uciok")
                     sys.stdout.flush()
@@ -112,6 +178,9 @@ class UCIEngine:
                         self.use_ponder = (val == "true")
                         if self.ponder_manager:
                             self.ponder_manager.use_ponder = self.use_ponder
+                    elif "OwnBook" in line:
+                        val = tokens[-1].strip().lower()
+                        self.own_book = (val == "true")
                     elif "EncoderLayout" in line:
                         layout_val = tokens[-1].strip()
                         if layout_val in ("gpu_unpack", "legacy_flip"):
@@ -216,7 +285,11 @@ class UCIEngine:
         if consume_ponder:
             self._pending_ponder_telemetry = None
             if self.ponder_manager is not None and isinstance(getattr(self.ponder_manager, "last_telemetry", None), dict):
-                self.ponder_manager.last_telemetry = {**self.ponder_manager.last_telemetry, "ponder_hit": False}
+                self.ponder_manager.last_telemetry = {
+                    **self.ponder_manager.last_telemetry,
+                    "ponder_hit": False,
+                    "visits_retained": 0,
+                }
 
         if "movetime" in params:
             return max(1, params["movetime"])
@@ -229,9 +302,13 @@ class UCIEngine:
             movestogo = params.get("movestogo")
             if movestogo is not None and movestogo <= 0:
                 movestogo = None
-            time_for_move = min(remaining * 0.04 + inc * 0.8, remaining * 0.25)
-            if telemetry and telemetry.get("ponder_hit") and telemetry.get("visits_retained", 0) >= 800:
+            safety_ceiling = remaining * 0.25
+            time_for_move = min(remaining * 0.04 + inc * 0.8, safety_ceiling)
+            retained_visits = int(telemetry.get("visits_retained", 0) or 0) if isinstance(telemetry, dict) else 0
+            if telemetry and telemetry.get("ponder_hit") and retained_visits >= 800:
                 time_for_move *= 0.75
+            elif retained_visits < 100:
+                time_for_move = min(time_for_move * 1.30, safety_ceiling)
             if remaining <= 30:
                 return max(1, min(int(round(time_for_move)), remaining))
             return max(10, min(int(round(time_for_move)), remaining - 20))
@@ -239,6 +316,24 @@ class UCIEngine:
         return 600
 
     def handle_go(self, args: list[str]):
+        if "ponder" not in args and "searchmoves" not in args and self.own_book:
+            book_uci, book_ponder = self.lookup_book_move(self.board)
+            if book_uci is not None:
+                self.compute_move_time_ms(args, consume_ponder=True)
+                print("info string book move")
+                if book_ponder:
+                    print(f"bestmove {book_uci} ponder {book_ponder}")
+                else:
+                    print(f"bestmove {book_uci}")
+                sys.stdout.flush()
+                if self.use_ponder:
+                    self.ensure_engine()
+                    board_after = self.board.copy()
+                    board_after.push_uci(book_uci)
+                    expected = chess.Move.from_uci(book_ponder) if book_ponder else None
+                    self.ponder_manager.start_internal_ponder(board_after, expected_reply=expected)
+                return
+
         self.ensure_engine()
 
         movetime_ms = self.compute_move_time_ms(args, consume_ponder=True)
