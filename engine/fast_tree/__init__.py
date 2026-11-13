@@ -3,7 +3,8 @@ Compiled Zero-GIL C++23 PUCT Tree, 64B-Aligned SoA AVX2 Selector, P-Core Pinning
 Zero-Copy OpenVINO Staging Wrapper (engine/fast_tree/__init__.py)
 ==================================================================================
 Compiles `fast_tree.cpp` + `bitboard_chess.hpp` with Zig/Clang 22 C++23:
-  `-std=c++23 -O3 -ffast-math -march=native -flto -shared`
+  `-std=c++23 -O3 -ffast-math -fno-finite-math-only -march=native -shared`
+(or `-mcpu=x86_64_v3` when `NEURACHESS_ARCH=x86-64-v3`)
 and exposes `FastTreeSearchBackend` with:
   - 100% unpruned legal move expansion at root and all internal nodes
   - 64-byte cache-line aligned Struct-of-Arrays (`alignas(64)`) AVX2 selection
@@ -33,8 +34,49 @@ from search.candidate_selector import PIECE_VALUES, select_opening_guarded_root_
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _CPP_PATH = os.path.join(_THIS_DIR, "fast_tree.cpp")
 _HPP_PATH = os.path.join(_THIS_DIR, "bitboard_chess.hpp")
-_DLL_NAME = "fast_tree.dll" if os.name == "nt" else "libfast_tree.so"
-_DLL_PATH = os.path.join(_THIS_DIR, _DLL_NAME)
+def _resolve_compile_spec() -> tuple[str, str, list[str], str]:
+    import hashlib
+    import json
+
+    arch_env = os.environ.get("NEURACHESS_ARCH", "native").strip() or "native"
+    if arch_env in ("x86-64-v3", "x86_64_v3"):
+        arch_flag = "-mcpu=x86_64_v3"
+    elif arch_env == "native":
+        arch_flag = "-march=native"
+    else:
+        arch_flag = f"-mcpu={arch_env}"
+
+    flags = ["-std=c++23", "-O3", "-ffast-math", "-fno-finite-math-only", arch_flag]
+    sig_payload = json.dumps(
+        {
+            "arch_env": arch_env,
+            "flags": flags,
+            "platform": sys.platform,
+        },
+        sort_keys=True,
+    )
+    sig_hash = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()[:10]
+    safe_arch = "".join(c if (c.isalnum() or c in "-_") else "_" for c in arch_env)
+    ext = ".dll" if os.name == "nt" else ".so"
+    prefix = "fast_tree" if os.name == "nt" else "libfast_tree"
+    dll_path = os.path.join(_THIS_DIR, f"{prefix}_{safe_arch}_{sig_hash}{ext}")
+    stamp_path = f"{dll_path}.stamp"
+    cmd = [
+        sys.executable,
+        "-m",
+        "ziglang",
+        "c++",
+        *flags,
+        "-shared",
+        "-o",
+        dll_path,
+        _CPP_PATH,
+    ]
+    return dll_path, stamp_path, cmd, sig_payload
+
+
+_DLL_PATH, _STAMP_PATH, _, _ = _resolve_compile_spec()
+_DLL_NAME = os.path.basename(_DLL_PATH)
 
 _LIB = None
 _PINNED_THREADS: dict[int, dict] = {}
@@ -42,42 +84,39 @@ _PIN_LOCK = threading.Lock()
 
 
 def ensure_compiled(force: bool = False) -> str:
-    if not force and os.path.exists(_DLL_PATH):
-        dll_mtime = os.path.getmtime(_DLL_PATH)
-        src_mtimes = [
-            os.path.getmtime(p)
-            for p in (_CPP_PATH, _HPP_PATH)
-            if os.path.exists(p)
-        ]
-        if not src_mtimes or dll_mtime >= max(src_mtimes):
-            return _DLL_PATH
+    dll_path, stamp_path, cmd, sig_payload = _resolve_compile_spec()
+    src_mtimes = [
+        os.path.getmtime(p)
+        for p in (_CPP_PATH, _HPP_PATH)
+        if os.path.exists(p)
+    ]
+    max_src_mtime = max(src_mtimes) if src_mtimes else 0.0
+
+    if not force and os.path.exists(dll_path) and os.path.exists(stamp_path):
+        try:
+            with open(stamp_path, "r", encoding="utf-8") as sf:
+                recorded_sig = sf.read().strip()
+        except OSError:
+            recorded_sig = ""
+        dll_mtime = os.path.getmtime(dll_path)
+        if recorded_sig == sig_payload and (not src_mtimes or dll_mtime >= max_src_mtime):
+            return dll_path
 
     # Single-TU unity build (fast_tree.cpp includes bitboard_chess.hpp directly),
-    # giving Clang 22 full whole-module IPO/inlining at -O3 -march=native.
-    cmd = [
-        sys.executable,
-        "-m",
-        "ziglang",
-        "c++",
-        "-std=c++23",
-        "-O3",
-        "-ffast-math",
-        "-march=native",
-        "-shared",
-        "-o",
-        _DLL_PATH,
-        _CPP_PATH,
-    ]
+    # giving Clang 22 full whole-module IPO/inlining at -O3.
+    # Keep -fno-finite-math-only so std::isnan()/std::isinf() guards remain active under -ffast-math.
     subprocess.check_call(cmd)
-    return _DLL_PATH
+    with open(stamp_path, "w", encoding="utf-8") as sf:
+        sf.write(sig_payload)
+    return dll_path
 
 
 def get_lib() -> ctypes.CDLL:
     global _LIB
-    if _LIB is not None:
+    dll_path = ensure_compiled(force=False)
+    if _LIB is not None and getattr(_LIB, "_name", None) == dll_path:
         return _LIB
 
-    dll_path = ensure_compiled(force=False)
     lib = ctypes.CDLL(dll_path)
 
     # P-Core Pinning & HighQoS API
@@ -392,6 +431,35 @@ def get_lib() -> ctypes.CDLL:
     ]
     lib.ft_test_generate_moves_native.restype = ctypes.c_int32
 
+    lib.ft_perft_native.argtypes = [
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.c_uint64,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+    ]
+    lib.ft_perft_native.restype = ctypes.c_uint64
+
+    lib.ft_test_push_chain_native.argtypes = [
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.c_uint64,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_uint16),
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.POINTER(ctypes.c_uint16),
+    ]
+    lib.ft_test_push_chain_native.restype = ctypes.c_int32
+
+    lib.ft_test_math_guards_active.argtypes = [ctypes.c_double, ctypes.c_float]
+    lib.ft_test_math_guards_active.restype = ctypes.c_int32
+
     # Populate 2 x 64 x 64 x 6 action lookup table once on DLL load
     act_arr = np.zeros((2, 64, 64, 6), dtype=np.uint16)
     for is_blk in (0, 1):
@@ -454,6 +522,25 @@ def pack_move(m: chess.Move) -> int:
 def unpack_move(mp: int) -> chess.Move:
     promo = (mp >> 12) & 0xF
     return chess.Move(mp & 0x3F, (mp >> 6) & 0x3F, promo if promo else None)
+
+
+def c_perft(board_fen: str | chess.Board, depth: int) -> int:
+    """Runs native C++23 bitboard perft(depth) from a FEN string or chess.Board."""
+    board = board_fen if isinstance(board_fen, chess.Board) else chess.Board(board_fen)
+    lib = get_lib()
+    bbs = (ctypes.c_uint64 * 8)(
+        board.pawns,
+        board.knights,
+        board.bishops,
+        board.rooks,
+        board.queens,
+        board.kings,
+        board.occupied_co[chess.WHITE],
+        board.occupied_co[chess.BLACK],
+    )
+    ep_sq = -1 if board.ep_square is None else int(board.ep_square)
+    turn_w = 1 if board.turn == chess.WHITE else 0
+    return int(lib.ft_perft_native(bbs, ctypes.c_uint64(board.castling_rights), ep_sq, turn_w, int(depth)))
 
 
 def compute_zobrist_pair(board: chess.Board) -> tuple[int, int, tuple]:

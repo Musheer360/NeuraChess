@@ -404,6 +404,10 @@ struct CBoard {
         return false;
     }
 
+    // En-passant Zobrist convention (matches Polyglot / python-chess _transposition_key()):
+    // `ep_square` is hashed into `zobrist_hi`/`zobrist_lo` ONLY when at least one legal
+    // en-passant capture actually exists (`has_legal_en_passant()`), NOT unconditionally
+    // after every double pawn push. Castling rights are masked to intact kings/rooks.
     inline void refresh_zobrist() noexcept {
         uint64_t cr = clean_castling_rights();
         int eff_ep = has_legal_en_passant() ? (int)ep_square : -1;

@@ -21,6 +21,7 @@ env/
 *.pdb
 *.obj
 *.o
+*.stamp
 
 # Model weights, OpenVINO caches, and large datasets (download via scripts/download_weights.py)
 weights/*

@@ -355,15 +355,26 @@ struct KeyPairHash {
 #pragma float_control(precise, on, push)
 #endif
 static inline void compute_exact_f32_softmax(const float* logits, int32_t n, float* out_exp, float& out_sum) noexcept {
+    if (n <= 0) {
+        out_sum = 0.0f;
+        return;
+    }
     float max_l = logits[0];
+    if (std::isnan(max_l) || std::isinf(max_l)) max_l = -1.0e9f;
     for (int32_t i = 1; i < n; ++i) {
-        if (logits[i] > max_l) max_l = logits[i];
+        float li = logits[i];
+        if (!std::isnan(li) && !std::isinf(li) && li > max_l) max_l = li;
     }
     float sum_e = 0.0f;
     for (int32_t i = 0; i < n; ++i) {
-        float ev = std::exp(logits[i] - max_l);
+        float li = logits[i];
+        float ev = (std::isnan(li) || std::isinf(li)) ? 0.0f : std::exp(li - max_l);
         out_exp[i] = ev;
         sum_e += ev;
+    }
+    if (sum_e <= 0.0f || std::isnan(sum_e) || std::isinf(sum_e)) {
+        for (int32_t i = 0; i < n; ++i) out_exp[i] = 1.0f;
+        sum_e = (float)n;
     }
     out_sum = sum_e;
 }
@@ -1270,6 +1281,9 @@ FT_EXPORT double ft_expand_node_with_logits(
     int32_t store_in_cache
 ) {
     auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    if (std::isnan(leaf_val) || std::isinf(leaf_val)) {
+        leaf_val = 0.0;
+    }
     t->nodes[(size_t)node_idx].num_legal_moves = n_legal;
     t->nodes[(size_t)node_idx].zobrist_hash = key_hi;
     t->nodes[(size_t)node_idx].verify_hash = key_lo;
@@ -2247,4 +2261,75 @@ FT_EXPORT int32_t ft_test_generate_moves_native(
 ) {
     bb::CBoard cb = make_cboard_from_args(bbs_8, castling_rights, ep_square, turn_is_white, 0, 0, nullptr, nullptr);
     return cb.generate_scored_legal_moves(out_acts, out_moves, out_bonuses);
+}
+
+static uint64_t perft_recursive(const bb::CBoard& cb, int32_t depth) noexcept {
+    if (depth <= 0) return 1ULL;
+    uint16_t moves[256];
+    int32_t n = cb.generate_legal_moves(moves);
+    if (depth == 1) return (uint64_t)n;
+    uint64_t nodes = 0ULL;
+    for (int32_t i = 0; i < n; ++i) {
+        bb::CBoard child = cb;
+        child.push(moves[i]);
+        nodes += perft_recursive(child, depth - 1);
+    }
+    return nodes;
+}
+
+FT_EXPORT uint64_t ft_perft_native(
+    const uint64_t* bbs_8,
+    uint64_t castling_rights,
+    int32_t ep_square,
+    int32_t turn_is_white,
+    int32_t depth
+) {
+    bb::CBoard cb = make_cboard_from_args(bbs_8, castling_rights, ep_square, turn_is_white, 0, 0, nullptr, nullptr);
+    return perft_recursive(cb, depth);
+}
+
+FT_EXPORT int32_t ft_test_push_chain_native(
+    const uint64_t* bbs_8,
+    uint64_t castling_rights,
+    int32_t ep_square,
+    int32_t turn_is_white,
+    const uint16_t* move_seq,
+    int32_t seq_len,
+    uint64_t* out_bbs_8,
+    uint64_t* out_cr,
+    int32_t* out_ep,
+    int32_t* out_turn,
+    uint64_t* out_z_hi,
+    uint64_t* out_z_lo,
+    uint16_t* out_moves
+) {
+    bb::CBoard cb = make_cboard_from_args(bbs_8, castling_rights, ep_square, turn_is_white, 0, 0, nullptr, nullptr);
+    for (int32_t i = 0; i < seq_len; ++i) {
+        cb.push(move_seq[i]);
+    }
+    if (out_bbs_8) {
+        out_bbs_8[0] = cb.pawns;
+        out_bbs_8[1] = cb.knights;
+        out_bbs_8[2] = cb.bishops;
+        out_bbs_8[3] = cb.rooks;
+        out_bbs_8[4] = cb.queens;
+        out_bbs_8[5] = cb.kings;
+        out_bbs_8[6] = cb.occ_w;
+        out_bbs_8[7] = cb.occ_b;
+    }
+    if (out_cr) *out_cr = cb.clean_castling_rights();
+    if (out_ep) *out_ep = (int32_t)cb.ep_square;
+    if (out_turn) *out_turn = (int32_t)cb.turn_is_white;
+    if (out_z_hi) *out_z_hi = cb.zobrist_hi;
+    if (out_z_lo) *out_z_lo = cb.zobrist_lo;
+    return out_moves ? cb.generate_legal_moves(out_moves) : 0;
+}
+
+FT_EXPORT int32_t ft_test_math_guards_active(double d_val, float f_val) {
+    int32_t mask = 0;
+    if (std::isnan(d_val)) mask |= 1;
+    if (std::isinf(d_val)) mask |= 2;
+    if (std::isnan(f_val)) mask |= 4;
+    if (std::isinf(f_val)) mask |= 8;
+    return mask;
 }
