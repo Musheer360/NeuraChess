@@ -1,0 +1,2318 @@
+{
+  "timestamp_utc": "2026-11-16T07:12:34Z",
+  "model": "neurachess-10x192-fp16",
+  "ac_power": {
+    "power_plugged": true,
+    "battery_pct": 100
+  },
+  "phase2_step3_head_latency_and_data_readiness": {
+    "batch_size": 16,
+    "warmup_iters": 25,
+    "timed_iters": 200,
+    "npu_config": {
+      "device": "NPU",
+      "performance_hint": "LATENCY",
+      "NPU_TURBO": true,
+      "precision": "fp16"
+    },
+    "head_latency_benchmarks": {
+      "baseline_10x192_scalar": {
+        "variant": "baseline_scalar",
+        "ir_bin_mb": 13.36,
+        "compile_time_s": 4.944,
+        "median_ms": 6.386,
+        "mean_ms": 6.39,
+        "p10_ms": 6.257,
+        "p90_ms": 6.532,
+        "raw_b16_pos_per_sec": 2505.4,
+        "delta_ms_vs_baseline": 0.0,
+        "delta_pct_vs_baseline": 0.0,
+        "delta_rss_mb": 143.67,
+        "npu_alloc_after_mb": 24.61,
+        "npu_alloc_delta_mb": 24.61,
+        "outputs": [
+          {
+            "name": "Result_306",
+            "shape": [
+              16,
+              4672
+            ],
+            "finite": true
+          },
+          {
+            "name": "Result_307",
+            "shape": [
+              16,
+              1
+            ],
+            "finite": true
+          }
+        ],
+        "all_outputs_finite": true
+      },
+      "hl_gauss_64_plus_mlh": {
+        "variant": "hl_gauss_mlh",
+        "ir_bin_mb": 13.44,
+        "compile_time_s": 4.797,
+        "median_ms": 6.399,
+        "mean_ms": 6.419,
+        "p10_ms": 6.319,
+        "p90_ms": 6.543,
+        "raw_b16_pos_per_sec": 2500.5,
+        "delta_ms_vs_baseline": 0.012,
+        "delta_pct_vs_baseline": 0.19,
+        "delta_rss_mb": 76.3,
+        "npu_alloc_after_mb": 24.8,
+        "npu_alloc_delta_mb": 16.68,
+        "outputs": [
+          {
+            "name": "Result_2419",
+            "shape": [
+              16,
+              4672
+            ],
+            "finite": true
+          },
+          {
+            "name": "Result_2420",
+            "shape": [
+              16,
+              64
+            ],
+            "finite": true
+          },
+          {
+            "name": "Result_2421",
+            "shape": [
+              16,
+              1
+            ],
+            "finite": true
+          }
+        ],
+        "all_outputs_finite": true
+      },
+      "dual_conv73_policy_q_plus_val": {
+        "variant": "dual_conv73_with_val",
+        "ir_bin_mb": 13.38,
+        "compile_time_s": 4.902,
+        "median_ms": 6.473,
+        "mean_ms": 6.501,
+        "p10_ms": 6.371,
+        "p90_ms": 6.657,
+        "raw_b16_pos_per_sec": 2471.9,
+        "delta_ms_vs_baseline": 0.087,
+        "delta_pct_vs_baseline": 1.36,
+        "delta_rss_mb": 72.29,
+        "npu_alloc_after_mb": 24.98,
+        "npu_alloc_delta_mb": 16.86,
+        "outputs": [
+          {
+            "name": "Result_4683",
+            "shape": [
+              16,
+              4672
+            ],
+            "finite": true
+          },
+          {
+            "name": "Result_4684",
+            "shape": [
+              16,
+              4672
+            ],
+            "finite": true
+          },
+          {
+            "name": "Result_4685",
+            "shape": [
+              16,
+              1
+            ],
+            "finite": true
+          }
+        ],
+        "all_outputs_finite": true
+      },
+      "dual_conv73_policy_q_only": {
+        "variant": "dual_conv73_only",
+        "ir_bin_mb": 13.13,
+        "compile_time_s": 4.536,
+        "median_ms": 6.437,
+        "mean_ms": 6.451,
+        "p10_ms": 6.321,
+        "p90_ms": 6.6,
+        "raw_b16_pos_per_sec": 2485.8,
+        "delta_ms_vs_baseline": 0.05,
+        "delta_pct_vs_baseline": 0.79,
+        "delta_rss_mb": 74.19,
+        "npu_alloc_after_mb": 24.7,
+        "npu_alloc_delta_mb": 16.58,
+        "outputs": [
+          {
+            "name": "Result_6842",
+            "shape": [
+              16,
+              4672
+            ],
+            "finite": true
+          },
+          {
+            "name": "Result_6843",
+            "shape": [
+              16,
+              4672
+            ],
+            "finite": true
+          }
+        ],
+        "all_outputs_finite": true
+      }
+    },
+    "data_readiness": {
+      "local_data_dir": "C:\\Users\\MusheerAlam\\NeuraChess-Private\\data",
+      "local_bin_files": [
+        {
+          "file": "archive_exp010_shards/shard_000.bin",
+          "size_mb": 25.51,
+          "format": "107B_v1",
+          "records": 250000
+        },
+        {
+          "file": "archive_exp010_shards/shard_001.bin",
+          "size_mb": 25.51,
+          "format": "107B_v1",
+          "records": 250000
+        },
+        {
+          "file": "archive_exp010_shards/shard_002.bin",
+          "size_mb": 25.51,
+          "format": "107B_v1",
+          "records": 250000
+        },
+        {
+          "file": "binary_dataset_1200/actions.bin",
+          "size_mb": 0.0,
+          "format": "other",
+          "records": null
+        },
+        {
+          "file": "binary_dataset_1200/states.bin",
+          "size_mb": 8.06,
+          "format": "other",
+          "records": null
+        },
+        {
+          "file": "binary_dataset_1200/wdl.bin",
+          "size_mb": 0.01,
+          "format": "other",
+          "records": null
+        },
+        {
+          "file": "binary_dataset_300/actions.bin",
+          "size_mb": 0.0,
+          "format": "other",
+          "records": null
+        },
+        {
+          "file": "binary_dataset_300/states.bin",
+          "size_mb": 2.01,
+          "format": "other",
+          "records": null
+        },
+        {
+          "file": "binary_dataset_300/wdl.bin",
+          "size_mb": 0.0,
+          "format": "other",
+          "records": null
+        },
+        {
+          "file": "binary_dataset_50/actions.bin",
+          "size_mb": 0.0,
+          "format": "other",
+          "records": null
+        },
+        {
+          "file": "binary_dataset_50/states.bin",
+          "size_mb": 0.34,
+          "format": "other",
+          "records": null
+        },
+        {
+          "file": "binary_dataset_50/wdl.bin",
+          "size_mb": 0.0,
+          "format": "other",
+          "records": null
+        },
+        {
+          "file": "overnight_shards/shard_000.bin",
+          "size_mb": 25.51,
+          "format": "107B_v1",
+          "records": 250000
+        },
+        {
+          "file": "overnight_shards/shard_001.bin",
+          "size_mb": 25.51,
+          "format": "107B_v1",
+          "records": 250000
+        },
+        {
+          "file": "overnight_shards/shard_002.bin",
+          "size_mb": 25.51,
+          "format": "107B_v1",
+          "records": 250000
+        },
+        {
+          "file": "overnight_shards/shard_003.bin",
+          "size_mb": 25.51,
+          "format": "107B_v1",
+          "records": 250000
+        },
+        {
+          "file": "sample_shard_000.bin",
+          "size_mb": 51.02,
+          "format": "107B_v1",
+          "records": 500000
+        },
+        {
+          "file": "sample_shard_040.bin",
+          "size_mb": 51.02,
+          "format": "107B_v1",
+          "records": 500000
+        },
+        {
+          "file": "test_far_50k.bin",
+          "size_mb": 5.1,
+          "format": "107B_v1",
+          "records": 50000
+        },
+        {
+          "file": "test_heldout_400m_50k.bin",
+          "size_mb": 5.1,
+          "format": "107B_v1",
+          "records": 50000
+        },
+        {
+          "file": "test_in_region_50k.bin",
+          "size_mb": 5.1,
+          "format": "107B_v1",
+          "records": 50000
+        },
+        {
+          "file": "test_in_region_50k_v2.bin",
+          "size_mb": 5.1,
+          "format": "107B_v1",
+          "records": 49998
+        },
+        {
+          "file": "test_v2_1k.bin",
+          "size_mb": 0.66,
+          "format": "691B_v2",
+          "records": 1000
+        },
+        {
+          "file": "train_300k.bin",
+          "size_mb": 30.61,
+          "format": "107B_v1",
+          "records": 300000
+        },
+        {
+          "file": "v2_shards_1m/shard_000.bin",
+          "size_mb": 329.49,
+          "format": "691B_v2",
+          "records": 500000
+        },
+        {
+          "file": "v2_shards_1m/shard_001.bin",
+          "size_mb": 329.49,
+          "format": "691B_v2",
+          "records": 500000
+        },
+        {
+          "file": "val_100k.bin",
+          "size_mb": 10.2,
+          "format": "107B_v1",
+          "records": 100000
+        }
+      ],
+      "local_sidecar_files": [],
+      "s3_bucket": "s3://neurachess-spot-162290422654-us-east-1",
+      "s3_read_only_summary": {
+        "data/": [
+          "2026-11-08 18:02:42    5.1 MiB data/test_in_region_50k.bin",
+          "Total Objects: 7",
+          "Total Size: 675.3 MiB"
+        ],
+        "data/shards/": [
+          "2026-11-07 00:05:11  329.5 MiB data/shards/shard_001.bin",
+          "Total Objects: 3",
+          "Total Size: 659.0 MiB"
+        ],
+        "data/shards_s1/": [
+          "Total Objects: 0",
+          "Total Size: 0 Bytes"
+        ],
+        "checkpoints/": [
+          "2026-11-10 20:29:57   49.0 MiB checkpoints/test_resume/latest.pt",
+          "Total Objects: 28",
+          "Total Size: 1.4 GiB"
+        ],
+        "manifests/": [
+          "2026-11-13 01:37:49    9.5 KiB manifests/shards_qat_20m_verified.json",
+          "Total Objects: 3",
+          "Total Size: 387.8 KiB"
+        ]
+      },
+      "multipv_sidecars_available": false,
+      "notes": {
+        "hl_gauss_64_ready": "YES - eval_cp is stored in every 107B v1 and 691B v2 record (1M v2 shards locally & on S3; 346M v1 shards require re-upload or regenerating from lichess_db_eval).",
+        "moves_left_head_ready": "NO - fixed position records (107B/691B) lack remaining game-length/ply labels; requires PGN/self-play game trajectories.",
+        "conv73_action_q_head_ready": "NO - 0 .sidecar.bin MultiPV files exist locally or on S3 (shards_s1/ is empty); training dense Q(s,a) requires either MultiPV Stockfish sidecars or search-tree leaf distillation."
+      }
+    }
+  },
+  "phase2_step1_collision_cold_start_gear_shift": {
+    "tactical_horizon_cat_c_19_400ms": {
+      "baseline_b16_prod_db": {
+        "total": 19,
+        "orig_sf_best_matches": 11,
+        "live_sf_d14_matches": 12,
+        "avoided_orig_nc_blunder": 14,
+        "blunders_ge_150cp": 5,
+        "blunders_ge_100cp": 6,
+        "mean_cp_drop": 84.26,
+        "median_cp_drop": 6.0,
+        "total_nodes": 22350,
+        "mean_nodes": 1176.32,
+        "total_batches": 1267,
+        "mean_batches": 66.68,
+        "mean_max_ply": 13.421,
+        "global_max_ply": 14,
+        "mean_avg_ply": 6.448,
+        "mean_cpu_ms": 23.374,
+        "gear_counts": {},
+        "batch_share_pct": {},
+        "gear_reasons": {},
+        "per_fen": [
+          {
+            "elo": 2800,
+            "ply": 38,
+            "fen": "2r1k2r/1p2bppp/p3bn2/P7/3q4/N2B2QP/1P3PP1/R1BR2K1 b k - 1 19",
+            "played": "d4d5",
+            "orig_nc_move": "d4d5",
+            "orig_sf_best": "f6d7",
+            "live_sf_best_d14": "d4c5",
+            "eval_drop_cp": 523,
+            "nodes": 1175,
+            "batches": 67,
+            "max_leaf_ply": 11,
+            "avg_leaf_ply": 4.3799,
+            "wall_ms": 411.72,
+            "cpu_ms": 25.19
+          },
+          {
+            "elo": 2800,
+            "ply": 34,
+            "fen": "r3k2r/6pp/P1pbb3/5p2/Bn1Pp3/P5Pq/1P1NQP1P/R1B2RK1 b kq - 1 17",
+            "played": "a8a6",
+            "orig_nc_move": "b4d3",
+            "orig_sf_best": "b4d5",
+            "live_sf_best_d14": "b4d5",
+            "eval_drop_cp": 101,
+            "nodes": 1160,
+            "batches": 67,
+            "max_leaf_ply": 11,
+            "avg_leaf_ply": 6.0298,
+            "wall_ms": 409.16,
+            "cpu_ms": 23.24
+          },
+          {
+            "elo": 2800,
+            "ply": 6,
+            "fen": "rnbqkb1r/pppp1ppp/5n2/4N3/4P3/8/PPPP1PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "d7d6",
+            "orig_nc_move": "f6d5",
+            "orig_sf_best": "d7d6",
+            "live_sf_best_d14": "d7d6",
+            "eval_drop_cp": 0,
+            "nodes": 1149,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.7378,
+            "wall_ms": 409.6,
+            "cpu_ms": 22.1
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkb1r/pppp1ppp/5n2/4p3/4PP2/2N5/PPPP2PP/R1BQKBNR b KQkq - 0 3",
+            "played": "d7d5",
+            "orig_nc_move": "f6e4",
+            "orig_sf_best": "d7d5",
+            "live_sf_best_d14": "d7d5",
+            "eval_drop_cp": 10,
+            "nodes": 1113,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.1084,
+            "wall_ms": 409.46,
+            "cpu_ms": 19.49
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkb1r/pppp1ppp/5n2/4p3/4PP2/2N5/PPPP2PP/R1BQKBNR b KQkq - 0 3",
+            "played": "d7d5",
+            "orig_nc_move": "c7c6",
+            "orig_sf_best": "d7d5",
+            "live_sf_best_d14": "d7d5",
+            "eval_drop_cp": -2,
+            "nodes": 1113,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.1084,
+            "wall_ms": 411.87,
+            "cpu_ms": 19.65
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkb1r/pppp1ppp/5n2/4p3/4PP2/2N5/PPPP2PP/R1BQKBNR b KQkq - 0 3",
+            "played": "d7d5",
+            "orig_nc_move": "f6d5",
+            "orig_sf_best": "d7d5",
+            "live_sf_best_d14": "d7d5",
+            "eval_drop_cp": 4,
+            "nodes": 1113,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.1084,
+            "wall_ms": 412.56,
+            "cpu_ms": 20.08
+          },
+          {
+            "elo": 3000,
+            "ply": 22,
+            "fen": "r3k2r/ppB2ppp/2n2n2/bN5q/3P2b1/3B1N2/PPP3PP/R2Q1RK1 b kq - 0 11",
+            "played": "e8g8",
+            "orig_nc_move": "a7a6",
+            "orig_sf_best": "e8g8",
+            "live_sf_best_d14": "e8g8",
+            "eval_drop_cp": 11,
+            "nodes": 1110,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.6807,
+            "wall_ms": 410.09,
+            "cpu_ms": 20.19
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "c6e5",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": 6,
+            "nodes": 1225,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.5073,
+            "wall_ms": 410.0,
+            "cpu_ms": 23.89
+          },
+          {
+            "elo": 3190,
+            "ply": 75,
+            "fen": "5rk1/q3r3/p2p2P1/Pp1P3p/1P6/2PQpB1b/2K4P/2B1R3 w - - 4 38",
+            "played": "e1e3",
+            "orig_nc_move": "e1e3",
+            "orig_sf_best": "d3d1",
+            "live_sf_best_d14": "d3d1",
+            "eval_drop_cp": 195,
+            "nodes": 1102,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.5464,
+            "wall_ms": 409.8,
+            "cpu_ms": 18.93
+          },
+          {
+            "elo": 3190,
+            "ply": 45,
+            "fen": "2r2r2/1p1b2kp/3p4/3np1P1/3Np3/2P3PP/PP6/R3KB1R w KQ - 0 23",
+            "played": "d4b5",
+            "orig_nc_move": "d4b5",
+            "orig_sf_best": "d4c2",
+            "live_sf_best_d14": "d4c2",
+            "eval_drop_cp": 423,
+            "nodes": 1087,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.6534,
+            "wall_ms": 409.72,
+            "cpu_ms": 17.64
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkb1r/pp1ppppp/5n2/2p1P3/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "f6d5",
+            "orig_nc_move": "b8c6",
+            "orig_sf_best": "f6d5",
+            "live_sf_best_d14": "f6d5",
+            "eval_drop_cp": -3,
+            "nodes": 1364,
+            "batches": 66,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.7931,
+            "wall_ms": 406.45,
+            "cpu_ms": 29.64
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkb1r/pp1ppppp/5n2/2p1P3/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "f6d5",
+            "orig_nc_move": "c5c4",
+            "orig_sf_best": "f6d5",
+            "live_sf_best_d14": "f6d5",
+            "eval_drop_cp": 1,
+            "nodes": 1364,
+            "batches": 66,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.7931,
+            "wall_ms": 408.22,
+            "cpu_ms": 31.35
+          },
+          {
+            "elo": 3190,
+            "ply": 35,
+            "fen": "3rk3/1p3p2/2n1bq1p/1Bbppp2/6rP/P1P2NP1/1R2QP2/1NB1K2R w K - 2 18",
+            "played": "b1d2",
+            "orig_nc_move": "e2e5",
+            "orig_sf_best": "b1d2",
+            "live_sf_best_d14": "b1d2",
+            "eval_drop_cp": 0,
+            "nodes": 1080,
+            "batches": 65,
+            "max_leaf_ply": 12,
+            "avg_leaf_ply": 5.5435,
+            "wall_ms": 407.41,
+            "cpu_ms": 21.6
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkb1r/pp1ppppp/5n2/2p1P3/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "f6d5",
+            "orig_nc_move": "a7a5",
+            "orig_sf_best": "f6d5",
+            "live_sf_best_d14": "f6d5",
+            "eval_drop_cp": -2,
+            "nodes": 1389,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.8197,
+            "wall_ms": 411.98,
+            "cpu_ms": 30.94
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/8/2pP4/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "d8d5",
+            "orig_nc_move": "b8c6",
+            "orig_sf_best": "d8d5",
+            "live_sf_best_d14": "d8d5",
+            "eval_drop_cp": 0,
+            "nodes": 1351,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.101,
+            "wall_ms": 409.41,
+            "cpu_ms": 30.49
+          },
+          {
+            "elo": 3190,
+            "ply": 71,
+            "fen": "4R1R1/1r3r1k/1p5p/p2P3P/2Pp1p2/3b1p2/P4P1K/8 w - - 0 36",
+            "played": "e8a8",
+            "orig_nc_move": "e8a8",
+            "orig_sf_best": "e8c8",
+            "live_sf_best_d14": "h2h3",
+            "eval_drop_cp": 150,
+            "nodes": 1086,
+            "batches": 66,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.3286,
+            "wall_ms": 408.78,
+            "cpu_ms": 28.24
+          },
+          {
+            "elo": 3190,
+            "ply": 33,
+            "fen": "rn1qk2r/3b3p/n3ppp1/1pb1N1BB/8/P1N5/5PPP/R2QK2R w KQkq - 0 17",
+            "played": "d1f3",
+            "orig_nc_move": "d1f3",
+            "orig_sf_best": "e1g1",
+            "live_sf_best_d14": "e1g1",
+            "eval_drop_cp": 172,
+            "nodes": 1079,
+            "batches": 66,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 5.471,
+            "wall_ms": 410.71,
+            "cpu_ms": 20.08
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/3p4/1Bp5/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 1 3",
+            "played": "c8d7",
+            "orig_nc_move": "d8d7",
+            "orig_sf_best": "b8d7",
+            "live_sf_best_d14": "c8d7",
+            "eval_drop_cp": 0,
+            "nodes": 1165,
+            "batches": 67,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 6.4686,
+            "wall_ms": 410.79,
+            "cpu_ms": 21.69
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+            "played": "g8f6",
+            "orig_nc_move": "c6e5",
+            "orig_sf_best": "e7e6",
+            "live_sf_best_d14": "d7d6",
+            "eval_drop_cp": 12,
+            "nodes": 1125,
+            "batches": 67,
+            "max_leaf_ply": 12,
+            "avg_leaf_ply": 5.3381,
+            "wall_ms": 409.68,
+            "cpu_ms": 19.69
+          }
+        ]
+      },
+      "gear_shift_v2_collision_cold": {
+        "total": 19,
+        "orig_sf_best_matches": 10,
+        "live_sf_d14_matches": 11,
+        "avoided_orig_nc_blunder": 12,
+        "blunders_ge_150cp": 6,
+        "blunders_ge_100cp": 7,
+        "mean_cp_drop": 99.63,
+        "median_cp_drop": 4.0,
+        "total_nodes": 20411,
+        "mean_nodes": 1074.26,
+        "total_batches": 1413,
+        "mean_batches": 74.37,
+        "mean_max_ply": 13.474,
+        "global_max_ply": 14,
+        "mean_avg_ply": 6.83,
+        "mean_cpu_ms": 15.602,
+        "gear_counts": {
+          "4": 322,
+          "16": 982,
+          "8": 109
+        },
+        "batch_share_pct": {
+          "16": 69.5,
+          "4": 22.79,
+          "8": 7.71
+        },
+        "gear_reasons": {
+          "1": 73,
+          "0": 982,
+          "4": 109,
+          "3": 51,
+          "2": 198
+        },
+        "per_fen": [
+          {
+            "elo": 2800,
+            "ply": 38,
+            "fen": "2r1k2r/1p2bppp/p3bn2/P7/3q4/N2B2QP/1P3PP1/R1BR2K1 b k - 1 19",
+            "played": "d4d5",
+            "orig_nc_move": "d4d5",
+            "orig_sf_best": "f6d7",
+            "live_sf_best_d14": "d4c5",
+            "eval_drop_cp": 489,
+            "nodes": 1047,
+            "batches": 64,
+            "max_leaf_ply": 11,
+            "avg_leaf_ply": 4.6967,
+            "wall_ms": 404.68,
+            "cpu_ms": 17.67
+          },
+          {
+            "elo": 2800,
+            "ply": 34,
+            "fen": "r3k2r/6pp/P1pbb3/5p2/Bn1Pp3/P5Pq/1P1NQP1P/R1B2RK1 b kq - 1 17",
+            "played": "b4d3",
+            "orig_nc_move": "b4d3",
+            "orig_sf_best": "b4d5",
+            "live_sf_best_d14": "b4d5",
+            "eval_drop_cp": 248,
+            "nodes": 1100,
+            "batches": 64,
+            "max_leaf_ply": 12,
+            "avg_leaf_ply": 6.087,
+            "wall_ms": 403.65,
+            "cpu_ms": 17.16
+          },
+          {
+            "elo": 2800,
+            "ply": 6,
+            "fen": "rnbqkb1r/pppp1ppp/5n2/4N3/4P3/8/PPPP1PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "d7d6",
+            "orig_nc_move": "f6d5",
+            "orig_sf_best": "d7d6",
+            "live_sf_best_d14": "d7d6",
+            "eval_drop_cp": 4,
+            "nodes": 1045,
+            "batches": 63,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.288,
+            "wall_ms": 402.5,
+            "cpu_ms": 16.38
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkb1r/pppp1ppp/5n2/4p3/4PP2/2N5/PPPP2PP/R1BQKBNR b KQkq - 0 3",
+            "played": "d7d5",
+            "orig_nc_move": "f6e4",
+            "orig_sf_best": "d7d5",
+            "live_sf_best_d14": "d7d5",
+            "eval_drop_cp": -12,
+            "nodes": 1012,
+            "batches": 64,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.5988,
+            "wall_ms": 405.1,
+            "cpu_ms": 12.81
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkb1r/pppp1ppp/5n2/4p3/4PP2/2N5/PPPP2PP/R1BQKBNR b KQkq - 0 3",
+            "played": "d7d5",
+            "orig_nc_move": "c7c6",
+            "orig_sf_best": "d7d5",
+            "live_sf_best_d14": "d7d5",
+            "eval_drop_cp": 3,
+            "nodes": 1012,
+            "batches": 64,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.5988,
+            "wall_ms": 405.82,
+            "cpu_ms": 12.97
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkb1r/pppp1ppp/5n2/4p3/4PP2/2N5/PPPP2PP/R1BQKBNR b KQkq - 0 3",
+            "played": "d7d5",
+            "orig_nc_move": "f6d5",
+            "orig_sf_best": "d7d5",
+            "live_sf_best_d14": "d7d5",
+            "eval_drop_cp": 0,
+            "nodes": 1012,
+            "batches": 64,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.5988,
+            "wall_ms": 403.77,
+            "cpu_ms": 12.55
+          },
+          {
+            "elo": 3000,
+            "ply": 22,
+            "fen": "r3k2r/ppB2ppp/2n2n2/bN5q/3P2b1/3B1N2/PPP3PP/R2Q1RK1 b kq - 0 11",
+            "played": "a7a6",
+            "orig_nc_move": "a7a6",
+            "orig_sf_best": "e8g8",
+            "live_sf_best_d14": "e8g8",
+            "eval_drop_cp": 120,
+            "nodes": 1027,
+            "batches": 63,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 6.4901,
+            "wall_ms": 401.4,
+            "cpu_ms": 13.5
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "c6e5",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": -6,
+            "nodes": 1116,
+            "batches": 63,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 8.0251,
+            "wall_ms": 402.3,
+            "cpu_ms": 17.65
+          },
+          {
+            "elo": 3190,
+            "ply": 75,
+            "fen": "5rk1/q3r3/p2p2P1/Pp1P3p/1P6/2PQpB1b/2K4P/2B1R3 w - - 4 38",
+            "played": "e1e3",
+            "orig_nc_move": "e1e3",
+            "orig_sf_best": "d3d1",
+            "live_sf_best_d14": "d3e2",
+            "eval_drop_cp": 267,
+            "nodes": 1009,
+            "batches": 65,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.3189,
+            "wall_ms": 402.64,
+            "cpu_ms": 12.42
+          },
+          {
+            "elo": 3190,
+            "ply": 45,
+            "fen": "2r2r2/1p1b2kp/3p4/3np1P1/3Np3/2P3PP/PP6/R3KB1R w KQ - 0 23",
+            "played": "d4b5",
+            "orig_nc_move": "d4b5",
+            "orig_sf_best": "d4c2",
+            "live_sf_best_d14": "d4c2",
+            "eval_drop_cp": 451,
+            "nodes": 972,
+            "batches": 63,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.0563,
+            "wall_ms": 400.75,
+            "cpu_ms": 12.15
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkb1r/pp1ppppp/5n2/2p1P3/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "f6d5",
+            "orig_nc_move": "b8c6",
+            "orig_sf_best": "f6d5",
+            "live_sf_best_d14": "f6d5",
+            "eval_drop_cp": 0,
+            "nodes": 1296,
+            "batches": 79,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.3695,
+            "wall_ms": 400.96,
+            "cpu_ms": 20.95
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkb1r/pp1ppppp/5n2/2p1P3/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "f6d5",
+            "orig_nc_move": "c5c4",
+            "orig_sf_best": "f6d5",
+            "live_sf_best_d14": "f6d5",
+            "eval_drop_cp": -3,
+            "nodes": 1296,
+            "batches": 79,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.3695,
+            "wall_ms": 401.82,
+            "cpu_ms": 20.16
+          },
+          {
+            "elo": 3190,
+            "ply": 35,
+            "fen": "3rk3/1p3p2/2n1bq1p/1Bbppp2/6rP/P1P2NP1/1R2QP2/1NB1K2R w K - 2 18",
+            "played": "b1d2",
+            "orig_nc_move": "e2e5",
+            "orig_sf_best": "b1d2",
+            "live_sf_best_d14": "b1d2",
+            "eval_drop_cp": 6,
+            "nodes": 1003,
+            "batches": 64,
+            "max_leaf_ply": 12,
+            "avg_leaf_ply": 5.9416,
+            "wall_ms": 407.24,
+            "cpu_ms": 12.12
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkb1r/pp1ppppp/5n2/2p1P3/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "f6d5",
+            "orig_nc_move": "a7a5",
+            "orig_sf_best": "f6d5",
+            "live_sf_best_d14": "f6d5",
+            "eval_drop_cp": 0,
+            "nodes": 1281,
+            "batches": 78,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.359,
+            "wall_ms": 403.77,
+            "cpu_ms": 20.77
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/8/2pP4/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "d8d5",
+            "orig_nc_move": "b8c6",
+            "orig_sf_best": "d8d5",
+            "live_sf_best_d14": "d8d5",
+            "eval_drop_cp": -8,
+            "nodes": 1267,
+            "batches": 76,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.5392,
+            "wall_ms": 404.42,
+            "cpu_ms": 21.51
+          },
+          {
+            "elo": 3190,
+            "ply": 71,
+            "fen": "4R1R1/1r3r1k/1p5p/p2P3P/2Pp1p2/3b1p2/P4P1K/8 w - - 0 36",
+            "played": "e8a8",
+            "orig_nc_move": "e8a8",
+            "orig_sf_best": "e8c8",
+            "live_sf_best_d14": "c4c5",
+            "eval_drop_cp": 150,
+            "nodes": 1030,
+            "batches": 74,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.5561,
+            "wall_ms": 402.49,
+            "cpu_ms": 15.16
+          },
+          {
+            "elo": 3190,
+            "ply": 33,
+            "fen": "rn1qk2r/3b3p/n3ppp1/1pb1N1BB/8/P1N5/5PPP/R2QK2R w KQkq - 0 17",
+            "played": "d1f3",
+            "orig_nc_move": "d1f3",
+            "orig_sf_best": "e1g1",
+            "live_sf_best_d14": "e1g1",
+            "eval_drop_cp": 182,
+            "nodes": 1017,
+            "batches": 64,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.7905,
+            "wall_ms": 404.14,
+            "cpu_ms": 13.11
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/3p4/1Bp5/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 1 3",
+            "played": "c8d7",
+            "orig_nc_move": "d8d7",
+            "orig_sf_best": "b8d7",
+            "live_sf_best_d14": "c8d7",
+            "eval_drop_cp": -7,
+            "nodes": 847,
+            "batches": 198,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 6.5303,
+            "wall_ms": 401.54,
+            "cpu_ms": 14.08
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+            "played": "g8f6",
+            "orig_nc_move": "c6e5",
+            "orig_sf_best": "e7e6",
+            "live_sf_best_d14": "g7g6",
+            "eval_drop_cp": 9,
+            "nodes": 1022,
+            "batches": 64,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 5.5509,
+            "wall_ms": 406.65,
+            "cpu_ms": 13.34
+          }
+        ]
+      }
+    },
+    "value_search_cat_a_19_400ms": {
+      "baseline_b16_prod_db": {
+        "total": 19,
+        "orig_sf_best_matches": 15,
+        "live_sf_d14_matches": 15,
+        "avoided_orig_nc_blunder": 17,
+        "blunders_ge_150cp": 1,
+        "blunders_ge_100cp": 2,
+        "mean_cp_drop": 27.21,
+        "median_cp_drop": -1.0,
+        "total_nodes": 23390,
+        "mean_nodes": 1231.05,
+        "total_batches": 1282,
+        "mean_batches": 67.47,
+        "mean_max_ply": 13.579,
+        "global_max_ply": 14,
+        "mean_avg_ply": 6.51,
+        "mean_cpu_ms": 25.191,
+        "gear_counts": {},
+        "batch_share_pct": {},
+        "gear_reasons": {},
+        "per_fen": [
+          {
+            "elo": 2800,
+            "ply": 48,
+            "fen": "3r1k1r/2q1bpp1/p7/2pbN2p/P2P4/2P1R2P/4QPP1/R1B3K1 b - - 0 24",
+            "played": "c5d4",
+            "orig_nc_move": "h8h6",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": -22,
+            "nodes": 1174,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.2156,
+            "wall_ms": 411.34,
+            "cpu_ms": 21.29
+          },
+          {
+            "elo": 2800,
+            "ply": 6,
+            "fen": "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+            "played": "g8f6",
+            "orig_nc_move": "f7f6",
+            "orig_sf_best": "g8f6",
+            "live_sf_best_d14": "g8f6",
+            "eval_drop_cp": 3,
+            "nodes": 1204,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.0095,
+            "wall_ms": 409.61,
+            "cpu_ms": 21.96
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkb1r/pppp1ppp/5n2/4p3/4PP2/2N5/PPPP2PP/R1BQKBNR b KQkq - 0 3",
+            "played": "d7d5",
+            "orig_nc_move": "c7c5",
+            "orig_sf_best": "d7d5",
+            "live_sf_best_d14": "d7d5",
+            "eval_drop_cp": -3,
+            "nodes": 1080,
+            "batches": 65,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.0574,
+            "wall_ms": 409.99,
+            "cpu_ms": 22.37
+          },
+          {
+            "elo": 3000,
+            "ply": 45,
+            "fen": "2kr1b1Q/pp3pr1/2p5/3pnN2/3P4/3BB3/PqP4K/3R4 w - - 0 23",
+            "played": "d4e5",
+            "orig_nc_move": "d4e5",
+            "orig_sf_best": "f5g7",
+            "live_sf_best_d14": "f5g7",
+            "eval_drop_cp": 445,
+            "nodes": 1077,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.7704,
+            "wall_ms": 411.84,
+            "cpu_ms": 18.91
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pppp1ppp/8/8/4Pp2/5N2/PPPP2PP/RNBQKB1R b KQkq - 1 3",
+            "played": "g7g5",
+            "orig_nc_move": "f7f6",
+            "orig_sf_best": "g8f6",
+            "live_sf_best_d14": "g7g5",
+            "eval_drop_cp": -5,
+            "nodes": 1221,
+            "batches": 68,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.2612,
+            "wall_ms": 411.67,
+            "cpu_ms": 24.2
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pppp1ppp/8/8/4Pp2/5N2/PPPP2PP/RNBQKB1R b KQkq - 1 3",
+            "played": "g7g5",
+            "orig_nc_move": "f8c5",
+            "orig_sf_best": "g8f6",
+            "live_sf_best_d14": "g7g5",
+            "eval_drop_cp": 0,
+            "nodes": 1221,
+            "batches": 68,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.2612,
+            "wall_ms": 410.86,
+            "cpu_ms": 24.95
+          },
+          {
+            "elo": 3000,
+            "ply": 59,
+            "fen": "r3brk1/5q1p/3ppP2/p1p3Pp/4P2R/2b4Q/1PP1N2P/R3K3 w Q - 0 30",
+            "played": "b2c3",
+            "orig_nc_move": "b2c3",
+            "orig_sf_best": "b2c3",
+            "live_sf_best_d14": "e2c3",
+            "eval_drop_cp": 123,
+            "nodes": 1119,
+            "batches": 68,
+            "max_leaf_ply": 12,
+            "avg_leaf_ply": 5.44,
+            "wall_ms": 410.84,
+            "cpu_ms": 19.44
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/3p4/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "c5c4",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": -15,
+            "nodes": 1271,
+            "batches": 68,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.5269,
+            "wall_ms": 411.06,
+            "cpu_ms": 24.19
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/3p4/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "e7e5",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": 0,
+            "nodes": 1271,
+            "batches": 68,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.5269,
+            "wall_ms": 410.51,
+            "cpu_ms": 24.74
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/3p4/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "f7f6",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "g8f6",
+            "eval_drop_cp": 3,
+            "nodes": 1271,
+            "batches": 68,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.5269,
+            "wall_ms": 411.89,
+            "cpu_ms": 25.24
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "c5c4",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": -1,
+            "nodes": 1244,
+            "batches": 68,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.5244,
+            "wall_ms": 412.0,
+            "cpu_ms": 24.89
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "d7d5",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": -9,
+            "nodes": 1244,
+            "batches": 68,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.5244,
+            "wall_ms": 411.98,
+            "cpu_ms": 25.23
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "e7e5",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": 0,
+            "nodes": 1244,
+            "batches": 68,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.5244,
+            "wall_ms": 411.01,
+            "cpu_ms": 25.6
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp1p1ppp/4p3/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "b8c6",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": -5,
+            "nodes": 1246,
+            "batches": 68,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 6.7474,
+            "wall_ms": 410.91,
+            "cpu_ms": 26.25
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp1p1ppp/4p3/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "f7f6",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": -2,
+            "nodes": 1228,
+            "batches": 67,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 6.7176,
+            "wall_ms": 407.05,
+            "cpu_ms": 26.04
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/4P3/2N3P1/PPPP1P1P/R1BQKBNR b KQkq - 0 3",
+            "played": "g7g6",
+            "orig_nc_move": "c5c4",
+            "orig_sf_best": "g7g6",
+            "live_sf_best_d14": "g7g6",
+            "eval_drop_cp": -2,
+            "nodes": 1429,
+            "batches": 67,
+            "max_leaf_ply": 12,
+            "avg_leaf_ply": 5.4994,
+            "wall_ms": 407.82,
+            "cpu_ms": 38.95
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/8/2pP4/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "d8d5",
+            "orig_nc_move": "e7e5",
+            "orig_sf_best": "d8d5",
+            "live_sf_best_d14": "d8d5",
+            "eval_drop_cp": -4,
+            "nodes": 1351,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.101,
+            "wall_ms": 409.0,
+            "cpu_ms": 32.38
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/8/2pP4/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "d8d5",
+            "orig_nc_move": "f7f6",
+            "orig_sf_best": "d8d5",
+            "live_sf_best_d14": "d8d5",
+            "eval_drop_cp": 1,
+            "nodes": 1351,
+            "batches": 67,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.101,
+            "wall_ms": 406.89,
+            "cpu_ms": 32.37
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+            "played": "g8f6",
+            "orig_nc_move": "c5c4",
+            "orig_sf_best": "e7e6",
+            "live_sf_best_d14": "g7g6",
+            "eval_drop_cp": 10,
+            "nodes": 1144,
+            "batches": 68,
+            "max_leaf_ply": 12,
+            "avg_leaf_ply": 5.3553,
+            "wall_ms": 411.58,
+            "cpu_ms": 19.61
+          }
+        ]
+      },
+      "gear_shift_v2_collision_cold": {
+        "total": 19,
+        "orig_sf_best_matches": 15,
+        "live_sf_d14_matches": 15,
+        "avoided_orig_nc_blunder": 17,
+        "blunders_ge_150cp": 1,
+        "blunders_ge_100cp": 2,
+        "mean_cp_drop": 34.74,
+        "median_cp_drop": 0.0,
+        "total_nodes": 21093,
+        "mean_nodes": 1110.16,
+        "total_batches": 1414,
+        "mean_batches": 74.42,
+        "mean_max_ply": 13.632,
+        "global_max_ply": 14,
+        "mean_avg_ply": 6.922,
+        "mean_cpu_ms": 16.785,
+        "gear_counts": {
+          "4": 325,
+          "16": 974,
+          "8": 115
+        },
+        "batch_share_pct": {
+          "16": 68.88,
+          "4": 22.98,
+          "8": 8.13
+        },
+        "gear_reasons": {
+          "1": 72,
+          "0": 974,
+          "3": 56,
+          "4": 115,
+          "2": 197
+        },
+        "per_fen": [
+          {
+            "elo": 2800,
+            "ply": 48,
+            "fen": "3r1k1r/2q1bpp1/p7/2pbN2p/P2P4/2P1R2P/4QPP1/R1B3K1 b - - 0 24",
+            "played": "c5d4",
+            "orig_nc_move": "h8h6",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": 0,
+            "nodes": 1067,
+            "batches": 63,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 5.8271,
+            "wall_ms": 401.83,
+            "cpu_ms": 15.24
+          },
+          {
+            "elo": 2800,
+            "ply": 6,
+            "fen": "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+            "played": "g8f6",
+            "orig_nc_move": "f7f6",
+            "orig_sf_best": "g8f6",
+            "live_sf_best_d14": "g8f6",
+            "eval_drop_cp": -3,
+            "nodes": 1095,
+            "batches": 64,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.4989,
+            "wall_ms": 404.34,
+            "cpu_ms": 17.44
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkb1r/pppp1ppp/5n2/4p3/4PP2/2N5/PPPP2PP/R1BQKBNR b KQkq - 0 3",
+            "played": "d7d5",
+            "orig_nc_move": "c7c5",
+            "orig_sf_best": "d7d5",
+            "live_sf_best_d14": "d7d5",
+            "eval_drop_cp": 0,
+            "nodes": 1012,
+            "batches": 64,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.5988,
+            "wall_ms": 403.84,
+            "cpu_ms": 13.23
+          },
+          {
+            "elo": 3000,
+            "ply": 45,
+            "fen": "2kr1b1Q/pp3pr1/2p5/3pnN2/3P4/3BB3/PqP4K/3R4 w - - 0 23",
+            "played": "d4e5",
+            "orig_nc_move": "d4e5",
+            "orig_sf_best": "f5g7",
+            "live_sf_best_d14": "f5g7",
+            "eval_drop_cp": 524,
+            "nodes": 968,
+            "batches": 64,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.9915,
+            "wall_ms": 403.52,
+            "cpu_ms": 11.64
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pppp1ppp/8/8/4Pp2/5N2/PPPP2PP/RNBQKB1R b KQkq - 1 3",
+            "played": "g7g5",
+            "orig_nc_move": "f7f6",
+            "orig_sf_best": "g8f6",
+            "live_sf_best_d14": "g7g5",
+            "eval_drop_cp": -6,
+            "nodes": 1065,
+            "batches": 64,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.784,
+            "wall_ms": 406.62,
+            "cpu_ms": 16.54
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pppp1ppp/8/8/4Pp2/5N2/PPPP2PP/RNBQKB1R b KQkq - 1 3",
+            "played": "g7g5",
+            "orig_nc_move": "f8c5",
+            "orig_sf_best": "g8f6",
+            "live_sf_best_d14": "g7g5",
+            "eval_drop_cp": 0,
+            "nodes": 1065,
+            "batches": 64,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.784,
+            "wall_ms": 401.54,
+            "cpu_ms": 16.1
+          },
+          {
+            "elo": 3000,
+            "ply": 59,
+            "fen": "r3brk1/5q1p/3ppP2/p1p3Pp/4P2R/2b4Q/1PP1N2P/R3K3 w Q - 0 30",
+            "played": "b2c3",
+            "orig_nc_move": "b2c3",
+            "orig_sf_best": "b2c3",
+            "live_sf_best_d14": "e2c3",
+            "eval_drop_cp": 119,
+            "nodes": 803,
+            "batches": 197,
+            "max_leaf_ply": 12,
+            "avg_leaf_ply": 5.4924,
+            "wall_ms": 401.15,
+            "cpu_ms": 12.13
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/3p4/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "c5c4",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": 2,
+            "nodes": 1135,
+            "batches": 65,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.9918,
+            "wall_ms": 404.84,
+            "cpu_ms": 17.32
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/3p4/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "e7e5",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": 0,
+            "nodes": 1135,
+            "batches": 65,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.9918,
+            "wall_ms": 403.51,
+            "cpu_ms": 18.25
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/3p4/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "f7f6",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "g8f6",
+            "eval_drop_cp": 0,
+            "nodes": 1135,
+            "batches": 65,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.9918,
+            "wall_ms": 405.03,
+            "cpu_ms": 18.22
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "c5c4",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": 4,
+            "nodes": 1116,
+            "batches": 63,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 8.0251,
+            "wall_ms": 406.46,
+            "cpu_ms": 17.45
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "d7d5",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": 0,
+            "nodes": 1100,
+            "batches": 62,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 7.9926,
+            "wall_ms": 402.12,
+            "cpu_ms": 17.53
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "e7e5",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": 0,
+            "nodes": 1116,
+            "batches": 63,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 8.0251,
+            "wall_ms": 404.76,
+            "cpu_ms": 17.67
+          },
+          {
+            "elo": 3000,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp1p1ppp/4p3/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "b8c6",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": -6,
+            "nodes": 1103,
+            "batches": 64,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 7.2976,
+            "wall_ms": 401.63,
+            "cpu_ms": 16.73
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp1p1ppp/4p3/2p5/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+            "played": "c5d4",
+            "orig_nc_move": "f7f6",
+            "orig_sf_best": "c5d4",
+            "live_sf_best_d14": "c5d4",
+            "eval_drop_cp": 7,
+            "nodes": 1103,
+            "batches": 64,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 7.2976,
+            "wall_ms": 402.64,
+            "cpu_ms": 17.55
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/4P3/2N3P1/PPPP1P1P/R1BQKBNR b KQkq - 0 3",
+            "played": "g7g6",
+            "orig_nc_move": "c5c4",
+            "orig_sf_best": "g7g6",
+            "live_sf_best_d14": "g7g6",
+            "eval_drop_cp": 1,
+            "nodes": 1519,
+            "batches": 107,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 6.3063,
+            "wall_ms": 402.84,
+            "cpu_ms": 21.99
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/8/2pP4/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "d8d5",
+            "orig_nc_move": "e7e5",
+            "orig_sf_best": "d8d5",
+            "live_sf_best_d14": "d8d5",
+            "eval_drop_cp": -2,
+            "nodes": 1267,
+            "batches": 76,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.5392,
+            "wall_ms": 400.72,
+            "cpu_ms": 20.96
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "rnbqkbnr/pp2pppp/8/2pP4/8/2P5/PP1P1PPP/RNBQKBNR b KQkq - 0 3",
+            "played": "d8d5",
+            "orig_nc_move": "f7f6",
+            "orig_sf_best": "d8d5",
+            "live_sf_best_d14": "d8d5",
+            "eval_drop_cp": 6,
+            "nodes": 1267,
+            "batches": 76,
+            "max_leaf_ply": 14,
+            "avg_leaf_ply": 6.5392,
+            "wall_ms": 400.59,
+            "cpu_ms": 20.38
+          },
+          {
+            "elo": 3190,
+            "ply": 6,
+            "fen": "r1bqkbnr/pp1ppppp/2n5/1Bp5/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+            "played": "g8f6",
+            "orig_nc_move": "c5c4",
+            "orig_sf_best": "e7e6",
+            "live_sf_best_d14": "g7g6",
+            "eval_drop_cp": 14,
+            "nodes": 1022,
+            "batches": 64,
+            "max_leaf_ply": 13,
+            "avg_leaf_ply": 5.5509,
+            "wall_ms": 404.46,
+            "cpu_ms": 12.57
+          }
+        ]
+      }
+    },
+    "clean_500_puzzles_50ms": {
+      "baseline_b16_prod_db": {
+        "solved": 405,
+        "total": 500,
+        "accuracy_pct": 81.0,
+        "elapsed_s": 25.42,
+        "search_wall_s": 25.34,
+        "total_nodes": 67614,
+        "mean_nodes": 135.23,
+        "total_batches": 4062,
+        "mean_batches": 8.12,
+        "nps_search": 2668.3,
+        "nps_wall": 2659.5,
+        "mean_avg_ply": 2.214,
+        "mean_max_ply": 4.332,
+        "global_max_ply": 6,
+        "mean_cpu_ms_per_puzzle": 3.924,
+        "gear_counts": {},
+        "batch_share_pct": {},
+        "gear_reasons": {},
+        "by_bucket": {
+          "<1200": {
+            "solved": 96,
+            "total": 100,
+            "accuracy_pct": 96.0
+          },
+          "1200-1499": {
+            "solved": 89,
+            "total": 100,
+            "accuracy_pct": 89.0
+          },
+          "1500-1799": {
+            "solved": 82,
+            "total": 100,
+            "accuracy_pct": 82.0
+          },
+          "1800-2099": {
+            "solved": 76,
+            "total": 100,
+            "accuracy_pct": 76.0
+          },
+          "2100+": {
+            "solved": 62,
+            "total": 100,
+            "accuracy_pct": 62.0
+          }
+        }
+      },
+      "gear_shift_v2_collision_cold": {
+        "solved": 450,
+        "total": 500,
+        "accuracy_pct": 90.0,
+        "elapsed_s": 21.0,
+        "search_wall_s": 20.93,
+        "total_nodes": 50014,
+        "mean_nodes": 100.03,
+        "total_batches": 4934,
+        "mean_batches": 9.87,
+        "nps_search": 2389.3,
+        "nps_wall": 2382.1,
+        "mean_avg_ply": 3.763,
+        "mean_max_ply": 7.584,
+        "global_max_ply": 13,
+        "mean_cpu_ms_per_puzzle": 2.139,
+        "gear_counts": {
+          "4": 2621,
+          "16": 2136,
+          "8": 177
+        },
+        "batch_share_pct": {
+          "16": 43.29,
+          "4": 53.12,
+          "8": 3.59
+        },
+        "gear_reasons": {
+          "1": 1704,
+          "3": 194,
+          "0": 2136,
+          "4": 177,
+          "2": 723
+        },
+        "by_bucket": {
+          "<1200": {
+            "solved": 99,
+            "total": 100,
+            "accuracy_pct": 99.0
+          },
+          "1200-1499": {
+            "solved": 95,
+            "total": 100,
+            "accuracy_pct": 95.0
+          },
+          "1500-1799": {
+            "solved": 93,
+            "total": 100,
+            "accuracy_pct": 93.0
+          },
+          "1800-2099": {
+            "solved": 87,
+            "total": 100,
+            "accuracy_pct": 87.0
+          },
+          "2100+": {
+            "solved": 76,
+            "total": 100,
+            "accuracy_pct": 76.0
+          }
+        }
+      }
+    },
+    "clean_500_puzzles_200ms": {
+      "baseline_b16_prod_db": {
+        "solved": 471,
+        "total": 500,
+        "accuracy_pct": 94.2,
+        "elapsed_s": 82.43,
+        "search_wall_s": 82.31,
+        "total_nodes": 229565,
+        "mean_nodes": 459.13,
+        "total_batches": 13492,
+        "mean_batches": 26.98,
+        "nps_search": 2789.0,
+        "nps_wall": 2785.1,
+        "mean_avg_ply": 4.841,
+        "mean_max_ply": 10.08,
+        "global_max_ply": 14,
+        "mean_cpu_ms_per_puzzle": 10.039,
+        "gear_counts": {},
+        "batch_share_pct": {},
+        "gear_reasons": {},
+        "by_bucket": {
+          "<1200": {
+            "solved": 99,
+            "total": 100,
+            "accuracy_pct": 99.0
+          },
+          "1200-1499": {
+            "solved": 98,
+            "total": 100,
+            "accuracy_pct": 98.0
+          },
+          "1500-1799": {
+            "solved": 96,
+            "total": 100,
+            "accuracy_pct": 96.0
+          },
+          "1800-2099": {
+            "solved": 94,
+            "total": 100,
+            "accuracy_pct": 94.0
+          },
+          "2100+": {
+            "solved": 84,
+            "total": 100,
+            "accuracy_pct": 84.0
+          }
+        }
+      },
+      "gear_shift_v2_collision_cold": {
+        "solved": 478,
+        "total": 500,
+        "accuracy_pct": 95.6,
+        "elapsed_s": 78.06,
+        "search_wall_s": 77.96,
+        "total_nodes": 207190,
+        "mean_nodes": 414.38,
+        "total_batches": 16343,
+        "mean_batches": 32.69,
+        "nps_search": 2657.6,
+        "nps_wall": 2654.1,
+        "mean_avg_ply": 5.856,
+        "mean_max_ply": 10.6,
+        "global_max_ply": 14,
+        "mean_cpu_ms_per_puzzle": 6.305,
+        "gear_counts": {
+          "4": 5794,
+          "16": 9563,
+          "8": 986
+        },
+        "batch_share_pct": {
+          "16": 58.51,
+          "4": 35.45,
+          "8": 6.03
+        },
+        "gear_reasons": {
+          "1": 1704,
+          "3": 1064,
+          "0": 9563,
+          "4": 986,
+          "2": 3026
+        },
+        "by_bucket": {
+          "<1200": {
+            "solved": 99,
+            "total": 100,
+            "accuracy_pct": 99.0
+          },
+          "1200-1499": {
+            "solved": 97,
+            "total": 100,
+            "accuracy_pct": 97.0
+          },
+          "1500-1799": {
+            "solved": 96,
+            "total": 100,
+            "accuracy_pct": 96.0
+          },
+          "1800-2099": {
+            "solved": 96,
+            "total": 100,
+            "accuracy_pct": 96.0
+          },
+          "2100+": {
+            "solved": 90,
+            "total": 100,
+            "accuracy_pct": 90.0
+          }
+        }
+      }
+    }
+  },
+  "phase2_step2_ground_truth_and_safe4_quant": {
+    "calib_positions": 2000,
+    "far_test_positions": 5000,
+    "clean_puzzles_total": 500,
+    "variants": {
+      "V0_Pure_FP16": {
+        "quantized_blocks": [],
+        "model_size_mb": 13.36,
+        "quant_time_s": 0.0,
+        "raw_npu_b16_pos_s": 2464.5,
+        "fp16_agreement": {
+          "top1_agreement_pct": 100.0,
+          "mean_policy_kl": 0.0,
+          "max_value_diff": 0.0,
+          "mean_value_diff": 0.0
+        },
+        "ground_truth_far_test_5000": {
+          "gt_masked_top1_pct": 50.46,
+          "gt_masked_top3_pct": 79.44,
+          "gt_masked_policy_ce": 1.618,
+          "gt_value_mse": 0.06117,
+          "gt_decisive_sign_pct": 93.49,
+          "gt_decisive_count": 3239,
+          "gt_illegal_targets": 0
+        },
+        "in_engine_fast_tree_12ply": {
+          "plies": 12,
+          "in_engine_added_visits_s": 2588.0,
+          "in_engine_total_visits_s": 3125.5,
+          "cpu_ms_per_move": 31.16
+        },
+        "clean_500_puzzles_100ms": {
+          "solved": 428,
+          "total": 500,
+          "accuracy_pct": 85.6,
+          "elapsed_s": 44.3,
+          "search_wall_s": 44.22,
+          "total_nodes": 118665,
+          "mean_nodes": 237.33,
+          "total_batches": 7145,
+          "mean_batches": 14.29,
+          "nps_search": 2683.4,
+          "nps_wall": 2678.4,
+          "mean_avg_ply": 3.327,
+          "mean_max_ply": 7.068,
+          "global_max_ply": 10,
+          "mean_cpu_ms_per_puzzle": 5.718,
+          "gear_counts": {},
+          "batch_share_pct": {},
+          "gear_reasons": {},
+          "by_bucket": {
+            "<1200": {
+              "solved": 96,
+              "total": 100,
+              "accuracy_pct": 96.0
+            },
+            "1200-1499": {
+              "solved": 89,
+              "total": 100,
+              "accuracy_pct": 89.0
+            },
+            "1500-1799": {
+              "solved": 91,
+              "total": 100,
+              "accuracy_pct": 91.0
+            },
+            "1800-2099": {
+              "solved": 83,
+              "total": 100,
+              "accuracy_pct": 83.0
+            },
+            "2100+": {
+              "solved": 69,
+              "total": 100,
+              "accuracy_pct": 69.0
+            }
+          }
+        },
+        "clean_500_puzzles_200nodes": {
+          "solved": 411,
+          "total": 500,
+          "accuracy_pct": 82.2,
+          "elapsed_s": 35.19,
+          "search_wall_s": 35.11,
+          "total_nodes": 94183,
+          "mean_nodes": 188.37,
+          "total_batches": 5679,
+          "mean_batches": 11.36,
+          "nps_search": 2682.3,
+          "nps_wall": 2676.5,
+          "mean_avg_ply": 2.822,
+          "mean_max_ply": 5.82,
+          "global_max_ply": 8,
+          "mean_cpu_ms_per_puzzle": 4.716,
+          "gear_counts": {},
+          "batch_share_pct": {},
+          "gear_reasons": {},
+          "by_bucket": {
+            "<1200": {
+              "solved": 96,
+              "total": 100,
+              "accuracy_pct": 96.0
+            },
+            "1200-1499": {
+              "solved": 88,
+              "total": 100,
+              "accuracy_pct": 88.0
+            },
+            "1500-1799": {
+              "solved": 85,
+              "total": 100,
+              "accuracy_pct": 85.0
+            },
+            "1800-2099": {
+              "solved": 80,
+              "total": 100,
+              "accuracy_pct": 80.0
+            },
+            "2100+": {
+              "solved": 62,
+              "total": 100,
+              "accuracy_pct": 62.0
+            }
+          }
+        }
+      },
+      "Hybrid_Middle_2_to_7_ConvOnly": {
+        "quantized_blocks": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "model_size_mb": 15.33,
+        "quant_time_s": 16.52,
+        "raw_npu_b16_pos_s": 2922.4,
+        "fp16_agreement": {
+          "top1_agreement_pct": 95.52,
+          "mean_policy_kl": 0.004891,
+          "max_value_diff": 0.56921,
+          "mean_value_diff": 0.01596
+        },
+        "ground_truth_far_test_5000": {
+          "gt_masked_top1_pct": 50.54,
+          "gt_masked_top3_pct": 79.54,
+          "gt_masked_policy_ce": 1.6215,
+          "gt_value_mse": 0.06085,
+          "gt_decisive_sign_pct": 93.67,
+          "gt_decisive_count": 3239,
+          "gt_illegal_targets": 0
+        },
+        "in_engine_fast_tree_12ply": {
+          "plies": 12,
+          "in_engine_added_visits_s": 3098.5,
+          "in_engine_total_visits_s": 3738.4,
+          "cpu_ms_per_move": 38.09
+        },
+        "clean_500_puzzles_100ms": {
+          "solved": 447,
+          "total": 500,
+          "accuracy_pct": 89.4,
+          "elapsed_s": 43.44,
+          "search_wall_s": 43.34,
+          "total_nodes": 139248,
+          "mean_nodes": 278.5,
+          "total_batches": 8359,
+          "mean_batches": 16.72,
+          "nps_search": 3212.8,
+          "nps_wall": 3205.2,
+          "mean_avg_ply": 3.697,
+          "mean_max_ply": 8.042,
+          "global_max_ply": 11,
+          "mean_cpu_ms_per_puzzle": 6.47,
+          "gear_counts": {},
+          "batch_share_pct": {},
+          "gear_reasons": {},
+          "by_bucket": {
+            "<1200": {
+              "solved": 97,
+              "total": 100,
+              "accuracy_pct": 97.0
+            },
+            "1200-1499": {
+              "solved": 95,
+              "total": 100,
+              "accuracy_pct": 95.0
+            },
+            "1500-1799": {
+              "solved": 94,
+              "total": 100,
+              "accuracy_pct": 94.0
+            },
+            "1800-2099": {
+              "solved": 91,
+              "total": 100,
+              "accuracy_pct": 91.0
+            },
+            "2100+": {
+              "solved": 70,
+              "total": 100,
+              "accuracy_pct": 70.0
+            }
+          }
+        },
+        "clean_500_puzzles_200nodes": {
+          "solved": 413,
+          "total": 500,
+          "accuracy_pct": 82.6,
+          "elapsed_s": 29.9,
+          "search_wall_s": 29.81,
+          "total_nodes": 94315,
+          "mean_nodes": 188.63,
+          "total_batches": 5688,
+          "mean_batches": 11.38,
+          "nps_search": 3163.7,
+          "nps_wall": 3154.2,
+          "mean_avg_ply": 2.823,
+          "mean_max_ply": 5.82,
+          "global_max_ply": 8,
+          "mean_cpu_ms_per_puzzle": 4.834,
+          "gear_counts": {},
+          "batch_share_pct": {},
+          "gear_reasons": {},
+          "by_bucket": {
+            "<1200": {
+              "solved": 97,
+              "total": 100,
+              "accuracy_pct": 97.0
+            },
+            "1200-1499": {
+              "solved": 88,
+              "total": 100,
+              "accuracy_pct": 88.0
+            },
+            "1500-1799": {
+              "solved": 86,
+              "total": 100,
+              "accuracy_pct": 86.0
+            },
+            "1800-2099": {
+              "solved": 80,
+              "total": 100,
+              "accuracy_pct": 80.0
+            },
+            "2100+": {
+              "solved": 62,
+              "total": 100,
+              "accuracy_pct": 62.0
+            }
+          }
+        }
+      },
+      "Hybrid_Safe4_2356_ConvOnly": {
+        "quantized_blocks": [
+          2,
+          3,
+          5,
+          6
+        ],
+        "model_size_mb": 19.13,
+        "quant_time_s": 18.42,
+        "raw_npu_b16_pos_s": 2731.6,
+        "fp16_agreement": {
+          "top1_agreement_pct": 96.4,
+          "mean_policy_kl": 0.003075,
+          "max_value_diff": 0.54297,
+          "mean_value_diff": 0.01246
+        },
+        "ground_truth_far_test_5000": {
+          "gt_masked_top1_pct": 50.54,
+          "gt_masked_top3_pct": 79.52,
+          "gt_masked_policy_ce": 1.619,
+          "gt_value_mse": 0.06143,
+          "gt_decisive_sign_pct": 93.61,
+          "gt_decisive_count": 3239,
+          "gt_illegal_targets": 0
+        },
+        "in_engine_fast_tree_12ply": {
+          "plies": 12,
+          "in_engine_added_visits_s": 2920.7,
+          "in_engine_total_visits_s": 3524.8,
+          "cpu_ms_per_move": 36.84
+        },
+        "clean_500_puzzles_100ms": {
+          "solved": 441,
+          "total": 500,
+          "accuracy_pct": 88.2,
+          "elapsed_s": 43.91,
+          "search_wall_s": 43.82,
+          "total_nodes": 132160,
+          "mean_nodes": 264.32,
+          "total_batches": 7946,
+          "mean_batches": 15.89,
+          "nps_search": 3016.1,
+          "nps_wall": 3009.7,
+          "mean_avg_ply": 3.576,
+          "mean_max_ply": 7.654,
+          "global_max_ply": 10,
+          "mean_cpu_ms_per_puzzle": 6.221,
+          "gear_counts": {},
+          "batch_share_pct": {},
+          "gear_reasons": {},
+          "by_bucket": {
+            "<1200": {
+              "solved": 96,
+              "total": 100,
+              "accuracy_pct": 96.0
+            },
+            "1200-1499": {
+              "solved": 94,
+              "total": 100,
+              "accuracy_pct": 94.0
+            },
+            "1500-1799": {
+              "solved": 93,
+              "total": 100,
+              "accuracy_pct": 93.0
+            },
+            "1800-2099": {
+              "solved": 88,
+              "total": 100,
+              "accuracy_pct": 88.0
+            },
+            "2100+": {
+              "solved": 70,
+              "total": 100,
+              "accuracy_pct": 70.0
+            }
+          }
+        },
+        "clean_500_puzzles_200nodes": {
+          "solved": 414,
+          "total": 500,
+          "accuracy_pct": 82.8,
+          "elapsed_s": 31.84,
+          "search_wall_s": 31.76,
+          "total_nodes": 94180,
+          "mean_nodes": 188.36,
+          "total_batches": 5681,
+          "mean_batches": 11.36,
+          "nps_search": 2965.0,
+          "nps_wall": 2957.6,
+          "mean_avg_ply": 2.823,
+          "mean_max_ply": 5.816,
+          "global_max_ply": 8,
+          "mean_cpu_ms_per_puzzle": 4.698,
+          "gear_counts": {},
+          "batch_share_pct": {},
+          "gear_reasons": {},
+          "by_bucket": {
+            "<1200": {
+              "solved": 96,
+              "total": 100,
+              "accuracy_pct": 96.0
+            },
+            "1200-1499": {
+              "solved": 89,
+              "total": 100,
+              "accuracy_pct": 89.0
+            },
+            "1500-1799": {
+              "solved": 87,
+              "total": 100,
+              "accuracy_pct": 87.0
+            },
+            "1800-2099": {
+              "solved": 81,
+              "total": 100,
+              "accuracy_pct": 81.0
+            },
+            "2100+": {
+              "solved": 61,
+              "total": 100,
+              "accuracy_pct": 61.0
+            }
+          }
+        }
+      }
+    }
+  }
+}

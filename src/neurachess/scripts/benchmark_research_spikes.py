@@ -43,10 +43,13 @@ from neurachess.models.npu_compiler import (
     DEFAULT_WEIGHTS_NPZ,
     NPUModel,
 )
-from neurachess.models.se_resnet_backbone import build_openvino_se_resnet
+from neurachess.models.se_resnet_backbone import (
+    build_openvino_research_head_variant,
+    build_openvino_se_resnet,
+)
 from neurachess.scripts.evaluate import eval_stm_to_nc_drop, resolve_stockfish_path, unpack_raw_to_gpu_inputs
 from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch
-from neurachess.training.bitboard_dataset import RECORD_SIZE_V1, unpack_position
+from neurachess.training.bitboard_dataset import RECORD_SIZE_V1, RECORD_SIZE_V2, unpack_position
 
 ROOT_DIR = find_repo_root()
 
@@ -278,6 +281,12 @@ def _eval_loss_fens(
         )
 
     n = max(1, len(items))
+    total_gears = sum(gear_counts.values())
+    batch_share_pct = (
+        {k: round(100.0 * v / total_gears, 2) for k, v in sorted(gear_counts.items())}
+        if total_gears > 0
+        else {}
+    )
     return {
         "total": len(items),
         "orig_sf_best_matches": sf_exact_orig,
@@ -287,22 +296,38 @@ def _eval_loss_fens(
         "blunders_ge_100cp": blunders_ge100,
         "mean_cp_drop": round(sum(drops) / n, 2),
         "median_cp_drop": round(float(statistics.median(drops)), 2),
+        "total_nodes": sum(nodes_list),
         "mean_nodes": round(sum(nodes_list) / n, 2),
+        "total_batches": total_gears if total_gears > 0 else sum(batches_list),
         "mean_batches": round(sum(batches_list) / n, 2),
         "mean_max_ply": round(sum(max_ply_list) / n, 3),
         "global_max_ply": max(max_ply_list) if max_ply_list else 0,
         "mean_avg_ply": round(sum(avg_ply_list) / n, 3),
         "mean_cpu_ms": round(sum(cpu_ms_list) / n, 3),
         "gear_counts": gear_counts,
+        "batch_share_pct": batch_share_pct,
         "gear_reasons": gear_reasons,
         "per_fen": per_fen,
     }
 
 
-def _eval_500_puzzles(searcher: NPUBatchedPUCTSearch, puzzles: list[dict], max_nodes: int) -> dict:
+def _eval_500_puzzles(
+    searcher: NPUBatchedPUCTSearch,
+    puzzles: list[dict],
+    max_nodes: int | None = None,
+    movetime_ms: int | None = None,
+) -> dict:
     solved = 0
     by_bucket: dict[str, dict[str, int | float]] = {}
     cpu_ms_sum = 0.0
+    total_nodes = 0
+    total_batches = 0
+    max_plies: list[int] = []
+    avg_plies: list[float] = []
+    gear_counts: dict[str, int] = {}
+    gear_reasons: dict[str, int] = {}
+    search_wall_s = 0.0
+    eff_movetime = int(movetime_ms) if movetime_ms is not None else max(1000, int(max_nodes or 200) * 4)
     t0 = time.perf_counter()
 
     for p in puzzles:
@@ -314,7 +339,9 @@ def _eval_500_puzzles(searcher: NPUBatchedPUCTSearch, puzzles: list[dict], max_n
         board = chess.Board(p["fen"])
         sol = p["solution_move"]
         searcher.clear_state()
-        _, uci, _, _, pv, _ = searcher.search(board, movetime_ms=max(1000, max_nodes * 4), max_nodes=max_nodes)
+        ts0 = time.perf_counter()
+        _, uci, _, nodes, pv, max_d = searcher.search(board, movetime_ms=eff_movetime, max_nodes=max_nodes)
+        search_wall_s += time.perf_counter() - ts0
         prof = searcher.last_profile or {}
         cpu_ms_sum += float(
             prof.get("select_s", 0.0)
@@ -323,6 +350,14 @@ def _eval_500_puzzles(searcher: NPUBatchedPUCTSearch, puzzles: list[dict], max_n
             + prof.get("backup_s", 0.0)
             + prof.get("pre_loop_s", 0.0)
         ) * 1000.0
+        total_nodes += int(nodes)
+        total_batches += int(prof.get("batches", 0))
+        max_plies.append(int(prof.get("max_leaf_ply", max_d)))
+        avg_plies.append(float(prof.get("avg_leaf_ply", 0.0)))
+        for k, v in (prof.get("batch_gear_counts") or {}).items():
+            gear_counts[k] = gear_counts.get(k, 0) + int(v)
+        for k, v in (prof.get("gear_reasons") or {}).items():
+            gear_reasons[k] = gear_reasons.get(k, 0) + int(v)
 
         ok = (uci == sol) or (len(pv) > 0 and pv[0] == sol)
         if ok:
@@ -330,14 +365,34 @@ def _eval_500_puzzles(searcher: NPUBatchedPUCTSearch, puzzles: list[dict], max_n
             by_bucket[bname]["solved"] += 1
 
     dt = time.perf_counter() - t0
+    n = max(1, len(puzzles))
+    total_gears = sum(gear_counts.values())
+    batch_share_pct = (
+        {k: round(100.0 * v / total_gears, 2) for k, v in sorted(gear_counts.items())}
+        if total_gears > 0
+        else {}
+    )
     for bname, bs in by_bucket.items():
         bs["accuracy_pct"] = round(100.0 * bs["solved"] / max(1, bs["total"]), 2)
     return {
         "solved": solved,
         "total": len(puzzles),
-        "accuracy_pct": round(100.0 * solved / max(1, len(puzzles)), 2),
+        "accuracy_pct": round(100.0 * solved / n, 2),
         "elapsed_s": round(dt, 2),
-        "mean_cpu_ms_per_puzzle": round(cpu_ms_sum / max(1, len(puzzles)), 3),
+        "search_wall_s": round(search_wall_s, 2),
+        "total_nodes": total_nodes,
+        "mean_nodes": round(total_nodes / n, 2),
+        "total_batches": total_batches,
+        "mean_batches": round(total_batches / n, 2),
+        "nps_search": round(total_nodes / max(1e-6, search_wall_s), 1),
+        "nps_wall": round(total_nodes / max(1e-6, dt), 1),
+        "mean_avg_ply": round(sum(avg_plies) / n, 3),
+        "mean_max_ply": round(sum(max_plies) / n, 3),
+        "global_max_ply": max(max_plies) if max_plies else 0,
+        "mean_cpu_ms_per_puzzle": round(cpu_ms_sum / n, 3),
+        "gear_counts": gear_counts,
+        "batch_share_pct": batch_share_pct,
+        "gear_reasons": gear_reasons,
         "by_bucket": by_bucket,
     }
 
@@ -714,33 +769,78 @@ def _load_2000_calib(private_root: Path) -> np.ndarray:
     return np.ascontiguousarray(calib[rng.permutation(calib.shape[0])], dtype=np.float32)
 
 
-def _load_5000_far_test(private_root: Path) -> tuple[np.ndarray, np.ndarray]:
+def _load_5000_far_test_with_targets(
+    private_root: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     bin_path = private_root / "data" / "test_far_50k.bin"
     raw_bytes = bin_path.read_bytes()[: 5000 * RECORD_SIZE_V1]
     x = unpack_raw_to_gpu_inputs(raw_bytes, 5000).numpy().astype(np.float32)
     masks = np.empty((5000, 4672), dtype=np.bool_)
+    acts = np.empty((5000,), dtype=np.int64)
+    val_targets = np.empty((5000,), dtype=np.float32)
+    cps = np.empty((5000,), dtype=np.int32)
     for i in range(5000):
         rec = unpack_position(raw_bytes[i * RECORD_SIZE_V1 : (i + 1) * RECORD_SIZE_V1])
         masks[i] = get_legal_action_mask(rec["board"]) > 0.5
-    return np.ascontiguousarray(x, dtype=np.float32), masks
+        acts[i] = int(rec["action_index"])
+        cp = int(rec["eval_cp"])
+        cps[i] = cp
+        val_targets[i] = float(np.tanh(cp * 0.00287823))
+    return np.ascontiguousarray(x, dtype=np.float32), masks, acts, val_targets, cps
 
 
-def _eval_5000_on_npu(ov_model: ov.Model, x_5000: np.ndarray, cache_dir: str) -> tuple[np.ndarray, np.ndarray, float]:
-    npu_m = NPUModel(
-        batch_size=16,
-        cache_dir=cache_dir,
-        device="NPU",
-        use_turbo=True,
-        performance_hint="LATENCY",
-        ov_model_override=ov_model,
-        verbose=False,
-    )
+def _load_5000_far_test(private_root: Path) -> tuple[np.ndarray, np.ndarray]:
+    x, masks, _, _, _ = _load_5000_far_test_with_targets(private_root)
+    return x, masks
+
+
+def _compute_ground_truth_metrics(
+    logits: np.ndarray,
+    vals: np.ndarray,
+    masks: np.ndarray,
+    acts: np.ndarray,
+    val_targets: np.ndarray,
+    cps: np.ndarray,
+) -> dict:
+    """Compute ground-truth Stockfish policy accuracy, masked cross-entropy, and value MSE."""
+    n = logits.shape[0]
+    masked_logits = np.where(masks, logits.astype(np.float64), -10000.0)
+    preds = np.argmax(masked_logits, axis=1)
+    top1_ok = int(np.sum(preds == acts))
+
+    top3_idx = np.argpartition(masked_logits, -3, axis=1)[:, -3:]
+    top3_ok = int(np.sum(np.any(top3_idx == acts[:, None], axis=1)))
+
+    illegal_targets = int(np.sum(~masks[np.arange(n), acts]))
+    max_row = np.max(masked_logits, axis=1, keepdims=True)
+    log_z = max_row[:, 0] + np.log(np.sum(np.exp(masked_logits - max_row), axis=1))
+    target_logits = masked_logits[np.arange(n), acts]
+    ce_sum = float(np.sum(log_z - target_logits))
+
+    v_err = vals.astype(np.float64) - val_targets.astype(np.float64)
+    val_mse = float(np.mean(v_err * v_err))
+
+    dec_mask = np.abs(cps) >= 50
+    dec_total = int(np.sum(dec_mask))
+    dec_ok = int(np.sum(((cps[dec_mask] > 0) & (vals[dec_mask] > 0)) | ((cps[dec_mask] < 0) & (vals[dec_mask] < 0))))
+
+    return {
+        "gt_masked_top1_pct": round(100.0 * top1_ok / max(1, n), 2),
+        "gt_masked_top3_pct": round(100.0 * top3_ok / max(1, n), 2),
+        "gt_masked_policy_ce": round(ce_sum / max(1, n), 4),
+        "gt_value_mse": round(val_mse, 5),
+        "gt_decisive_sign_pct": round(100.0 * dec_ok / max(1, dec_total), 2),
+        "gt_decisive_count": dec_total,
+        "gt_illegal_targets": illegal_targets,
+    }
+
+
+def _eval_5000_on_npu_model(npu_m: NPUModel, x_5000: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
     req = npu_m.infer_request
     zc_in = req.get_input_tensor().data
     logits_out = np.empty((5000, 4672), dtype=np.float32)
     vals_out = np.empty((5000,), dtype=np.float32)
 
-    # Warmup & raw latency measurement
     zc_in[...] = x_5000[:16]
     for _ in range(5):
         req.infer()
@@ -762,6 +862,19 @@ def _eval_5000_on_npu(ov_model: ov.Model, x_5000: np.ndarray, cache_dir: str) ->
     dt = time.perf_counter() - t_inf0
     raw_pos_s = round(5000.0 / max(1e-6, dt), 1)
     return logits_out, vals_out, raw_pos_s
+
+
+def _eval_5000_on_npu(ov_model: ov.Model, x_5000: np.ndarray, cache_dir: str) -> tuple[np.ndarray, np.ndarray, float]:
+    npu_m = NPUModel(
+        batch_size=16,
+        cache_dir=cache_dir,
+        device="NPU",
+        use_turbo=True,
+        performance_hint="LATENCY",
+        ov_model_override=ov_model,
+        verbose=False,
+    )
+    return _eval_5000_on_npu_model(npu_m, x_5000)
 
 
 def _compute_fidelity(fp_l: np.ndarray, fp_v: np.ndarray, vr_l: np.ndarray, vr_v: np.ndarray, masks: np.ndarray) -> dict:
@@ -792,10 +905,13 @@ def _compute_fidelity(fp_l: np.ndarray, fp_v: np.ndarray, vr_l: np.ndarray, vr_v
     }
 
 
-def _measure_in_engine_fast_tree_nps(ov_model: ov.Model, cache_dir: str, num_plies: int = 12, movetime_ms: int = 400) -> dict:
+def _measure_in_engine_fast_tree_nps_with_models(
+    root_m: NPUModel,
+    batch_m: NPUModel,
+    num_plies: int = 12,
+    movetime_ms: int = 400,
+) -> dict:
     assert_ac_power()
-    root_m = NPUModel(batch_size=1, cache_dir=cache_dir, device="NPU", use_turbo=True, performance_hint="LATENCY", ov_model_override=ov_model, verbose=False)
-    batch_m = NPUModel(batch_size=16, cache_dir=cache_dir, device="NPU", use_turbo=True, performance_hint="LATENCY", ov_model_override=ov_model, verbose=False)
 
     def _make():
         return NPUBatchedPUCTSearch(
@@ -858,6 +974,13 @@ def _measure_in_engine_fast_tree_nps(ov_model: ov.Model, cache_dir: str, num_pli
         "in_engine_total_visits_s": round(total_nodes / max(1e-6, total_wall), 1),
         "cpu_ms_per_move": round((total_cpu * 1000.0) / max(1, plies), 2),
     }
+
+
+def _measure_in_engine_fast_tree_nps(ov_model: ov.Model, cache_dir: str, num_plies: int = 12, movetime_ms: int = 400) -> dict:
+    assert_ac_power()
+    root_m = NPUModel(batch_size=1, cache_dir=cache_dir, device="NPU", use_turbo=True, performance_hint="LATENCY", ov_model_override=ov_model, verbose=False)
+    batch_m = NPUModel(batch_size=16, cache_dir=cache_dir, device="NPU", use_turbo=True, performance_hint="LATENCY", ov_model_override=ov_model, verbose=False)
+    return _measure_in_engine_fast_tree_nps_with_models(root_m, batch_m, num_plies=num_plies, movetime_ms=movetime_ms)
 
 
 def run_spike_3(private_root: Path) -> dict:
@@ -1019,19 +1142,444 @@ def run_spike_3(private_root: Path) -> dict:
         shutil.rmtree(tmp_cache_dir, ignore_errors=True)
 
 
+def _make_prod_searcher(
+    root_model: NPUModel,
+    batch_model: NPUModel,
+    use_dynamic_batch_shift: bool = False,
+    batch_models: dict[int, NPUModel] | None = None,
+) -> NPUBatchedPUCTSearch:
+    return NPUBatchedPUCTSearch(
+        root_model=root_model,
+        batch_model=batch_model,
+        batch_size=16,
+        c_puct=1.5,
+        use_fpu_reduction=True,
+        fpu_reduction=0.20,
+        root_fpu_reduction=0.10,
+        t_root=1.0,
+        use_exact_solver=True,
+        use_nn_cache=True,
+        use_tree_reuse=False,
+        use_fast_tree=True,
+        use_dynamic_batch_shift=use_dynamic_batch_shift,
+        batch_models=batch_models,
+    )
+
+
+def run_phase2_step1(private_root: Path, sf_path: str | None) -> dict:
+    """Phase 2 Step 1: Strict Collision & Cold-Start Gear-Shifter evaluation vs `baseline_b16_prod_db`."""
+    print("\n" + "=" * 80, flush=True)
+    print("PHASE 2 STEP 1: COLLISION-BOUNDED & COLD-START GEAR-SHIFTER (B=4/8/16)", flush=True)
+    print("=" * 80, flush=True)
+    assert_ac_power()
+
+    base_ov = ov.Core().read_model(DEFAULT_MODEL_XML)
+    co_models: dict[int, NPUModel] = {}
+    for b in (1, 4, 8, 16):
+        co_models[b] = NPUModel(
+            batch_size=b,
+            cache_dir=DEFAULT_CACHE_DIR,
+            device="NPU",
+            use_turbo=True,
+            performance_hint="LATENCY",
+            ov_model_override=base_ov,
+            verbose=False,
+        )
+
+    cat_c, cat_a = load_loss_anatomy_subsets(private_root)
+    puzzles_500 = load_clean_500_puzzles(private_root)
+    grader = FenStockfishGrader(sf_path, depth=14)
+
+    try:
+        arms = {
+            "baseline_b16_prod_db": _make_prod_searcher(co_models[1], co_models[16], use_dynamic_batch_shift=False),
+            "gear_shift_v2_collision_cold": _make_prod_searcher(
+                co_models[1],
+                co_models[16],
+                use_dynamic_batch_shift=True,
+                batch_models={4: co_models[4], 8: co_models[8], 16: co_models[16]},
+            ),
+        }
+
+        res: dict = {
+            "tactical_horizon_cat_c_19_400ms": {},
+            "value_search_cat_a_19_400ms": {},
+            "clean_500_puzzles_50ms": {},
+            "clean_500_puzzles_200ms": {},
+        }
+        for name, srch in arms.items():
+            assert_ac_power()
+            srch.search(chess.Board(), movetime_ms=80, max_nodes=32)
+
+            rc = _eval_loss_fens(srch, grader, cat_c, max_nodes=None, movetime_ms=400)
+            res["tactical_horizon_cat_c_19_400ms"][name] = rc
+            print(
+                f"[P2 Step 1] Cat(c) 19 @ 400ms | {name:28s}: SF={rc['orig_sf_best_matches']}/19 | "
+                f"Bl>=150={rc['blunders_ge_150cp']}/19 MeanDrop={rc['mean_cp_drop']:.1f}cp | "
+                f"Nodes={rc['total_nodes']} avg_ply={rc['mean_avg_ply']:.2f} max_ply={rc['mean_max_ply']:.2f} | "
+                f"Shares%={rc['batch_share_pct']} Reasons={rc['gear_reasons']}",
+                flush=True,
+            )
+
+            ra = _eval_loss_fens(srch, grader, cat_a, max_nodes=None, movetime_ms=400)
+            res["value_search_cat_a_19_400ms"][name] = ra
+            print(
+                f"[P2 Step 1] Cat(a) 19 @ 400ms | {name:28s}: SF={ra['orig_sf_best_matches']}/19 | "
+                f"Bl>=150={ra['blunders_ge_150cp']}/19 MeanDrop={ra['mean_cp_drop']:.1f}cp | "
+                f"Nodes={ra['total_nodes']} avg_ply={ra['mean_avg_ply']:.2f} max_ply={ra['mean_max_ply']:.2f} | "
+                f"Shares%={ra['batch_share_pct']} Reasons={ra['gear_reasons']}",
+                flush=True,
+            )
+
+            rp50 = _eval_500_puzzles(srch, puzzles_500, max_nodes=None, movetime_ms=50)
+            res["clean_500_puzzles_50ms"][name] = rp50
+            print(
+                f"[P2 Step 1] 500 Pz   @  50ms | {name:28s}: {rp50['solved']}/500 ({rp50['accuracy_pct']:.2f}%) | "
+                f"Nodes={rp50['total_nodes']} (mean={rp50['mean_nodes']:.1f}) avg_ply={rp50['mean_avg_ply']:.2f} "
+                f"max_ply={rp50['mean_max_ply']:.2f} | Shares%={rp50['batch_share_pct']} Reasons={rp50['gear_reasons']}",
+                flush=True,
+            )
+
+            rp200 = _eval_500_puzzles(srch, puzzles_500, max_nodes=None, movetime_ms=200)
+            res["clean_500_puzzles_200ms"][name] = rp200
+            print(
+                f"[P2 Step 1] 500 Pz   @ 200ms | {name:28s}: {rp200['solved']}/500 ({rp200['accuracy_pct']:.2f}%) | "
+                f"Nodes={rp200['total_nodes']} (mean={rp200['mean_nodes']:.1f}) avg_ply={rp200['mean_max_ply']:.2f} | "
+                f"Shares%={rp200['batch_share_pct']} Reasons={rp200['gear_reasons']}",
+                flush=True,
+            )
+
+        return res
+    finally:
+        grader.close()
+
+
+def run_phase2_step2(private_root: Path) -> dict:
+    """Phase 2 Step 2: Ground-Truth Stockfish Eval + Clean Puzzles for Safe-4 vs Middle-6 vs Pure FP16."""
+    import gc
+    import nncf
+
+    print("\n" + "=" * 80, flush=True)
+    print("PHASE 2 STEP 2: GROUND-TRUTH STOCKFISH EVAL & SAFE-4 HYBRID QUANTIZATION", flush=True)
+    print("=" * 80, flush=True)
+    assert_ac_power()
+
+    with np.load(DEFAULT_WEIGHTS_NPZ) as npz:
+        weights_dict = {k: npz[k] for k in npz.files}
+    base_ov = build_openvino_se_resnet(batch_size=-1, num_blocks=10, channels=192, in_channels=18, weights_dict=weights_dict)
+
+    print("[P2 Step 2] Loading 2,000 train calib + 5,000 Far-Test (with Stockfish GT) + 500 Clean Puzzles...", flush=True)
+    calib_2000 = _load_2000_calib(private_root)
+    calib_ds_2000 = nncf.Dataset([calib_2000[i : i + 1] for i in range(2000)], lambda a: {"board_state": a})
+    x_5000, masks_5000, acts_5000, val_targets_5000, cps_5000 = _load_5000_far_test_with_targets(private_root)
+    puzzles_500 = load_clean_500_puzzles(private_root)
+
+    base_ignore = ["^init_.*", ".*_se_.*", "^pol_.*", "^val_.*", "^(value|wdl)$"]
+    variants_spec: list[tuple[str, list[int], list[str]]] = [
+        ("V0_Pure_FP16", [], []),
+        (
+            "Hybrid_Middle_2_to_7_ConvOnly",
+            [2, 3, 4, 5, 6, 7],
+            base_ignore + [f"^res_{j}_.*" for j in (0, 1, 8, 9)] + [".*_out_.*"],
+        ),
+        (
+            "Hybrid_Safe4_2356_ConvOnly",
+            [2, 3, 5, 6],
+            base_ignore + [f"^res_{j}_.*" for j in (0, 1, 4, 7, 8, 9)] + [".*_out_.*"],
+        ),
+    ]
+
+    tmp_ir_dir = Path(tempfile.mkdtemp(prefix="nc_p2s2_ir_"))
+    tmp_cache_dir = Path(tempfile.mkdtemp(prefix="nc_p2s2_cache_"))
+    try:
+        fp_l = fp_v = None
+        results: dict = {}
+
+        for vname, quant_blocks, ig_patterns in variants_spec:
+            assert_ac_power()
+            if not quant_blocks:
+                vx = tmp_ir_dir / f"{vname}.xml"
+                ov.save_model(base_ov.clone(), str(vx), compress_to_fp16=True)
+                q_s = 0.0
+            else:
+                ig = nncf.IgnoredScope(patterns=ig_patterns, validate=True)
+                t0 = time.perf_counter()
+                qm = nncf.quantize(
+                    base_ov.clone(),
+                    calib_ds_2000,
+                    target_device=nncf.TargetDevice.NPU,
+                    subset_size=2000,
+                    fast_bias_correction=True,
+                    ignored_scope=ig,
+                )
+                q_s = round(time.perf_counter() - t0, 2)
+                vx = tmp_ir_dir / f"{vname}.xml"
+                ov.save_model(qm, str(vx), compress_to_fp16=True)
+
+            sz_mb = round(vx.with_suffix(".bin").stat().st_size / 1048576.0, 2)
+            vm = ov.Core().read_model(str(vx))
+            root_m = NPUModel(batch_size=1, cache_dir=str(tmp_cache_dir), device="NPU", use_turbo=True, performance_hint="LATENCY", ov_model_override=vm, verbose=False)
+            batch_m = NPUModel(batch_size=16, cache_dir=str(tmp_cache_dir), device="NPU", use_turbo=True, performance_hint="LATENCY", ov_model_override=vm, verbose=False)
+
+            vl, vv, v_raw = _eval_5000_on_npu_model(batch_m, x_5000)
+            if fp_l is None:
+                fp_l, fp_v = vl, vv
+                fid = {
+                    "top1_agreement_pct": 100.0,
+                    "mean_policy_kl": 0.0,
+                    "max_value_diff": 0.0,
+                    "mean_value_diff": 0.0,
+                }
+            else:
+                fid = _compute_fidelity(fp_l, fp_v, vl, vv, masks_5000)
+
+            gt = _compute_ground_truth_metrics(vl, vv, masks_5000, acts_5000, val_targets_5000, cps_5000)
+            eng = _measure_in_engine_fast_tree_nps_with_models(root_m, batch_m, num_plies=12, movetime_ms=400)
+
+            srch = _make_prod_searcher(root_m, batch_m, use_dynamic_batch_shift=False)
+            srch.search(chess.Board(), movetime_ms=80, max_nodes=32)
+
+            pz_100ms = _eval_500_puzzles(srch, puzzles_500, max_nodes=None, movetime_ms=100)
+            pz_200n = _eval_500_puzzles(srch, puzzles_500, max_nodes=200, movetime_ms=None)
+
+            results[vname] = {
+                "quantized_blocks": quant_blocks,
+                "model_size_mb": sz_mb,
+                "quant_time_s": q_s,
+                "raw_npu_b16_pos_s": v_raw,
+                "fp16_agreement": fid,
+                "ground_truth_far_test_5000": gt,
+                "in_engine_fast_tree_12ply": eng,
+                "clean_500_puzzles_100ms": pz_100ms,
+                "clean_500_puzzles_200nodes": pz_200n,
+            }
+            print(
+                f"[P2 Step 2] {vname:30s} ({sz_mb:5.2f}MB) | Far5k GT Top1={gt['gt_masked_top1_pct']:5.2f}% "
+                f"CE={gt['gt_masked_policy_ce']:.4f} MSE={gt['gt_value_mse']:.5f} | "
+                f"vsFP16: Top1={fid['top1_agreement_pct']:5.2f}% KL={fid['mean_policy_kl']:.6f} MaxV={fid['max_value_diff']:.4f} | "
+                f"Pz100ms={pz_100ms['solved']}/500 ({pz_100ms['accuracy_pct']:.2f}%, {pz_100ms['total_nodes']}n, "
+                f"{pz_100ms['nps_search']:.0f}nps) | Pz200n={pz_200n['solved']}/500 ({pz_200n['accuracy_pct']:.2f}%) | "
+                f"AddedNPS={eng['in_engine_added_visits_s']}",
+                flush=True,
+            )
+            del srch, root_m, batch_m, vm
+            gc.collect()
+
+        return {
+            "calib_positions": 2000,
+            "far_test_positions": 5000,
+            "clean_puzzles_total": len(puzzles_500),
+            "variants": results,
+        }
+    finally:
+        shutil.rmtree(tmp_ir_dir, ignore_errors=True)
+        shutil.rmtree(tmp_cache_dir, ignore_errors=True)
+
+
+def _gather_data_readiness(private_root: Path) -> dict:
+    data_dir = private_root / "data"
+    local_bins = []
+    sidecars_found = []
+    if data_dir.exists():
+        for p in sorted(data_dir.rglob("*.bin")):
+            sz = p.stat().st_size
+            rel = str(p.relative_to(data_dir)).replace("\\", "/")
+            fmt = (
+                "691B_v2"
+                if (sz > 0 and sz % RECORD_SIZE_V2 == 0 and "v2" in rel.lower())
+                else ("107B_v1" if (sz > 0 and sz % RECORD_SIZE_V1 == 0) else "other")
+            )
+            est_recs = sz // (RECORD_SIZE_V2 if fmt == "691B_v2" else RECORD_SIZE_V1) if fmt != "other" else None
+            local_bins.append({"file": rel, "size_mb": round(sz / 1048576.0, 2), "format": fmt, "records": est_recs})
+        sidecars_found = [str(p) for p in data_dir.rglob("*sidecar*")]
+
+    s3_prefixes: dict = {}
+    bucket = "s3://neurachess-spot-162290422654-us-east-1"
+    aws_bin = shutil.which("aws") or "aws"
+    for prefix in ("data/", "data/shards/", "data/shards_s1/", "checkpoints/", "manifests/"):
+        try:
+            proc = subprocess.run(
+                [aws_bin, "s3", "ls", f"{bucket}/{prefix}", "--recursive", "--human-readable", "--summarize"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+            s3_prefixes[prefix] = lines[-3:] if len(lines) >= 2 else (lines or [f"exit={proc.returncode}"])
+        except Exception as exc:
+            s3_prefixes[prefix] = [f"error: {exc}"]
+
+    return {
+        "local_data_dir": str(data_dir),
+        "local_bin_files": local_bins,
+        "local_sidecar_files": sidecars_found,
+        "s3_bucket": bucket,
+        "s3_read_only_summary": s3_prefixes,
+        "multipv_sidecars_available": len(sidecars_found) > 0,
+        "notes": {
+            "hl_gauss_64_ready": "YES - eval_cp is stored in every 107B v1 and 691B v2 record (1M v2 shards locally & on S3; 346M v1 shards require re-upload or regenerating from lichess_db_eval).",
+            "moves_left_head_ready": "NO - fixed position records (107B/691B) lack remaining game-length/ply labels; requires PGN/self-play game trajectories.",
+            "conv73_action_q_head_ready": "NO - 0 .sidecar.bin MultiPV files exist locally or on S3 (shards_s1/ is empty); training dense Q(s,a) requires either MultiPV Stockfish sidecars or search-tree leaf distillation.",
+        },
+    }
+
+
+def run_phase2_step3(private_root: Path) -> dict:
+    """Phase 2 Step 3: NPU 3720 Latency Benchmark for Stage 4 Experimental Heads + Data Readiness Report."""
+    import gc
+
+    print("\n" + "=" * 80, flush=True)
+    print("PHASE 2 STEP 3: NPU 3720 HEAD LATENCY BENCHMARKS (B=16) & DATA READINESS", flush=True)
+    print("=" * 80, flush=True)
+    assert_ac_power()
+
+    readiness = _gather_data_readiness(private_root)
+    with np.load(DEFAULT_WEIGHTS_NPZ) as npz:
+        weights_dict = {k: npz[k] for k in npz.files}
+
+    x_full = _load_5000_far_test_with_targets(private_root)[0][:16]
+    x_sample = np.ascontiguousarray(x_full, dtype=np.float32)
+
+    specs = [
+        ("baseline_10x192_scalar", "baseline_scalar"),
+        ("hl_gauss_64_plus_mlh", "hl_gauss_mlh"),
+        ("dual_conv73_policy_q_plus_val", "dual_conv73_with_val"),
+        ("dual_conv73_policy_q_only", "dual_conv73_only"),
+    ]
+
+    proc = psutil.Process(os.getpid())
+    core = ov.Core()
+    tmp_ir_dir = Path(tempfile.mkdtemp(prefix="nc_p2s3_ir_"))
+    tmp_cache_dir = Path(tempfile.mkdtemp(prefix="nc_p2s3_cache_"))
+
+    benchmarks: dict = {}
+    base_med_ms: float | None = None
+    try:
+        for label, variant in specs:
+            assert_ac_power()
+            gc.collect()
+            rss_before = proc.memory_info().rss / 1048576.0
+            try:
+                npu_before = int(core.get_property("NPU", "NPU_DEVICE_ALLOC_MEM_SIZE")) / 1048576.0
+            except Exception:
+                npu_before = None
+
+            ov_m = build_openvino_research_head_variant(
+                variant=variant,
+                batch_size=16,
+                num_blocks=10,
+                channels=192,
+                in_channels=18,
+                weights_dict=weights_dict,
+            )
+            vx = tmp_ir_dir / f"{label}.xml"
+            ov.save_model(ov_m, str(vx), compress_to_fp16=True)
+            ir_bin_mb = round(vx.with_suffix(".bin").stat().st_size / 1048576.0, 2)
+            vm = core.read_model(str(vx))
+
+            npu_m = NPUModel(
+                batch_size=16,
+                cache_dir=str(tmp_cache_dir),
+                device="NPU",
+                use_turbo=True,
+                performance_hint="LATENCY",
+                ov_model_override=vm,
+                verbose=False,
+            )
+            req = npu_m.infer_request
+            in_t = req.get_input_tensor().data
+            in_t[...] = x_sample
+
+            for _ in range(25):
+                req.infer()
+
+            lats_ms = []
+            for _ in range(200):
+                t0 = time.perf_counter()
+                req.infer()
+                lats_ms.append((time.perf_counter() - t0) * 1000.0)
+
+            out_info = []
+            all_finite = True
+            for oi in range(len(npu_m.compiled_model.outputs)):
+                arr = req.get_output_tensor(oi).data
+                fin = bool(np.all(np.isfinite(arr)))
+                if not fin:
+                    all_finite = False
+                out_info.append({"name": npu_m.compiled_model.outputs[oi].any_name, "shape": list(arr.shape), "finite": fin})
+
+            med = float(np.median(lats_ms))
+            mean_v = float(np.mean(lats_ms))
+            p10 = float(np.percentile(lats_ms, 10))
+            p90 = float(np.percentile(lats_ms, 90))
+            pos_s = round(16.0 * 1000.0 / max(1e-6, med), 1)
+            if base_med_ms is None:
+                base_med_ms = med
+            delta_ms = round(med - base_med_ms, 3)
+            delta_pct = round(100.0 * (med - base_med_ms) / max(1e-6, base_med_ms), 2)
+
+            rss_after = proc.memory_info().rss / 1048576.0
+            try:
+                npu_after = int(core.get_property("NPU", "NPU_DEVICE_ALLOC_MEM_SIZE")) / 1048576.0
+            except Exception:
+                npu_after = None
+
+            benchmarks[label] = {
+                "variant": variant,
+                "ir_bin_mb": ir_bin_mb,
+                "compile_time_s": round(npu_m.compile_time_s, 3),
+                "median_ms": round(med, 3),
+                "mean_ms": round(mean_v, 3),
+                "p10_ms": round(p10, 3),
+                "p90_ms": round(p90, 3),
+                "raw_b16_pos_per_sec": pos_s,
+                "delta_ms_vs_baseline": delta_ms,
+                "delta_pct_vs_baseline": delta_pct,
+                "delta_rss_mb": round(rss_after - rss_before, 2),
+                "npu_alloc_after_mb": round(npu_after, 2) if npu_after is not None else None,
+                "npu_alloc_delta_mb": round(npu_after - npu_before, 2) if (npu_after is not None and npu_before is not None) else None,
+                "outputs": out_info,
+                "all_outputs_finite": all_finite,
+            }
+            print(
+                f"[P2 Step 3] {label:32s}: Size={ir_bin_mb:5.2f}MB | med={med:6.3f}ms (p10={p10:.3f}, p90={p90:.3f}) | "
+                f"delta={delta_ms:+.3f}ms ({delta_pct:+.2f}%) | raw={pos_s:7.1f} pos/s | outputs={len(out_info)} finite={all_finite}",
+                flush=True,
+            )
+            del npu_m, req, vm, ov_m
+            gc.collect()
+
+        return {
+            "batch_size": 16,
+            "warmup_iters": 25,
+            "timed_iters": 200,
+            "npu_config": {"device": "NPU", "performance_hint": "LATENCY", "NPU_TURBO": True, "precision": "fp16"},
+            "head_latency_benchmarks": benchmarks,
+            "data_readiness": readiness,
+        }
+    finally:
+        shutil.rmtree(tmp_ir_dir, ignore_errors=True)
+        shutil.rmtree(tmp_cache_dir, ignore_errors=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run NeuraChess local NPU research spikes (v1.1)")
-    parser.add_argument("--spike", choices=["1", "2", "3", "all"], default="all")
+    parser.add_argument("--spike", choices=["1", "2", "3", "all", "none"], default="all")
+    parser.add_argument("--phase2", choices=["1", "2", "3", "all"], default=None)
     parser.add_argument("--private-root", type=Path, default=ROOT_DIR.parent / "NeuraChess-Private")
-    parser.add_argument("--output", type=Path, default=ROOT_DIR / "eval_results" / "research_spikes.json")
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--stockfish-path", type=str, default=None)
     args = parser.parse_args()
 
+    out_path = args.output
+    if out_path is None:
+        out_path = ROOT_DIR / "eval_results" / ("research_spikes_phase2.json" if args.phase2 else "research_spikes.json")
+
     ac = assert_ac_power()
     payload: dict = {}
-    if args.output.exists():
+    if out_path.exists():
         try:
-            payload = json.loads(args.output.read_text(encoding="utf-8"))
+            payload = json.loads(out_path.read_text(encoding="utf-8"))
         except Exception:
             payload = {}
 
@@ -1039,19 +1587,30 @@ def main() -> None:
     payload["model"] = "neurachess-10x192-fp16"
     payload["ac_power"] = ac
 
-    if args.spike in ("1", "all"):
-        payload["spike_1_see_puct"] = run_spike_1(args.private_root, args.stockfish_path)
-        _save_report(args.output, payload)
+    if args.phase2:
+        if args.phase2 in ("1", "all"):
+            payload["phase2_step1_collision_cold_start_gear_shift"] = run_phase2_step1(args.private_root, args.stockfish_path)
+            _save_report(out_path, payload)
+        if args.phase2 in ("2", "all"):
+            payload["phase2_step2_ground_truth_and_safe4_quant"] = run_phase2_step2(args.private_root)
+            _save_report(out_path, payload)
+        if args.phase2 in ("3", "all"):
+            payload["phase2_step3_head_latency_and_data_readiness"] = run_phase2_step3(args.private_root)
+            _save_report(out_path, payload)
+    else:
+        if args.spike in ("1", "all"):
+            payload["spike_1_see_puct"] = run_spike_1(args.private_root, args.stockfish_path)
+            _save_report(out_path, payload)
 
-    if args.spike in ("2", "all"):
-        payload["spike_2_dual_shape_gear_shifting"] = run_spike_2(args.private_root, args.stockfish_path)
-        _save_report(args.output, payload)
+        if args.spike in ("2", "all"):
+            payload["spike_2_dual_shape_gear_shifting"] = run_spike_2(args.private_root, args.stockfish_path)
+            _save_report(out_path, payload)
 
-    if args.spike in ("3", "all"):
-        payload["spike_3_blockwise_quantization"] = run_spike_3(args.private_root)
-        _save_report(args.output, payload)
+        if args.spike in ("3", "all"):
+            payload["spike_3_blockwise_quantization"] = run_spike_3(args.private_root)
+            _save_report(out_path, payload)
 
-    print(f"\n[Done] Research spike telemetry written -> {args.output}", flush=True)
+    print(f"\n[Done] Research spike telemetry written -> {out_path}", flush=True)
 
 
 if __name__ == "__main__":

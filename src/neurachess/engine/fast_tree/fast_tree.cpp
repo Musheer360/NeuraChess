@@ -419,6 +419,10 @@ public:
     int32_t cur_max_depth = 14;
     int cur_use_nn_cache = 0;
     int cur_use_pending = 0;
+    int cur_enable_collision_flush = 0;
+    int32_t cur_non_leaf_hits = 0;
+    int32_t cur_hits_after_leaf = 0;
+    int32_t cur_collision_flush_b = 0;
     std::vector<int32_t> cur_path;
 
     std::vector<int32_t> leaves_to_eval;
@@ -1018,6 +1022,9 @@ public:
 
             process_instantiated_leaf(curr);
             cur_slot++;
+            if (should_flush_collisions()) {
+                break;
+            }
         }
 
         finalize_batch();
@@ -1025,6 +1032,44 @@ public:
         *out_parent_idx = -1;
         *out_move_packed = 0;
         return 0;
+    }
+
+    inline void record_non_leaf_hit() {
+        cur_non_leaf_hits += 1;
+        if (!leaves_to_eval.empty()) {
+            cur_hits_after_leaf += 1;
+        }
+    }
+
+    inline bool should_flush_collisions() {
+        if (!cur_enable_collision_flush || cur_batch_target < 16 || cur_hits_after_leaf < 6) {
+            return false;
+        }
+        int32_t uniq = (int32_t)leaves_to_eval.size();
+        if (uniq >= 1 && uniq <= 4) {
+            cur_collision_flush_b = 4;
+            return true;
+        }
+        if (uniq >= 5 && uniq <= 8) {
+            cur_collision_flush_b = 8;
+            return true;
+        }
+        return false;
+    }
+
+    inline void pack_leaves_to_tensor(const int32_t* leaves, int32_t n_eval, int32_t batch_size, float* out_batch_tensors) {
+        if (n_eval <= 0 || out_batch_tensors == nullptr) {
+            return;
+        }
+        int32_t n_pack = std::min(n_eval, batch_size);
+        for (int32_t i = 0; i < n_pack; ++i) {
+            int32_t li = leaves[i];
+            int32_t bidx = nodes[(size_t)li].board_idx;
+            boards[(size_t)bidx].encode_gpu_unpack(out_batch_tensors + (size_t)i * 1152ULL);
+        }
+        for (int32_t i = n_pack; i < batch_size; ++i) {
+            std::memcpy(out_batch_tensors + (size_t)i * 1152ULL, out_batch_tensors, 1152ULL * sizeof(float));
+        }
     }
 
     void process_instantiated_leaf(int32_t curr) {
@@ -1037,6 +1082,7 @@ public:
             stats.sum_leaf_ply += leaf.ply;
             stats.total_leaf_count += 1;
             if (leaf.ply > stats.max_leaf_ply) stats.max_leaf_ply = leaf.ply;
+            record_non_leaf_hit();
             return;
         }
 
@@ -1046,6 +1092,7 @@ public:
             }
             collision_paths.push_back(cur_path);
             stats.collisions += 1;
+            record_non_leaf_hit();
             return;
         }
 
@@ -1067,12 +1114,14 @@ public:
                 stats.sum_leaf_ply += leaf.ply;
                 stats.total_leaf_count += 1;
                 if (leaf.ply > stats.max_leaf_ply) stats.max_leaf_ply = leaf.ply;
+                record_non_leaf_hit();
                 return;
             } else {
                 stats.nn_cache_misses += 1;
                 auto kp = std::make_pair(khi, klo);
                 if (batch_keys.find(kp) != batch_keys.end()) {
                     stats.dedup_avoided += 1;
+                    record_non_leaf_hit();
                     return;
                 }
                 batch_keys.insert(kp);
@@ -1096,6 +1145,8 @@ public:
             if (cur_use_pending) {
                 pending_nodes.insert(curr);
             }
+        } else {
+            record_non_leaf_hit();
         }
     }
 
@@ -1357,6 +1408,36 @@ FT_EXPORT double ft_expand_node_with_logits(
     return leaf_val;
 }
 
+static inline int32_t select_begin_impl(
+    FastTreeArena* t,
+    int32_t batch_size,
+    int32_t max_depth,
+    int32_t use_nn_cache,
+    int32_t use_pending,
+    int enable_collision_flush,
+    int32_t* out_node_idx,
+    int32_t* out_parent_idx,
+    uint16_t* out_move_packed
+) {
+    t->cur_batch_target = batch_size;
+    t->cur_slot = 0;
+    t->cur_max_depth = max_depth;
+    t->cur_use_nn_cache = use_nn_cache;
+    t->cur_use_pending = use_pending;
+    t->cur_enable_collision_flush = enable_collision_flush;
+    t->cur_non_leaf_hits = 0;
+    t->cur_hits_after_leaf = 0;
+    t->cur_collision_flush_b = 0;
+    t->leaves_to_eval.clear();
+    t->paths_to_leaves.clear();
+    t->vl_applied_paths.clear();
+    t->collision_paths.clear();
+    t->cache_hits_to_process.clear();
+    t->batch_keys.clear();
+
+    return t->run_selection_slots(out_node_idx, out_parent_idx, out_move_packed);
+}
+
 FT_EXPORT int32_t ft_select_begin(
     void* tree_ptr,
     int32_t batch_size,
@@ -1367,20 +1448,17 @@ FT_EXPORT int32_t ft_select_begin(
     int32_t* out_parent_idx,
     uint16_t* out_move_packed
 ) {
-    auto* t = static_cast<FastTreeArena*>(tree_ptr);
-    t->cur_batch_target = batch_size;
-    t->cur_slot = 0;
-    t->cur_max_depth = max_depth;
-    t->cur_use_nn_cache = use_nn_cache;
-    t->cur_use_pending = use_pending;
-    t->leaves_to_eval.clear();
-    t->paths_to_leaves.clear();
-    t->vl_applied_paths.clear();
-    t->collision_paths.clear();
-    t->cache_hits_to_process.clear();
-    t->batch_keys.clear();
-
-    return t->run_selection_slots(out_node_idx, out_parent_idx, out_move_packed);
+    return select_begin_impl(
+        static_cast<FastTreeArena*>(tree_ptr),
+        batch_size,
+        max_depth,
+        use_nn_cache,
+        use_pending,
+        0,
+        out_node_idx,
+        out_parent_idx,
+        out_move_packed
+    );
 }
 
 FT_EXPORT int32_t ft_select_provide_instantiation(
@@ -2208,19 +2286,88 @@ FT_EXPORT void* ft_select_and_pack_native(
 
     int32_t leaves_tmp[128];
     void* handle = ft_pop_inflight_batch(tree_ptr, leaves_tmp, out_n_eval, out_max_ply);
-    int32_t n_eval = *out_n_eval;
+    t->pack_leaves_to_tensor(leaves_tmp, *out_n_eval, batch_size, out_batch_tensors);
+    return handle;
+}
 
-    if (n_eval > 0 && out_batch_tensors != nullptr) {
-        for (int32_t i = 0; i < n_eval; ++i) {
-            int32_t li = leaves_tmp[i];
-            int32_t bidx = t->nodes[(size_t)li].board_idx;
-            t->boards[(size_t)bidx].encode_gpu_unpack(out_batch_tensors + (size_t)i * 1152ULL);
-        }
-        for (int32_t i = n_eval; i < batch_size; ++i) {
-            std::memcpy(out_batch_tensors + (size_t)i * 1152ULL, out_batch_tensors, 1152ULL * sizeof(float));
+FT_EXPORT void* ft_select_dynamic_native(
+    void* tree_ptr,
+    int32_t max_depth,
+    int32_t use_nn_cache,
+    int32_t use_pending,
+    int32_t* out_chosen_b,
+    int32_t* out_reason,
+    int32_t* out_n_eval,
+    int32_t* out_max_ply
+) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    int in_chk = 0;
+    int32_t nc = 0;
+    int32_t root_visits = 0;
+    if (!t->nodes.empty()) {
+        const Node& root = t->nodes[0];
+        nc = root.num_children;
+        root_visits = root.visit_count;
+        if (t->native_board_mode && root.board_idx >= 0) {
+            in_chk = t->boards[(size_t)root.board_idx].is_check() ? 1 : 0;
         }
     }
+
+    // Strict Collision & Cold-Start Gear-Shifter reason codes:
+    //   0 -> B=16 (workhorse wave)
+    //   1 -> B=4  (Cold-Start Ramp: root visit_count < 16)
+    //   2 -> B=4  (Narrow Root: in check or <= 5 legal moves)
+    //   3 -> B=4  (Collision-Bounded Flush: >= 6 non-leaf hits with 1..4 unique uncached leaves)
+    //   4 -> B=8  (Collision-Bounded Flush: >= 6 non-leaf hits with 5..8 unique uncached leaves)
+    int32_t target_b = 16;
+    int32_t reason = 0;
+    int enable_flush = 1;
+    if (in_chk || (nc > 0 && nc <= 5)) {
+        target_b = 4;
+        reason = 2;
+        enable_flush = 0;
+    } else if (root_visits < 16) {
+        target_b = 4;
+        reason = 1;
+        enable_flush = 0;
+    }
+
+    int32_t dummy_n = -1, dummy_p = -1;
+    uint16_t dummy_m = 0;
+    select_begin_impl(t, target_b, max_depth, use_nn_cache, use_pending, enable_flush, &dummy_n, &dummy_p, &dummy_m);
+
+    int32_t leaves_tmp[128];
+    void* handle = ft_pop_inflight_batch(tree_ptr, leaves_tmp, out_n_eval, out_max_ply);
+    int32_t n_eval = *out_n_eval;
+    int32_t chosen_b = target_b;
+
+    if (enable_flush && n_eval > 0) {
+        if (t->cur_collision_flush_b == 4 || (n_eval <= 4 && t->cur_non_leaf_hits >= 6)) {
+            chosen_b = 4;
+            reason = 3;
+        } else if (t->cur_collision_flush_b == 8 || (n_eval <= 8 && t->cur_non_leaf_hits >= 6)) {
+            chosen_b = 8;
+            reason = 4;
+        }
+    }
+
+    if (out_chosen_b) *out_chosen_b = chosen_b;
+    if (out_reason) *out_reason = reason;
     return handle;
+}
+
+FT_EXPORT void ft_pack_inflight_batch_native(
+    void* tree_ptr,
+    void* batch_handle,
+    int32_t target_batch_size,
+    float* out_batch_tensors
+) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    auto* h = static_cast<InflightBatchHandle*>(batch_handle);
+    if (!h || h->leaves.empty() || !out_batch_tensors) {
+        return;
+    }
+    t->pack_leaves_to_tensor(h->leaves.data(), (int32_t)h->leaves.size(), target_batch_size, out_batch_tensors);
 }
 
 FT_EXPORT void ft_backup_batch_native(
@@ -2398,7 +2545,7 @@ FT_EXPORT void ft_get_depth_stats(
 
 FT_EXPORT int32_t ft_recommend_batch_size(
     void* tree_ptr,
-    int32_t prev_n_eval,
+    int32_t /*prev_n_eval*/,
     int32_t* out_reason,
     double* out_entropy,
     int32_t* out_in_check
@@ -2413,72 +2560,33 @@ FT_EXPORT int32_t ft_recommend_batch_size(
     double entropy = 0.0;
     int32_t nc = 0;
     int32_t fc = -1;
-    int32_t max_child_vis = 0;
-    int32_t best_vis_idx = -1;
-    int32_t best_pr_idx = -1;
-    double best_prior = -1.0;
+    int32_t root_visits = 0;
 
     if (!t->nodes.empty()) {
         const Node& root = t->nodes[0];
         fc = root.first_child_idx;
         nc = root.num_children;
+        root_visits = root.visit_count;
         for (int32_t i = 0; i < nc; ++i) {
-            const Node& ch = t->nodes[(size_t)(fc + i)];
-            double p = ch.prior;
+            double p = t->nodes[(size_t)(fc + i)].prior;
             if (p > 1e-8) {
                 entropy -= p * std::log(p);
             }
-            if (ch.visit_count > max_child_vis) {
-                max_child_vis = ch.visit_count;
-                best_vis_idx = fc + i;
-            }
-            if (ch.prior > best_prior) {
-                best_prior = ch.prior;
-                best_pr_idx = fc + i;
-            }
         }
     }
-    int32_t best_child_idx = (best_vis_idx >= 0) ? best_vis_idx : best_pr_idx;
     if (out_entropy) *out_entropy = entropy;
 
-    int32_t root_visits = t->nodes.empty() ? 0 : std::max(1, t->nodes[0].visit_count);
-    double visit_conc = (double)max_child_vis / (double)root_visits;
-    double h_norm = (nc > 1) ? (entropy / std::log((double)nc)) : 0.0;
-
-    int top_gives_check = 0;
-    if (t->native_board_mode && best_child_idx >= 0) {
-        const Node& bch = t->nodes[(size_t)best_child_idx];
-        if (bch.is_instantiated && bch.board_idx >= 0) {
-            top_gives_check = t->boards[(size_t)bch.board_idx].is_check() ? 1 : 0;
-        }
-    }
-
-    // Reason codes:
-    //   1 -> B=4 (root in check)
-    //   2 -> B=4 (low legal branching <= 8)
-    //   3 -> B=4 (low policy entropy: H < 1.25 or H_norm < 0.45)
-    //   4 -> B=4 (forcing check continuation or prior batch underfill <= 4)
-    //   5 -> B=8 (moderate concentration: H < 1.85, visit_conc >= 0.55, or underfill <= 8)
-    //   0 -> B=16 (broad exploration)
-    if (in_chk) {
-        if (out_reason) *out_reason = 1;
-        return 4;
-    }
-    if (nc > 0 && nc <= 8) {
+    // Reason codes match `ft_select_dynamic_native`:
+    //   0 -> B=16 (workhorse wave)
+    //   1 -> B=4  (Cold-Start Ramp: root visit_count < 16)
+    //   2 -> B=4  (Narrow Root: in check or <= 5 legal moves)
+    if (in_chk || (nc > 0 && nc <= 5)) {
         if (out_reason) *out_reason = 2;
         return 4;
     }
-    if (nc > 0 && (entropy < 1.25 || h_norm < 0.45)) {
-        if (out_reason) *out_reason = 3;
+    if (root_visits < 16) {
+        if (out_reason) *out_reason = 1;
         return 4;
-    }
-    if (top_gives_check || (prev_n_eval > 0 && prev_n_eval <= 4)) {
-        if (out_reason) *out_reason = 4;
-        return 4;
-    }
-    if ((nc > 0 && entropy < 1.85) || visit_conc >= 0.55 || (prev_n_eval > 0 && prev_n_eval <= 8)) {
-        if (out_reason) *out_reason = 5;
-        return 8;
     }
     if (out_reason) *out_reason = 0;
     return 16;

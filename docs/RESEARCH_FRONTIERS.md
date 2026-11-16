@@ -162,3 +162,61 @@ All raw measurements are archived in [`eval_results/research_spikes.json`](../ev
    - Single-block scan (`500` calib) pinpointed the two failure sources in prior uniform W8A8: **`Block 9`** alone causes **`0.013042`** policy KL (vs `0.000462–0.001436` for blocks `0–8`), and **`Block 1`** alone triggers the **`0.92645`** `Max Value Diff` outlier spike.
    - Keeping blocks `0, 1, 8, 9` and residual skip adds `.*_out_.*` in FP16 (`Hybrid_Middle_2_to_7_ConvOnly`, `2,000` calib) raised 5,000-pos Far-Test Top-1 agreement from **`90.96%`** (Full PTQ) / **`92.52%`** (QAT) to **`95.52%`**, cut Mean Policy KL **4.5x** (`0.021977 -> 0.004891`), cut Max Value Diff **41.6%** (`0.97510 -> 0.56921`), and delivered **`2,997.1`** added visits/s (**`+16.2%`** vs FP16 `2,578.8`)—yet still fell short of the historical `>= 98.5%` Top-1 gate.
 
+---
+
+## Phase 2 Empirical Follow-Ups ($0 Cloud Spend, NPU 3720)
+
+All raw Phase 2 telemetry is recorded in [`eval_results/research_spikes_phase2.json`](../eval_results/research_spikes_phase2.json). `use_see_prior_shaping=False` remains the default production setting ("Bitter Lesson": learned 346M priors outperform static SEE shaping).
+
+### 1. Spike 2 Refinement — Strict Collision-Bounded & Cold-Start Gear-Shifting
+Replaced all entropy / concentration triggers in [fast_tree.cpp](../src/neurachess/engine/fast_tree/fast_tree.cpp) (`ft_select_dynamic_native`, `ft_pack_inflight_batch_native`) with three strict triggers:
+- **(a) Cold-Start Ramp (`reason=1`):** `root.visit_count < 16` → `B=4`
+- **(b) Narrow Root (`reason=2`):** root is in check or `<= 5` legal moves → `B=4`
+- **(c) Collision-Bounded Flush (`reason=3, 4`):** during `select(16)`, once `>= 6` virtual-loss collisions / terminal / cache hits occur with `1..4` unique uncached leaves (`B=4`) or `5..8` unique uncached leaves (`B=8`), flush immediately instead of padding up to `16`.
+
+| Benchmark | Arm | Accuracy / SF Best | Blunders >=150cp | Mean Drop | Total Nodes | Avg / Max Ply | Batch Shares (B16 / B8 / B4) |
+|---|---|---|---|---|---|---|---|
+| Cat (c) 19 @ `400 ms` | `baseline_b16_prod_db` | `11/19` (`12/19` live) | `5/19` | `84.26 cp` | `22,350` (`1,176.3`) | `6.45 / 13.42` | `100% B=16` (double-buffered) |
+| Cat (c) 19 @ `400 ms` | `gear_shift_v2_collision_cold` | `10/19` (`11/19` live) | `6/19` | `99.63 cp` | `20,411` (`1,074.3`) | `6.83 / 13.47` | `69.50% / 7.71% / 22.79%` |
+| Cat (a) 19 @ `400 ms` | `baseline_b16_prod_db` | `15/19` (`15/19` live) | `1/19` | `27.21 cp` | `23,390` (`1,231.1`) | `6.51 / 13.58` | `100% B=16` (double-buffered) |
+| Cat (a) 19 @ `400 ms` | `gear_shift_v2_collision_cold` | `15/19` (`15/19` live) | `1/19` | `34.74 cp` | `21,093` (`1,110.2`) | `6.92 / 13.63` | `68.88% / 8.13% / 22.98%` |
+| 500 Puzzles @ `50 ms` | `baseline_b16_prod_db` | `405/500 (81.00%)` | — | — | `67,614` (`135.2`) | `2.21 / 4.33` | `100% B=16` |
+| 500 Puzzles @ `50 ms` | `gear_shift_v2_collision_cold` | **`450/500 (90.00%)`** | — | — | `50,014` (`100.0`) | **`3.76 / 7.58`** | `43.29% / 3.59% / 53.12%` |
+| 500 Puzzles @ `200 ms` | `baseline_b16_prod_db` | `471/500 (94.20%)` | — | — | `229,565` (`459.1`) | `4.84 / 10.08` | `100% B=16` |
+| 500 Puzzles @ `200 ms` | `gear_shift_v2_collision_cold` | **`478/500 (95.60%)`** | — | — | `207,190` (`414.4`) | **`5.86 / 10.60`** | `58.51% / 6.03% / 35.45%` |
+
+**Diagnosis:**
+- **Ultra-short / forced-tactics regime wins decisively:** Cold-start `B=4` waves lift `50 ms` puzzle accuracy by **`+9.00%`** (`405 -> 450 / 500`) and push average search depth from `2.21` to `3.76` plies (`4.33 -> 7.58` max ply), and still improve `200 ms` solve rate from `94.20%` to **`95.60%`**.
+- **Why `B=16` landed at `69.50%` (Cat c) / `58.51%` (200 ms puzzles) instead of `>= 80%`:** Rule (b) (`reason=2`) locks any root-in-check position at `B=4` permanently across the entire 400 ms search (`198/1413 = 14.01%` batches from a single check FEN #17 in Cat (c), `197/1414 = 13.93%` from FEN #6 in Cat (a), and `3,026/16,343 = 18.52%` in 200 ms puzzles). Across the 18 non-check FENs in Cat (c), `B=16` share was `80.8%`. Furthermore, `gear_shift_v2` runs synchronous `zc_cur[0].infer()`, forfeiting the ~6% double-buffering throughput gain of `baseline_b16_prod_db`. Future v1.1 optimization should gate Narrow Root `in_check` to `root.visit_count < 32` and retain async double-buffering on steady `B=16` waves.
+
+---
+
+### 2. Spike 3 Ground-Truth Eval & `Hybrid_Safe4_2356_ConvOnly`
+Evaluated against actual Stockfish ground-truth labels on `5,000` `test_far_50k.bin` positions and equal wall-clock (`100 ms/puzzle`) / equal node (`200 n/puzzle`) runs on 500 Stratified Clean Puzzles:
+
+| Variant | Blocks INT8 | Far5k GT Top-1 | Far5k GT CE | Far5k GT Value MSE | vs FP16 Top-1 / KL / MaxV | Pz `100 ms` Equal Time | Pz `200n` Equal Nodes | Added NPS (12p) |
+|---|---|---|---|---|---|---|---|---|
+| `V0_Pure_FP16` (`13.36 MB` IR) | None | `50.46%` | `1.6180` | `0.06117` | `100% / 0.0 / 0.0` | `428/500 (85.60%)`, `118,665n`, `2,683.4 nps` | `411/500 (82.20%)` | `2,588.0` |
+| `Hybrid_Middle_2_to_7_ConvOnly` (`15.33 MB` IR) | `[2,3,4,5,6,7]` | **`50.54%`** | `1.6215` | **`0.06085`** | `95.52% / 0.004891 / 0.56921` | **`447/500 (89.40%)`**, **`139,248n`**, **`3,212.8 nps`** | `413/500 (82.60%)` | **`3,098.5`** (`+19.7%`) |
+| `Hybrid_Safe4_2356_ConvOnly` (`19.13 MB` IR) | `[2,3,5,6]` | **`50.54%`** | `1.6190` | `0.06143` | `96.40% / 0.003075 / 0.54297` | `441/500 (88.20%)`, `132,160n`, `3,016.1 nps` | **`414/500 (82.80%)`** | `2,920.7` (`+12.9%`) |
+
+**Key Conclusion:** Ground-truth evaluation overturns the FP16-agreement proxy objection: **`Hybrid_Middle_2_to_7_ConvOnly`** matches or slightly beats `V0_Pure_FP16` on actual Stockfish Top-1 (`50.54%` vs `50.46%`), Top-3 (`79.54%` vs `79.44%`), Decisive Sign (`93.67%` vs `93.49%`), and Value MSE (`0.06085` vs `0.06117`), while delivering **`+19.7%` higher added NPS (`3,098.5` vs `2,588.0`)** and solving **`+19` more clean puzzles (`85.60% -> 89.40%`)** at fixed `100 ms/puzzle` (`139,248` vs `118,665` total nodes, `mean_max_ply 7.07 -> 8.04`).
+
+---
+
+### 3. Stage 4 Architecture NPU 3720 Latency (`B=16`) & Data Readiness
+Compiled & benchmarked experimental heads (`B=16`, `LATENCY`, `NPU_TURBO=True`, `25` warmup + `200` timed iterations, all outputs verified finite):
+
+| Graph Architecture | IR `.bin` | Outputs | Median Latency | p10 / p90 | Delta vs Baseline | Raw `B=16` Throughput |
+|---|---|---|---|---|---|---|
+| `baseline_10x192_scalar` | `13.36 MB` | `Policy [16,4672], Value [16,1]` | `6.386 ms` | `6.257 / 6.532 ms` | `+0.000 ms (+0.00%)` | `2,505.4 pos/s` |
+| `hl_gauss_64_plus_mlh` | `13.44 MB` | `Policy [16,4672], HL64 [16,64], MLH [16,1]` | **`6.399 ms`** | `6.319 / 6.543 ms` | **`+0.012 ms (+0.19%)`** | `2,500.5 pos/s` |
+| `dual_conv73_policy_q_plus_val` | `13.38 MB` | `Policy [16,4672], Q [16,4672], Value [16,1]` | **`6.473 ms`** | `6.371 / 6.657 ms` | **`+0.087 ms (+1.36%)`** | `2,471.9 pos/s` |
+| `dual_conv73_policy_q_only` | `13.13 MB` | `Policy [16,4672], Q [16,4672]` | `6.437 ms` | `6.321 / 6.600 ms` | `+0.050 ms (+0.79%)` | `2,485.8 pos/s` |
+
+**Training Data Readiness (Verified Local Disk + Read-Only S3 Audit):**
+- **HL-Gauss-64 Value Head:** **Ready (`eval_cp` present in all 107B v1 & 691B v2 shards)** — `1M` `691B` v2 positions (`v2_shards_1m/shard_{000,001}.bin`, `659.0 MiB` total) exist both locally and at `s3://neurachess-spot-162290422654-us-east-1/data/shards/`, plus `107B` v1 eval sets & local training samples (`sample_shard_{000,040}.bin`, `overnight_shards/`, `train_300k.bin`). Note `s3://.../data/shards_s1/` has `0` objects (`0 Bytes`).
+- **Moves-Left Head (MLH):** **Not in position shards** — fixed 107B/691B records have no remaining game-length/ply labels; requires PGN or self-play trajectory extraction.
+- **Conv73 Action-Value $Q(s,a)$ Head:** **Requires MultiPV sidecar generation** — **zero `.sidecar.bin` files** exist locally or in `s3://neurachess-spot-162290422654-us-east-1/`. Supervising all legal moves per position requires running Stockfish MultiPV sidecar generation or MCTS leaf-value distillation.
+
+

@@ -216,22 +216,218 @@ class TestSEEAndGearShiftSearchFlags(unittest.TestCase):
             batch_models=models,
             use_fast_tree=True,
         )
-        # Position in check -> selects B=4 gear
+        # Rule (b) Narrow Root: In check -> B=4 (reason 2) even beyond 16 visits
         in_check_fen = "4k3/8/8/8/8/8/4r3/4K2R w - - 0 1"
         s.clear_state()
-        _, uci_chk, _, nodes_chk, _, _ = s.search(chess.Board(in_check_fen), movetime_ms=100, max_nodes=24)
+        _, uci_chk, _, nodes_chk, _, _ = s.search(chess.Board(in_check_fen), movetime_ms=200, max_nodes=32)
         self.assertTrue(uci_chk)
         self.assertGreater(nodes_chk, 0)
         self.assertEqual(s.last_profile.get("mode"), "dynamic_gear_shift")
-        gears = s.last_profile.get("batch_gear_counts", {})
-        self.assertIn("4", gears)
+        gears_chk = s.last_profile.get("batch_gear_counts", {})
+        reasons_chk = s.last_profile.get("gear_reasons", {})
+        self.assertEqual(list(gears_chk.keys()), ["4"])
+        self.assertIn("2", reasons_chk)
 
-        # Broad startpos with flat dummy priors -> selects B=16 gear
+        # Rule (b) Narrow Root: <= 5 legal moves (not in check) -> B=4 (reason 2)
+        five_moves_board = chess.Board("7k/8/8/8/4p3/4P3/8/4K3 w - - 0 1")
+        self.assertEqual(five_moves_board.legal_moves.count(), 5)
+        self.assertFalse(five_moves_board.is_check())
         s.clear_state()
-        _, uci_start, _, _, _, _ = s.search(chess.Board(), movetime_ms=100, max_nodes=32)
+        s.search(five_moves_board, movetime_ms=200, max_nodes=32)
+        self.assertEqual(list(s.last_profile.get("batch_gear_counts", {}).keys()), ["4"])
+        self.assertIn("2", s.last_profile.get("gear_reasons", {}))
+
+        # 6 legal moves (not in check) -> Cold-Start B=4 (<16 visits, reason 1), then B=16 (>=16 visits, reason 0)
+        six_moves_board = chess.Board("7k/8/8/8/8/4P3/8/4K3 w - - 0 1")
+        self.assertEqual(six_moves_board.legal_moves.count(), 6)
+        self.assertFalse(six_moves_board.is_check())
+        s.clear_state()
+        s.search(six_moves_board, movetime_ms=200, max_nodes=32)
+        gears_6 = s.last_profile.get("batch_gear_counts", {})
+        reasons_6 = s.last_profile.get("gear_reasons", {})
+        self.assertEqual(gears_6.get("4"), 4)
+        self.assertIn("16", gears_6)
+        self.assertEqual(reasons_6.get("1"), 4)
+        self.assertIn("0", reasons_6)
+
+        # Rule (a) Cold-Start Ramp + B=16 workhorse on broad startpos even with sharply skewed prior (no entropy trigger)
+        skew_logits = np.full((1, 4672), -20.0, dtype=np.float32)
+        skew_logits[0, uci_to_action("e2e4", canonical_flip=False)] = 20.0
+
+        class _SkewDummyModel:
+            def __init__(self, batch_size: int):
+                self.batch_size = batch_size
+
+            def infer(self, x):
+                b = x.shape[0]
+                return np.repeat(skew_logits, b, axis=0), np.zeros((b, 1), dtype=np.float32)
+
+        s_skew = NPUBatchedPUCTSearch(
+            root_model=_SkewDummyModel(1),
+            batch_model=_SkewDummyModel(16),
+            batch_size=16,
+            use_dynamic_batch_shift=True,
+            batch_models={4: _SkewDummyModel(4), 8: _SkewDummyModel(8), 16: _SkewDummyModel(16)},
+            use_fast_tree=True,
+        )
+        _, uci_start, _, _, _, _ = s_skew.search(chess.Board(), movetime_ms=300, max_nodes=48)
         self.assertTrue(uci_start)
-        self.assertIn("16", s.last_profile.get("batch_gear_counts", {}))
-        self.assertIn("avg_leaf_ply", s.last_profile)
+        gears_start = s_skew.last_profile.get("batch_gear_counts", {})
+        reasons_start = s_skew.last_profile.get("gear_reasons", {})
+        self.assertEqual(gears_start.get("4"), 4)
+        self.assertGreaterEqual(gears_start.get("16", 0), 2)
+        self.assertEqual(reasons_start.get("1"), 4)
+        self.assertGreaterEqual(reasons_start.get("0", 0), 2)
+        self.assertIn("avg_leaf_ply", s_skew.last_profile)
+
+    def test_dynamic_batch_collision_bounded_flush(self) -> None:
+        import ctypes
+
+        b = chess.Board()
+        legals = list(b.legal_moves)
+        # Choose legals[0] as warm-up branch (visited 16 times during cold start, Q=-0.10)
+        # Then legals[1..12] have uniform low priors so wave 5 visits them once root visits >= 16.
+        m_warm = legals[0]
+        act_warm = uci_to_action(m_warm.uci(), canonical_flip=False)
+        next_moves = legals[1:13]
+        next_acts = [uci_to_action(m.uci(), canonical_flip=False) for m in next_moves]
+
+        logits_root = np.full((1, 4672), -40.0, dtype=np.float32)
+        logits_root[0, act_warm] = 10.0  # p_warm ~ 0.67
+        next_logit = float(10.0 + np.log(0.027 / 0.67))
+        for act in next_acts:
+            logits_root[0, act] = next_logit  # p_next ~ 0.027 each
+
+        logits_leaf = np.zeros((1, 4672), dtype=np.float32)
+
+        class _FlushRootStub:
+            batch_size = 1
+
+            def infer(self, x):
+                return logits_root.copy(), np.zeros((1, 1), dtype=np.float32)
+
+        class _FlushWarmStub:
+            def __init__(self, batch_size: int):
+                self.batch_size = batch_size
+                self.calls = 0
+
+            def infer(self, x):
+                nb = x.shape[0]
+                self.calls += 1
+                # Call 1 is ply 1 (Black to move): +0.05 => -0.05 for White.
+                # Calls 2..15 are ply 2 (White to move): -0.05 => -0.05 for White.
+                # Call 16 is ply 2 (White to move): -0.95 => drops Q(m_warm) to -0.106 at N=16 so next_moves win Wave 5.
+                if self.calls == 1:
+                    v = 0.05
+                elif self.calls < 16:
+                    v = -0.05
+                else:
+                    v = -0.95
+                return np.zeros((nb, 4672), dtype=np.float32), np.full((nb, 1), v, dtype=np.float32)
+
+        for n_uncached, expected_b, expected_reason in [(2, 4, 3), (6, 8, 4)]:
+            warm_stub = _FlushWarmStub(1)
+            s = NPUBatchedPUCTSearch(
+                root_model=_FlushRootStub(),
+                batch_model=_FlushWarmStub(16),
+                batch_size=16,
+                use_fpu_reduction=False,
+                use_nn_cache=True,
+                use_dynamic_batch_shift=True,
+                batch_models={4: _FlushWarmStub(4), 8: _FlushWarmStub(8), 16: _FlushWarmStub(16)},
+                use_fast_tree=True,
+            )
+            fb = s._fast_backend
+            self.assertIsNotNone(fb)
+
+            def _set_root_native(board_obj: chess.Board) -> None:
+                cr, ep, tw, hm, rv = fb._extract_cboard_args(board_obj)
+                fb.lib.ft_set_root_native(
+                    fb._tree_ptr,
+                    fb._bbs8_buf,
+                    ctypes.c_uint64(cr),
+                    ep,
+                    tw,
+                    hm,
+                    rv,
+                    fb._rev_hi_buf,
+                    fb._rev_lo_buf,
+                    ctypes.byref(fb._c_u64_a),
+                    ctypes.byref(fb._c_u64_b),
+                )
+
+            # Pre-cache 6 children right after the n_uncached uncached leaves (ft_set_root_native preserves C++ LRU cache)
+            cached_targets = next_moves[n_uncached : n_uncached + 6]
+            for mv in cached_targets:
+                cb = b.copy()
+                cb.push(mv)
+                _set_root_native(cb)
+                fb.lib.ft_expand_root_native(
+                    fb._tree_ptr,
+                    ctypes.c_double(0.0),
+                    logits_leaf.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                    1,
+                )
+
+            # Set up root board WITHOUT overwriting the cache, expand root uncached, warm m_warm to 16 visits (root_visits == 16)
+            _set_root_native(b)
+            fb.lib.ft_expand_root_native(
+                fb._tree_ptr,
+                ctypes.c_double(0.0),
+                logits_root.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                0,
+            )
+            prof_dummy = {
+                "novel_npu_evals": 0,
+                "wasted_dup_key_evals": 0,
+                "cache_expanded_nodes": 0,
+                "collisions": 0,
+                "dedup_avoided": 0,
+                "nn_cache_hits": 0,
+                "nn_cache_misses": 0,
+                "terminal_backups": 0,
+                "max_depth_cache": 0,
+            }
+            for _ in range(16):
+                # Read-only check: while root_visits < 16, selector stays in Cold-Start B=4 (reason 1)
+                rec_b = int(
+                    fb.lib.ft_recommend_batch_size(
+                        fb._tree_ptr,
+                        0,
+                        ctypes.byref(fb._c_reason),
+                        ctypes.byref(fb._c_entropy),
+                        ctypes.byref(fb._c_in_check),
+                    )
+                )
+                self.assertEqual(rec_b, 4)
+                self.assertEqual(int(fb._c_reason.value), 1)
+
+                hs1, bt1, nev1, _ = fb.select_and_pack_native(max_depth=14, use_pending=False, batch_size_override=1)
+                self.assertEqual(nev1, 1)
+                pl, vb = warm_stub.infer(bt1)
+                fb.backup_batch_native(hs1, pl, vb, 14, prof_dummy)
+
+            # Now root_visits == 16 >= 16 -> targets B=16, collects n_uncached leaves then hits 6 cached nodes -> flushes!
+            hs5, ch_b5, r_code5, nev5, _ = fb.select_dynamic_native(max_depth=14, use_pending=False)
+            fb.lib.ft_destroy_inflight_batch(hs5)
+            self.assertEqual(nev5, n_uncached)
+            self.assertEqual(ch_b5, expected_b)
+            self.assertEqual(r_code5, expected_reason)
+
+    def test_research_head_variants_graph_shapes(self) -> None:
+        from neurachess.models.se_resnet_backbone import build_openvino_research_head_variant
+
+        specs = [
+            ("baseline_scalar", [(4, 4672), (4, 1)]),
+            ("hl_gauss_mlh", [(4, 4672), (4, 64), (4, 1)]),
+            ("dual_conv73_with_val", [(4, 4672), (4, 4672), (4, 1)]),
+            ("dual_conv73_only", [(4, 4672), (4, 4672)]),
+        ]
+        for variant, expected_shapes in specs:
+            m = build_openvino_research_head_variant(variant=variant, batch_size=4, num_blocks=2, channels=32)
+            self.assertEqual(len(m.outputs), len(expected_shapes))
+            for out_port, exp_shape in zip(m.outputs, expected_shapes):
+                self.assertEqual(tuple(out_port.shape), exp_shape)
 
 
 if __name__ == "__main__":

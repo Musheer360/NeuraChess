@@ -406,6 +406,26 @@ def get_lib() -> ctypes.CDLL:
     ]
     lib.ft_select_and_pack_native.restype = ctypes.c_void_p
 
+    lib.ft_select_dynamic_native.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    lib.ft_select_dynamic_native.restype = ctypes.c_void_p
+
+    lib.ft_pack_inflight_batch_native.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_float),
+    ]
+    lib.ft_pack_inflight_batch_native.restype = None
+
     lib.ft_backup_batch_native.argtypes = [
         ctypes.c_void_p,
         ctypes.c_void_p,
@@ -827,6 +847,7 @@ class FastTreeSearchBackend:
         self._c_depth_cnt = ctypes.c_int64(0)
         self._c_depth_max = ctypes.c_int32(0)
         self._c_reason = ctypes.c_int32(0)
+        self._c_chosen_b = ctypes.c_int32(0)
         self._c_entropy = ctypes.c_double(0.0)
         self._c_in_check = ctypes.c_int32(0)
 
@@ -1032,6 +1053,52 @@ class FastTreeSearchBackend:
             ctypes.byref(self._c_max_ply),
         )
         return handle, bt, int(self._c_n_eval.value), int(self._c_max_ply.value)
+
+    def select_dynamic_native(
+        self,
+        max_depth: int,
+        use_pending: bool = False,
+    ) -> tuple[ctypes.c_void_p, int, int, int, int]:
+        handle = self.lib.ft_select_dynamic_native(
+            self._tree_ptr,
+            max_depth,
+            1 if self.use_nn_cache else 0,
+            1 if use_pending else 0,
+            ctypes.byref(self._c_chosen_b),
+            ctypes.byref(self._c_reason),
+            ctypes.byref(self._c_n_eval),
+            ctypes.byref(self._c_max_ply),
+        )
+        return (
+            handle,
+            int(self._c_chosen_b.value),
+            int(self._c_reason.value),
+            int(self._c_n_eval.value),
+            int(self._c_max_ply.value),
+        )
+
+    def pack_inflight_batch_native(
+        self,
+        handle: ctypes.c_void_p,
+        batch_size: int,
+        target_in_ptr=None,
+    ) -> np.ndarray | None:
+        if target_in_ptr is not None:
+            bt = None
+            dst_ptr = target_in_ptr
+        else:
+            bt = self._bt_ring_by_b.get(batch_size)
+            if bt is None:
+                bt = np.zeros((batch_size, NUM_PLANES, 8, 8), dtype=np.float32)
+                self._bt_ring_by_b[batch_size] = bt
+            dst_ptr = bt.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        self.lib.ft_pack_inflight_batch_native(
+            self._tree_ptr,
+            handle,
+            int(batch_size),
+            dst_ptr,
+        )
+        return bt
 
     def backup_batch_native_ptrs(
         self,
@@ -2063,36 +2130,19 @@ class FastTreeSearchBackend:
                 }
                 prof["zero_copy_staging"] = all(z is not None for z in zc_by_b.values())
                 prof["mode"] = "dynamic_gear_shift"
-                prev_n_eval = 0
                 prev_cache_exp = 0
 
                 while _pc() < t_deadline:
                     if max_nodes is not None and nodes_evaluated >= max_nodes:
                         break
-                    rec_b = int(
-                        self.lib.ft_recommend_batch_size(
-                            self._tree_ptr,
-                            prev_n_eval,
-                            ctypes.byref(self._c_reason),
-                            ctypes.byref(self._c_entropy),
-                            ctypes.byref(self._c_in_check),
-                        )
-                    )
-                    chosen_b = next((b for b in sorted_shapes if b >= rec_b), sorted_shapes[-1])
-                    reason_code = int(self._c_reason.value)
-                    zc_cur = zc_by_b.get(chosen_b)
-                    cur_m = avail_models.get(chosen_b, batch_model)
 
                     t0 = _pc()
-                    hs, bt, nev_s, mply_s = self.select_and_pack_native(
+                    hs, rec_b, reason_code, nev_s, mply_s = self.select_dynamic_native(
                         max_depth=max_depth,
                         use_pending=False,
-                        target_in_ptr=zc_cur[1] if zc_cur is not None else None,
-                        batch_size_override=chosen_b,
                     )
-                    t1 = _pc()
-                    prof["select_s"] += t1 - t0
                     if nev_s == 0:
+                        prof["select_s"] += _pc() - t0
                         self.lib.ft_destroy_inflight_batch(hs)
                         self.lib.ft_get_stats(
                             self._tree_ptr,
@@ -2113,13 +2163,23 @@ class FastTreeSearchBackend:
                             continue
                         break
 
+                    chosen_b = next((b for b in sorted_shapes if b >= rec_b), sorted_shapes[-1])
+                    zc_cur = zc_by_b.get(chosen_b)
+                    cur_m = avail_models.get(chosen_b, batch_model)
+                    bt = self.pack_inflight_batch_native(
+                        hs,
+                        chosen_b,
+                        target_in_ptr=zc_cur[1] if zc_cur is not None else None,
+                    )
+                    t1 = _pc()
+                    prof["select_s"] += t1 - t0
+
                     if mply_s > max_depth_reached:
                         max_depth_reached = mply_s
                     b_key = str(chosen_b)
                     prof["batch_gear_counts"][b_key] = prof["batch_gear_counts"].get(b_key, 0) + 1
                     r_key = str(reason_code)
                     prof["gear_reasons"][r_key] = prof["gear_reasons"].get(r_key, 0) + 1
-                    prev_n_eval = nev_s
 
                     if zc_cur is not None:
                         zc_cur[0].infer()
