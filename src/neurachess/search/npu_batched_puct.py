@@ -318,6 +318,7 @@ class NPUBatchedPUCTSearch:
         use_opening_root_guard: bool = False,
         use_see_prior_shaping: bool = False,
         use_dynamic_batch_shift: bool = False,
+        use_ponder: bool = False,
         batch_models: dict[int, NPUModel] | None = None,
         syzygy_path: str | Path | None = None,
     ):
@@ -328,6 +329,7 @@ class NPUBatchedPUCTSearch:
         self.use_opening_root_guard = bool(use_opening_root_guard)
         self.use_see_prior_shaping = bool(use_see_prior_shaping)
         self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
+        self.use_ponder = bool(use_ponder)
         self.batch_models = dict(batch_models) if batch_models else None
         self.contempt = contempt
         self.use_fpu_reduction = use_fpu_reduction
@@ -372,6 +374,7 @@ class NPUBatchedPUCTSearch:
                 use_opening_root_guard=self.use_opening_root_guard,
                 use_see_prior_shaping=self.use_see_prior_shaping,
                 use_dynamic_batch_shift=self.use_dynamic_batch_shift,
+                use_ponder=self.use_ponder,
                 batch_models=self.batch_models,
                 syzygy_path=syzygy_path,
             )
@@ -400,6 +403,12 @@ class NPUBatchedPUCTSearch:
         if self._fast_backend is not None:
             self._fast_backend.clear_state()
 
+    def set_ponder_mode(self, use_ponder: bool) -> None:
+        """Update ponder mode without clearing search tree or NN cache."""
+        self.use_ponder = bool(use_ponder)
+        if self._fast_backend is not None:
+            self._fast_backend.use_ponder = self.use_ponder
+
     def reconfigure(
         self,
         c_puct: float | None = None,
@@ -410,6 +419,7 @@ class NPUBatchedPUCTSearch:
         use_opening_root_guard: bool | None = None,
         use_see_prior_shaping: bool | None = None,
         use_dynamic_batch_shift: bool | None = None,
+        use_ponder: bool | None = None,
         syzygy_path: str | Path | None = None,
     ):
         if c_puct is not None:
@@ -428,6 +438,8 @@ class NPUBatchedPUCTSearch:
             self.use_see_prior_shaping = bool(use_see_prior_shaping)
         if use_dynamic_batch_shift is not None:
             self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
+        if use_ponder is not None:
+            self.use_ponder = bool(use_ponder)
         if self._fast_backend is not None:
             self._fast_backend.reconfigure(
                 c_puct=c_puct,
@@ -438,6 +450,7 @@ class NPUBatchedPUCTSearch:
                 use_opening_root_guard=use_opening_root_guard,
                 use_see_prior_shaping=use_see_prior_shaping,
                 use_dynamic_batch_shift=use_dynamic_batch_shift,
+                use_ponder=use_ponder,
                 syzygy_path=syzygy_path,
             )
             self._syzygy = self._fast_backend._syzygy

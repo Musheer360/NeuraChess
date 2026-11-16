@@ -790,6 +790,7 @@ class FastTreeSearchBackend:
         use_opening_root_guard: bool = False,
         use_see_prior_shaping: bool = False,
         use_dynamic_batch_shift: bool = False,
+        use_ponder: bool = False,
         batch_models: dict[int, object] | None = None,
         syzygy_path: str | Path | None = None,
     ):
@@ -802,6 +803,7 @@ class FastTreeSearchBackend:
         self.use_opening_root_guard = bool(use_opening_root_guard)
         self.use_see_prior_shaping = bool(use_see_prior_shaping)
         self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
+        self.use_ponder = bool(use_ponder)
         self._batch_models = dict(batch_models) if batch_models else {}
         self._syzygy: SyzygyProber | None = None
         self._syzygy_cb_ref = None
@@ -908,6 +910,7 @@ class FastTreeSearchBackend:
         use_opening_root_guard: bool | None = None,
         use_see_prior_shaping: bool | None = None,
         use_dynamic_batch_shift: bool | None = None,
+        use_ponder: bool | None = None,
         syzygy_path: str | Path | None = None,
     ):
         if c_puct is not None:
@@ -926,6 +929,8 @@ class FastTreeSearchBackend:
             self.use_see_prior_shaping = bool(use_see_prior_shaping)
         if use_dynamic_batch_shift is not None:
             self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
+        if use_ponder is not None:
+            self.use_ponder = bool(use_ponder)
         if syzygy_path is not None:
             self.configure_syzygy(syzygy_path)
 
@@ -2249,7 +2254,9 @@ class FastTreeSearchBackend:
             return False
 
         if use_native:
-            if self.use_dynamic_batch_shift:
+            # Lock static B=16 (nireq=2) when pondering with movetime > 150ms; allow gear_shift_v3 when not pondering or <= 150ms
+            allow_gear_shift = (not self.use_ponder) or (int(movetime_ms) <= 150)
+            if self.use_dynamic_batch_shift and allow_gear_shift:
                 avail_models = dict(self._batch_models)
                 if batch_model is not None and self.batch_size not in avail_models:
                     avail_models[self.batch_size] = batch_model

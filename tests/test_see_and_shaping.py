@@ -527,6 +527,60 @@ class TestSEEAndGearShiftSearchFlags(unittest.TestCase):
             pt_val = (F.softmax(head(feat), dim=-1) @ torch.from_numpy(z_np)).unsqueeze(-1).numpy()
         self.assertLess(float(np.max(np.abs(ov_outs[1] - pt_val))), 1e-4)
 
+    def test_ponder_locks_static_b16_unless_short_movetime(self) -> None:
+        class _AsyncReqStub:
+            def __init__(self, bs: int):
+                self.bs = bs
+                self.results: dict = {}
+
+            def start_async(self, feeds=None):
+                b = self.bs if feeds is None else feeds["board_state"].shape[0]
+                self.results = {
+                    0: np.zeros((b, 4672), dtype=np.float32),
+                    1: np.zeros((b, 1), dtype=np.float32),
+                }
+
+            def wait(self):
+                return None
+
+        class _AsyncModelStub:
+            def __init__(self, bs: int):
+                self.batch_size = bs
+                self.infer_request = _AsyncReqStub(bs)
+                self.infer_request_async = _AsyncReqStub(bs)
+
+            def infer(self, x):
+                b = x.shape[0]
+                return np.zeros((b, 4672), dtype=np.float32), np.zeros((b, 1), dtype=np.float32)
+
+        m16 = _AsyncModelStub(16)
+        s = NPUBatchedPUCTSearch(
+            root_model=_FixedDummyModel(1),
+            batch_model=m16,
+            batch_size=16,
+            use_dynamic_batch_shift=True,
+            use_ponder=True,
+            batch_models={4: _FixedDummyModel(4), 8: _FixedDummyModel(8), 16: m16},
+            use_fast_tree=True,
+        )
+        # Pondering ON + movetime > 150ms -> locks static B=16 double_buffer (no B=4/8 gear-shift)
+        s.search(chess.Board(), movetime_ms=400, max_nodes=48)
+        self.assertEqual(s.last_profile.get("mode"), "double_buffer")
+        self.assertEqual(s.last_profile.get("batch_gear_counts"), {})
+
+        # Pondering ON + short movetime <= 150ms -> gear_shift_v3 remains active
+        s.clear_state()
+        s.search(chess.Board(), movetime_ms=100, max_nodes=48)
+        self.assertEqual(s.last_profile.get("mode"), "dynamic_gear_shift")
+        self.assertIn("4", s.last_profile.get("batch_gear_counts", {}))
+
+        # Pondering OFF + movetime > 150ms -> gear_shift_v3 active
+        s.set_ponder_mode(False)
+        s.clear_state()
+        s.search(chess.Board(), movetime_ms=400, max_nodes=48)
+        self.assertEqual(s.last_profile.get("mode"), "dynamic_gear_shift")
+        self.assertIn("4", s.last_profile.get("batch_gear_counts", {}))
+
 
 if __name__ == "__main__":
     unittest.main()

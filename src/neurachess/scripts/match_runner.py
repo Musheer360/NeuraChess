@@ -198,6 +198,8 @@ def _build_engine(
     use_fast_tree: bool = True,
     encoder_layout: str = "gpu_unpack",
     use_dynamic_batch_shift: bool = False,
+    use_ponder: bool = False,
+    movetime_ms: int = 400,
     cache_dir: str | None = None,
     fpu_reduction: float | None = None,
     syzygy_path: str | None = None,
@@ -222,8 +224,9 @@ def _build_engine(
         ov_ir_xml_path=resolved_xml,
         verbose=False,
     )
+    need_gear_shapes = bool(use_dynamic_batch_shift) and ((not use_ponder) or int(movetime_ms) <= 150)
     batch_models = None
-    if use_dynamic_batch_shift:
+    if need_gear_shapes:
         batch_models = {
             b: (
                 batch_m
@@ -246,7 +249,8 @@ def _build_engine(
         "batch_size": batch_size,
         "use_fast_tree": use_fast_tree,
         "encoder_layout": encoder_layout,
-        "use_dynamic_batch_shift": use_dynamic_batch_shift,
+        "use_dynamic_batch_shift": bool(use_dynamic_batch_shift),
+        "use_ponder": bool(use_ponder),
         "batch_models": batch_models,
         "syzygy_path": syzygy_path,
     }
@@ -287,6 +291,8 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
         device=args.device,
         use_fast_tree=not args.python_tree,
         use_dynamic_batch_shift=getattr(args, "dynamic_gear", False),
+        use_ponder=bool(args.ponder),
+        movetime_ms=int(args.movetime_ms),
         cache_dir=getattr(args, "cache_dir", None),
         fpu_reduction=getattr(args, "fpu_reduction", None),
         syzygy_path=getattr(args, "syzygy_path", None),
