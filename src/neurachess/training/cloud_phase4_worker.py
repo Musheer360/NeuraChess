@@ -262,7 +262,7 @@ def stream_lc0_t80_chunk(
         cmd += ["--exclude-bin", str(exclude_bin)]
     cmd.append("-")
 
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert proc.stdin is not None
     req = urllib.request.Request(tar_url, headers=UA_HEADER)
     try:
@@ -281,10 +281,181 @@ def stream_lc0_t80_chunk(
         proc.stdin.close()
     except Exception:
         pass
-    out, err = proc.communicate(timeout=300)
+    out, _ = proc.communicate(timeout=300)
     lines = out.decode("utf-8", "ignore").strip().splitlines()
     stats = json.loads(lines[-1]) if lines else {}
     return Path(stats.get("out_bin", str(out_prefix) + ".bin")), Path(stats.get("out_sidecar", str(out_prefix) + ".lc0_sidecar.bin")), int(stats.get("records_written", 0))
+
+
+def stream_lc0_t80_parallel(
+    lc0_exe: Path,
+    tar_urls: list[str],
+    start_idx: int,
+    out_dir: Path,
+    exclude_bin: Path | None,
+    target_positions: int,
+    *,
+    workers: int = 3,
+    threads_per_worker: int = 1,
+    tag: str = "Lc0",
+) -> tuple[list[tuple[Path, Path, int]], int]:
+    """Stream multiple Lc0 T80 `.tar` URLs in parallel waves until `target_positions` is reached."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pairs: list[tuple[Path, Path, int]] = []
+    got = 0
+    idx = start_idx % max(1, len(tar_urls))
+    n_urls = len(tar_urls)
+    if n_urls == 0 or target_positions <= 0:
+        return pairs, idx
+
+    wave = 0
+    while got < target_positions:
+        rem = target_positions - got
+        batch_n = 1 if rem <= 3_500_000 else min(workers, max(1, (rem + 3_500_000) // 4_000_000))
+        jobs = []
+        for bi in range(batch_n):
+            url = tar_urls[(idx + bi) % n_urls]
+            jobs.append((wave * workers + bi, url))
+        idx = (idx + batch_n) % n_urls
+        wave += 1
+
+        per_cap = rem if batch_n == 1 else max(500_000, rem // batch_n + 500_000)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_n) as ex:
+            futs = {
+                ex.submit(
+                    stream_lc0_t80_chunk,
+                    lc0_exe,
+                    url,
+                    out_dir / f"lc0_w{jid:04d}",
+                    exclude_bin,
+                    per_cap,
+                    threads_per_worker,
+                ): url
+                for jid, url in jobs
+            }
+            for fut in concurrent.futures.as_completed(futs):
+                url = futs[fut]
+                try:
+                    bp, sp, cnt = fut.result()
+                    if cnt > 0 and bp.is_file():
+                        pairs.append((bp, sp, cnt))
+                        got += cnt
+                        print(f"[{tag}] +{cnt:,} -> {got:,}/{target_positions:,} ({Path(url).name})", flush=True)
+                except Exception as exc:
+                    print(f"[{tag} Warning] {Path(url).name}: {exc}", flush=True)
+    return pairs, idx
+
+
+class LichessContinuousStream:
+    """Single-connection persistent `lichess_db_eval.jsonl.zst` reader yielding chunked `(v1, sc)` shards without resetting."""
+
+    def __init__(
+        self,
+        sf_exe: Path,
+        exclude_hash_file: Path | None,
+        exclude_bin: Path | None,
+        initial_skip: int = 1_000_000,
+        threads: int = 2,
+        opener=None,
+    ):
+        self.sf_exe = sf_exe
+        self.exclude_hash_file = exclude_hash_file
+        self.exclude_bin = exclude_bin
+        self.initial_skip = int(initial_skip)
+        self.threads = int(threads)
+        self.opener = opener
+        self._resp = None
+        self._zr = None
+        self._byte_buf = b""
+        self._skipped_initial = False
+        self._chunk_seq = 0
+
+    def _open_stream(self) -> None:
+        import zstandard as zstd
+
+        if self._zr is not None:
+            return
+        if self.opener is not None:
+            self._resp = self.opener(LICHESS_EVAL_URL)
+        else:
+            req = urllib.request.Request(LICHESS_EVAL_URL, headers=UA_HEADER)
+            self._resp = urllib.request.urlopen(req, timeout=120)
+        dctx = zstd.ZstdDecompressor()
+        self._zr = dctx.stream_reader(self._resp, closefd=False)
+
+    def close(self) -> None:
+        for obj in (self._zr, self._resp):
+            if obj is not None:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+        self._zr = None
+        self._resp = None
+        self._byte_buf = b""
+
+    def read_chunk(self, out_prefix: Path, target_records: int) -> tuple[Path, Path, int]:
+        skip_arg = self.initial_skip if not self._skipped_initial else 0
+        cmd = [
+            str(self.sf_exe),
+            "--out-prefix",
+            str(out_prefix),
+            "--skip-lines",
+            str(skip_arg),
+            "--max-records",
+            str(target_records),
+            "--threads",
+            str(self.threads),
+        ]
+        if self.exclude_hash_file and self.exclude_hash_file.is_file():
+            cmd += ["--exclude-hashes", str(self.exclude_hash_file)]
+        if self.exclude_bin and self.exclude_bin.is_file():
+            cmd += ["--exclude-bin", str(self.exclude_bin)]
+        cmd.append("-")
+
+        self._open_stream()
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        assert proc.stdin is not None
+
+        while proc.poll() is None:
+            assert self._zr is not None
+            raw = self._zr.read(1024 * 1024)
+            if not raw:
+                if self._byte_buf:
+                    tail = self._byte_buf + (b"" if self._byte_buf.endswith(b"\n") else b"\n")
+                    self._byte_buf = b""
+                    try:
+                        proc.stdin.write(tail)
+                    except BrokenPipeError:
+                        pass
+                break
+            data = self._byte_buf + raw
+            nl = data.rfind(b"\n")
+            if nl == -1:
+                self._byte_buf = data
+                continue
+            lines_blk = data[: nl + 1]
+            self._byte_buf = data[nl + 1 :]
+            try:
+                proc.stdin.write(lines_blk)
+                proc.stdin.flush()
+            except BrokenPipeError:
+                break
+
+        self._skipped_initial = True
+        self._chunk_seq += 1
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        out, _ = proc.communicate(timeout=300)
+        lines = out.decode("utf-8", "ignore").strip().splitlines()
+        stats = json.loads(lines[-1]) if lines else {}
+        return (
+            Path(stats.get("out_bin", str(out_prefix) + ".bin")),
+            Path(stats.get("out_sidecar", str(out_prefix) + ".sidecar68.bin")),
+            int(stats.get("records_written", 0)),
+        )
 
 
 def stream_lichess_sf_chunks(
@@ -297,42 +468,12 @@ def stream_lichess_sf_chunks(
     threads: int = 4,
 ) -> list[tuple[Path, Path, int]]:
     """Stream `lichess_db_eval.jsonl.zst` through `zstd` -> C++ `lichess_eval_converter` in bounded chunks."""
-    import zstandard as zstd
-
-    out_prefix = out_dir / "sf_stream"
-    cmd = [str(sf_exe), "--out-prefix", str(out_prefix), "--skip-lines", str(skip_lines), "--max-records", str(target_positions), "--threads", str(threads)]
-    if exclude_hash_file and exclude_hash_file.is_file():
-        cmd += ["--exclude-hashes", str(exclude_hash_file)]
-    if exclude_bin and exclude_bin.is_file():
-        cmd += ["--exclude-bin", str(exclude_bin)]
-    cmd.append("-")
-
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert proc.stdin is not None
-    req = urllib.request.Request(LICHESS_EVAL_URL, headers=UA_HEADER)
-    dctx = zstd.ZstdDecompressor()
+    streamer = LichessContinuousStream(sf_exe, exclude_hash_file, exclude_bin, initial_skip=skip_lines, threads=threads)
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            with dctx.stream_reader(resp, closefd=False) as zr:
-                while proc.poll() is None:
-                    chunk = zr.read(4 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    try:
-                        proc.stdin.write(chunk)
-                    except BrokenPipeError:
-                        break
-    except Exception:
-        pass
-    try:
-        proc.stdin.close()
-    except Exception:
-        pass
-    out, _ = proc.communicate(timeout=600)
-    lines = out.decode("utf-8", "ignore").strip().splitlines()
-    stats = json.loads(lines[-1]) if lines else {}
-    n_wr = int(stats.get("records_written", 0))
-    return [(Path(stats.get("out_bin", str(out_prefix) + ".bin")), Path(stats.get("out_sidecar", str(out_prefix) + ".sidecar68.bin")), n_wr)]
+        bp, sp, n_wr = streamer.read_chunk(out_dir / "sf_stream", target_positions)
+        return [(bp, sp, n_wr)]
+    finally:
+        streamer.close()
 
 
 def load_unified_chunk(bin_p: Path, sc_p: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -642,26 +783,21 @@ def run_job_a(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
     sf_target = args.total_positions // 2
     lc0_target = args.total_positions - sf_target
 
-    # Convert S3 1M V2 shards + stream remaining Stockfish from Lichess Eval DB
+    # Stream Lichess SF + parallel Lc0 T80 concurrently for maximum wire throughput
     v2_b, v2_s, v2_n = convert_v2_shards_to_unified(dirs["v2_shards"], cache_dir / "v2_sf")
     sf_pairs = [(v2_b, v2_s, v2_n)] if v2_n > 0 else []
     rem_sf = max(0, sf_target - v2_n)
-    if rem_sf > 0:
-        sf_pairs.extend(stream_lichess_sf_chunks(sf_exe, cache_dir, excl_hashes, excl_bin, rem_sf, skip_lines=10_000_000, threads=4))
-
     t80_urls = list_t80_nonempty_urls(seed=args.seed)
-    lc0_pairs = []
-    lc0_got = 0
-    for ti, url in enumerate(t80_urls):
-        if lc0_got >= lc0_target:
-            break
-        b_p, s_p, n_wr = stream_lc0_t80_chunk(
-            lc0_exe, url, cache_dir / f"lc0_{ti:03d}", excl_bin, max_records=(lc0_target - lc0_got), threads=4
+
+    sf_fut = None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as data_ex:
+        if rem_sf > 0:
+            sf_fut = data_ex.submit(stream_lichess_sf_chunks, sf_exe, cache_dir, excl_hashes, excl_bin, rem_sf, 1_000_000, 2)
+        lc0_pairs, _ = stream_lc0_t80_parallel(
+            lc0_exe, t80_urls, 0, cache_dir, excl_bin, lc0_target, workers=3, threads_per_worker=1, tag="Job A Data"
         )
-        if n_wr > 0:
-            lc0_pairs.append((b_p, s_p, n_wr))
-            lc0_got += n_wr
-            print(f"[Job A Data] Lc0 streamed {lc0_got:,}/{lc0_target:,} ({Path(url).name})", flush=True)
+        if sf_fut is not None:
+            sf_pairs.extend(sf_fut.result())
 
     # Load 40M into CPU host arrays (pinned-ready ~7GB) for fast shuffling between A1 & A2
     sf_v1_list, sf_sc_list = [], []
@@ -875,48 +1011,75 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
             except Exception as e:
                 print(f"  [Checkpoint Warning] {e}", flush=True)
 
-    # Async rolling 5M mixed pool producer (~70% Lc0 T80 + ~30% Stockfish Lichess/V2) so disk stays <3GB
+    # Async rolling 5M mixed pool producer (~70% fresh parallel Lc0 T80 + ~30% non-resetting Stockfish stream)
     t80_urls = list_t80_nonempty_urls(seed=args.seed)
     t80_idx = [(step_state["seen"] // 3_500_000) % max(1, len(t80_urls))]
-    pool_q: queue.Queue = queue.Queue(maxsize=2)
+    pool_q: queue.Queue = queue.Queue(maxsize=3)
+    sf_q: queue.Queue = queue.Queue(maxsize=3)
     stop_prod = threading.Event()
     v2_b, v2_s, v2_n = convert_v2_shards_to_unified(dirs["v2_shards"], tmp_dir / "job_b_v2_sf")
-    sf_seed_used = [step_state["seen"] > 0]
+    sf_ring: list[tuple[np.ndarray, np.ndarray]] = []
+    if v2_n > 0 and v2_b.is_file():
+        sf_ring.append(load_unified_chunk(v2_b, v2_s))
+        if step_state["seen"] == 0:
+            sf_q.put(sf_ring[0])
+
+    def _sf_streamer():
+        sf_stream = LichessContinuousStream(sf_exe, excl_hashes, excl_bin, initial_skip=1_000_000, threads=1)
+        sf_idx = 0
+        sf_dir = tmp_dir / "job_b_sf_stream"
+        sf_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            while not stop_prod.is_set():
+                try:
+                    bp, sp, cnt = sf_stream.read_chunk(sf_dir / f"sf_{sf_idx:04d}", 1_500_000)
+                    if cnt > 0 and bp.is_file():
+                        v, s = load_unified_chunk(bp, sp)
+                        bp.unlink(missing_ok=True)
+                        sp.unlink(missing_ok=True)
+                        while not stop_prod.is_set():
+                            try:
+                                sf_q.put((v, s), timeout=2.0)
+                                break
+                            except queue.Full:
+                                continue
+                        sf_idx += 1
+                    else:
+                        sf_stream.close()
+                        time.sleep(2.0)
+                except Exception as exc:
+                    print(f"[Job B SF Stream Note] Reopening Lichess stream ({exc})", flush=True)
+                    sf_stream.close()
+                    time.sleep(3.0)
+        finally:
+            sf_stream.close()
+            shutil.rmtree(sf_dir, ignore_errors=True)
 
     def _producer():
         p_id = 0
-        sf_skip = 10_000_000 + (step_state["seen"] // 5_000_000) * 2_200_000
         while not stop_prod.is_set() and (p_id * 5_000_000) < (args.total_positions + 5_000_000):
             p_dir = tmp_dir / f"job_b_pool_{p_id:03d}"
             p_dir.mkdir(parents=True, exist_ok=True)
+            lc0_pairs, next_idx = stream_lc0_t80_parallel(
+                lc0_exe, t80_urls, t80_idx[0], p_dir, excl_bin, 3_500_000, workers=2, threads_per_worker=1, tag="Job B Lc0"
+            )
+            t80_idx[0] = next_idx
             lc0_v1s, lc0_scs = [], []
-            sf_v1s, sf_scs = [], []
-            if not sf_seed_used[0] and v2_n > 0:
-                v, s = load_unified_chunk(v2_b, v2_s)
-                sf_v1s.append(v); sf_scs.append(s)
-                sf_seed_used[0] = True
-            else:
-                pairs = stream_lichess_sf_chunks(sf_exe, p_dir, excl_hashes, excl_bin, 1_500_000, skip_lines=sf_skip, threads=2)
-                sf_skip += 2_200_000
-                for bp, sp, cnt in pairs:
-                    if cnt > 0 and bp.is_file():
-                        v, s = load_unified_chunk(bp, sp)
-                        sf_v1s.append(v); sf_scs.append(s)
-
-            got_lc0 = 0
-            while got_lc0 < 3_500_000 and t80_idx[0] < len(t80_urls) and not stop_prod.is_set():
-                u = t80_urls[t80_idx[0]]
-                t80_idx[0] = (t80_idx[0] + 1) % len(t80_urls)
-                bp, sp, cnt = stream_lc0_t80_chunk(
-                    lc0_exe, u, p_dir / f"lc0_{t80_idx[0]:04d}", excl_bin, max_records=(3_500_000 - got_lc0), threads=2
-                )
+            for bp, sp, cnt in lc0_pairs:
                 if cnt > 0 and bp.is_file():
                     v, s = load_unified_chunk(bp, sp)
                     lc0_v1s.append(v); lc0_scs.append(s)
-                    got_lc0 += len(v)
 
-            v1_sf = np.concatenate(sf_v1s, axis=0) if sf_v1s else np.empty((0, RECORD_SIZE_V1), dtype=np.uint8)
-            sc_sf = np.concatenate(sf_scs, axis=0) if sf_scs else np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
+            v1_sf, sc_sf = np.empty((0, RECORD_SIZE_V1), dtype=np.uint8), np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
+            try:
+                v1_sf, sc_sf = sf_q.get(timeout=5.0 if sf_ring else 120.0)
+                if len(sf_ring) >= 6:
+                    sf_ring.pop(0)
+                sf_ring.append((v1_sf, sc_sf))
+            except queue.Empty:
+                if sf_ring:
+                    v1_sf, sc_sf = sf_ring[p_id % len(sf_ring)]
+
             v1_lc = np.concatenate(lc0_v1s, axis=0) if lc0_v1s else np.empty((0, RECORD_SIZE_V1), dtype=np.uint8)
             sc_lc = np.concatenate(lc0_scs, axis=0) if lc0_scs else np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
             mv1, msc = _build_mixed_epoch_pool(v1_sf, sc_sf, v1_lc, sc_lc, seed=args.seed + p_id)
@@ -930,6 +1093,8 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
             p_id += 1
         pool_q.put(None)
 
+    sf_th = threading.Thread(target=_sf_streamer, daemon=True)
+    sf_th.start()
     prod_th = threading.Thread(target=_producer, daemon=True)
     prod_th.start()
 
@@ -1022,7 +1187,7 @@ def main() -> None:
     data_dir = Path(os.environ.get("SM_CHANNEL_TRAINING", "/opt/ml/input/data/training"))
     model_dir = Path(os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))
     ckpt_dir = Path("/opt/ml/checkpoints") if os.path.exists("/opt/ml") else (model_dir / "checkpoints")
-    tmp_dir = Path("/tmp/phase4_work")
+    tmp_dir = Path("/opt/ml/phase4_tmp") if os.path.exists("/opt/ml") else Path("/tmp/phase4_work")
     for d in (model_dir, ckpt_dir, tmp_dir):
         d.mkdir(parents=True, exist_ok=True)
 

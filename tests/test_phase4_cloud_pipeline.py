@@ -28,6 +28,7 @@ from neurachess.scripts.evaluate import unpack_raw_to_gpu_inputs
 from neurachess.training.bitboard_dataset import RECORD_SIZE_V1, pack_position, unpack_position
 from neurachess.training.cloud_phase4_worker import (
     SIDECAR_SIZE,
+    LichessContinuousStream,
     _build_mixed_epoch_pool,
     _capture_first_batch_pol_logits,
     _train_on_pool,
@@ -35,6 +36,7 @@ from neurachess.training.cloud_phase4_worker import (
     ensure_cpp_converters,
     evaluate_unified_150k,
     load_unified_chunk,
+    stream_lc0_t80_parallel,
     unpack_unified_sidecar_batch,
     unpack_v1_tensor_to_inputs_and_meta,
 )
@@ -328,6 +330,55 @@ class TestPhase4CloudPipeline(unittest.TestCase):
         mv1, msc = _build_mixed_epoch_pool(np.zeros((2, 107), dtype=np.uint8), np.zeros((2, 68), dtype=np.uint8), np.ones((3, 107), dtype=np.uint8), np.ones((3, 68), dtype=np.uint8), seed=42)
         self.assertEqual(mv1.shape, (5, 107))
         self.assertEqual(msc.shape, (5, 68))
+
+    def test_lichess_continuous_stream_no_reset(self) -> None:
+        import io
+        import zstandard as zstd
+
+        with tempfile.TemporaryDirectory(prefix="nc_p4_cont_") as td:
+            td_p = Path(td)
+            _, sf_exe = ensure_cpp_converters(td_p)
+
+            # Build > 17,000 unique valid FEN JSONL lines (> 2 * kBatchLines=8192 in lichess_eval_converter)
+            # so Chunk 1 exits cleanly on its 8192-line flush and Chunk 2 continues without reopening the stream.
+            pad_fens = []
+            b = chess.Board()
+            rng = np.random.default_rng(123)
+            seen = set()
+            while len(pad_fens) < 17500:
+                if b.is_game_over() or b.fullmove_number > 35:
+                    b.reset()
+                ms = list(b.legal_moves)
+                mv = ms[int(rng.integers(0, len(ms)))]
+                k = b.fen().rsplit(" ", 2)[0]
+                if k not in seen:
+                    seen.add(k)
+                    pad_fens.append(json.dumps({"fen": b.fen(), "evals": [{"pvs": [{"line": f"{mv.uci()} a2a3", "cp": (len(pad_fens) % 50) - 25}]}]}))
+                b.push(mv)
+            big_lines = "\n".join(pad_fens) + "\n"
+            comp = zstd.ZstdCompressor().compress(big_lines.encode("utf-8"))
+
+            opens = {"n": 0}
+
+            def _single_opener(_url: str):
+                opens["n"] += 1
+                self.assertEqual(opens["n"], 1, "LichessContinuousStream must not reopen stream across chunks")
+                return io.BytesIO(comp)
+
+            st = LichessContinuousStream(sf_exe, None, None, initial_skip=2, threads=1, opener=_single_opener)
+            try:
+                bp1, sp1, cnt1 = st.read_chunk(td_p / "sf_c1", 5000)
+                bp2, sp2, cnt2 = st.read_chunk(td_p / "sf_c2", 5000)
+                self.assertEqual(opens["n"], 1)
+                self.assertEqual(cnt1, 5000)
+                self.assertGreater(cnt2, 0)
+                v1_1, _ = load_unified_chunk(bp1, sp1)
+                v1_2, _ = load_unified_chunk(bp2, sp2)
+                keys1 = {v.tobytes()[:98] for v in v1_1}
+                keys2 = {v.tobytes()[:98] for v in v1_2}
+                self.assertEqual(len(keys1 & keys2), 0, "Continuous chunks overlapped instead of advancing!")
+            finally:
+                st.close()
 
 
 if __name__ == "__main__":
