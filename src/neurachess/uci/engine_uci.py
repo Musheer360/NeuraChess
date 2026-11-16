@@ -139,6 +139,7 @@ class UCIEngine:
                 use_nn_cache=True,
                 use_fast_tree=True,
                 encoder_layout=self.encoder_layout,
+                syzygy_path="auto",
             )
             self.ponder_manager = PonderManager(self.search_engine, use_ponder=self.use_ponder)
 

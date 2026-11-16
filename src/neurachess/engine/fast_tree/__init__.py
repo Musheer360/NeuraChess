@@ -26,9 +26,24 @@ import chess
 
 logger = logging.getLogger(__name__)
 
+from pathlib import Path
 from neurachess.core.constants import TOTAL_ACTIONS, NUM_PLANES, uci_to_action, action_to_uci, move_to_action
 from neurachess.core.board_tensor import board_to_tensor, ENCODER_LAYOUT_GPU_UNPACK
 from neurachess.search.candidate_selector import PIECE_VALUES, select_opening_guarded_root_act
+from neurachess.search.syzygy_tb import SyzygyProber, resolve_syzygy_path
+
+SYZYGY_LEAF_CB_TYPE = ctypes.CFUNCTYPE(
+    ctypes.c_int32,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_uint64),
+    ctypes.POINTER(ctypes.c_uint64),
+    ctypes.c_int32,
+    ctypes.c_int32,
+    ctypes.c_int32,
+    ctypes.POINTER(ctypes.c_double),
+    ctypes.POINTER(ctypes.c_int32),
+    ctypes.POINTER(ctypes.c_int32),
+)
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _CPP_PATH = os.path.join(_THIS_DIR, "fast_tree.cpp")
@@ -482,6 +497,12 @@ def get_lib() -> ctypes.CDLL:
     lib.ft_tree_set_see_prior_shaping.argtypes = [ctypes.c_void_p, ctypes.c_int32]
     lib.ft_tree_set_see_prior_shaping.restype = None
 
+    lib.ft_tree_set_syzygy_cb.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32]
+    lib.ft_tree_set_syzygy_cb.restype = None
+
+    lib.ft_get_syzygy_leaf_hits.argtypes = [ctypes.c_void_p]
+    lib.ft_get_syzygy_leaf_hits.restype = ctypes.c_int64
+
     lib.ft_get_depth_stats.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_int64),
@@ -770,6 +791,7 @@ class FastTreeSearchBackend:
         use_see_prior_shaping: bool = False,
         use_dynamic_batch_shift: bool = False,
         batch_models: dict[int, object] | None = None,
+        syzygy_path: str | Path | None = None,
     ):
         self.lib = get_lib()
         pin_current_thread_to_pcores()
@@ -781,6 +803,9 @@ class FastTreeSearchBackend:
         self.use_see_prior_shaping = bool(use_see_prior_shaping)
         self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
         self._batch_models = dict(batch_models) if batch_models else {}
+        self._syzygy: SyzygyProber | None = None
+        self._syzygy_cb_ref = None
+        self.configure_syzygy(syzygy_path)
         self.use_fpu_reduction = use_fpu_reduction
         self.fpu_reduction = fpu_reduction
         self.root_fpu_reduction = root_fpu_reduction
@@ -805,6 +830,7 @@ class FastTreeSearchBackend:
             self._tree_ptr,
             ctypes.c_int32(1 if self.use_see_prior_shaping else 0),
         )
+        self._attach_syzygy_to_tree()
 
         self._boards: dict[int, chess.Board] = {}
         self._keys: dict[int, tuple[int, int, tuple]] = {}
@@ -882,6 +908,7 @@ class FastTreeSearchBackend:
         use_opening_root_guard: bool | None = None,
         use_see_prior_shaping: bool | None = None,
         use_dynamic_batch_shift: bool | None = None,
+        syzygy_path: str | Path | None = None,
     ):
         if c_puct is not None:
             self.c_puct = float(c_puct)
@@ -899,6 +926,8 @@ class FastTreeSearchBackend:
             self.use_see_prior_shaping = bool(use_see_prior_shaping)
         if use_dynamic_batch_shift is not None:
             self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
+        if syzygy_path is not None:
+            self.configure_syzygy(syzygy_path)
 
         if getattr(self, "_tree_ptr", None):
             try:
@@ -919,7 +948,57 @@ class FastTreeSearchBackend:
             self._tree_ptr,
             ctypes.c_int32(1 if self.use_see_prior_shaping else 0),
         )
+        self._attach_syzygy_to_tree()
         self.clear_state()
+
+    def set_syzygy_prober(self, prober: SyzygyProber | None) -> None:
+        """Attach an existing `SyzygyProber` (or `None` to disable) and wire the C leaf callback."""
+        if getattr(self, "_syzygy", None) is not None and self._syzygy is not prober:
+            self._syzygy.close()
+        self._syzygy = prober
+        self._syzygy_cb_ref = None
+        if prober is not None:
+            def _syz_cb(_ctx, w_ptr, b_ptr, turn_w, ep_sq, halfmove, out_val, out_solv, out_mp):
+                res = prober.probe_leaf_wdl_bitboards(
+                    (w_ptr[0], w_ptr[1], w_ptr[2], w_ptr[3], w_ptr[4], w_ptr[5]),
+                    (b_ptr[0], b_ptr[1], b_ptr[2], b_ptr[3], b_ptr[4], b_ptr[5]),
+                    bool(turn_w),
+                    int(ep_sq),
+                    int(halfmove),
+                )
+                if res is None:
+                    return 0
+                out_val[0] = float(res[0])
+                out_solv[0] = int(res[1])
+                out_mp[0] = int(res[2])
+                return 1
+
+            self._syzygy_cb_ref = SYZYGY_LEAF_CB_TYPE(_syz_cb)
+        if getattr(self, "_tree_ptr", None):
+            self._attach_syzygy_to_tree()
+
+    def configure_syzygy(self, syzygy_path: str | Path | None = None) -> None:
+        """Open (or close) Syzygy tablebases according to `syzygy_path` and build the C leaf callback."""
+        resolved = resolve_syzygy_path(syzygy_path, auto_discover=False)
+        self.set_syzygy_prober(SyzygyProber(resolved, max_pieces=5) if resolved is not None else None)
+
+    def _attach_syzygy_to_tree(self) -> None:
+        if getattr(self, "_tree_ptr", None):
+            cb_ptr = self._syzygy_cb_ref if self._syzygy_cb_ref is not None else None
+            max_p = self._syzygy.max_pieces if self._syzygy is not None else 5
+            self.lib.ft_tree_set_syzygy_cb(self._tree_ptr, cb_ptr, None, ctypes.c_int32(max_p))
+
+    def close(self) -> None:
+        """Release native C++ tree and optional Syzygy tablebase handles."""
+        if getattr(self, "_syzygy", None) is not None:
+            self._syzygy.close()
+            self._syzygy = None
+        self._syzygy_cb_ref = None
+        if getattr(self, "_tree_ptr", None):
+            try:
+                self.lib.ft_tree_set_syzygy_cb(self._tree_ptr, None, None, 5)
+            except (OSError, ctypes.ArgumentError, AttributeError):
+                pass
 
     def clear_state(self):
         self._boards.clear()
@@ -1431,6 +1510,12 @@ class FastTreeSearchBackend:
             self._boards[ni] = b
 
             iterm, tval, isolv, sval, pdep = evaluate_terminal_flags_fast(b)
+            if not iterm and not isolv and self._syzygy is not None:
+                sz = self._syzygy.probe_leaf_wdl(b)
+                if sz is not None:
+                    tval, isolv, _mp = sz
+                    iterm = 1
+                    sval = tval if isolv else 0.0
             if not iterm:
                 khi, klo, tkey = compute_zobrist_pair(b)
                 self._keys[ni] = (khi, klo, tkey)
@@ -1938,6 +2023,19 @@ class FastTreeSearchBackend:
                 return act, m.uci(), 1.0, len(root_legals), [m.uci()], 1, {}
             board.pop()
 
+        if self._syzygy is not None:
+            tb_res = self._syzygy.probe_root_dtz_move(board)
+            if tb_res is not None:
+                tb_mv, tb_val, tb_tag = tb_res
+                act = uci_to_action(tb_mv.uci(), canonical_flip=is_black)
+                self.last_root_visits = {act: 1}
+                return act, tb_mv.uci(), tb_val, 1, [tb_mv.uci()], 1, {
+                    "syzygy_root_hit": True,
+                    "syzygy_tag": tb_tag,
+                    "syzygy_leaf_hits": 0,
+                    "total_s": time.perf_counter() - t_start,
+                }
+
         use_native = (not board.chess960) and (self.encoder_layout == ENCODER_LAYOUT_GPU_UNPACK)
         if not use_native and board_tensor is None:
             board_tensor = self._encode_board_fast(board)
@@ -1977,6 +2075,8 @@ class FastTreeSearchBackend:
             "zero_copy_staging": False,
             "batch_gear_counts": {},
             "gear_reasons": {},
+            "syzygy_root_hit": False,
+            "syzygy_leaf_hits": 0,
         }
 
         self.lib.ft_tree_reset_stats(self._tree_ptr)
@@ -2117,6 +2217,36 @@ class FastTreeSearchBackend:
                 self.lib.ft_tree_set_root_fpu_visit(self._tree_ptr, ctypes.c_double(root_v))
 
         t_loop0 = _pc()
+        prev_cache_exp = 0
+        prev_term_bkp = 0
+        empty_term_waves = 0
+
+        def _should_retry_empty_wave() -> bool:
+            nonlocal prev_cache_exp, prev_term_bkp, empty_term_waves
+            self.lib.ft_get_stats(
+                self._tree_ptr,
+                ctypes.byref(self._st_i64[0]),
+                ctypes.byref(self._st_i64[1]),
+                ctypes.byref(self._st_i64[2]),
+                ctypes.byref(self._st_i64[3]),
+                ctypes.byref(self._st_i64[4]),
+                ctypes.byref(self._st_i64[5]),
+                ctypes.byref(self._st_i32[0]),
+                ctypes.byref(self._st_i32[1]),
+            )
+            cur_tb = int(self._st_i64[0].value)
+            cur_ce = int(self._st_i64[4].value)
+            cur_rv = int(self._st_i32[1].value)
+            if (_pc() >= t_deadline) or (max_nodes is not None and (nodes_evaluated + cur_ce) >= max_nodes):
+                return False
+            if cur_ce > prev_cache_exp:
+                prev_cache_exp = cur_ce
+                return True
+            if cur_tb > prev_term_bkp and empty_term_waves < 4 and (max_nodes is None or cur_rv < max_nodes):
+                prev_term_bkp = cur_tb
+                empty_term_waves += 1
+                return True
+            return False
 
         if use_native:
             if self.use_dynamic_batch_shift:
@@ -2220,22 +2350,7 @@ class FastTreeSearchBackend:
                         if nev_s == 0:
                             prof["select_s"] += _pc() - t0
                             self.lib.ft_destroy_inflight_batch(hs)
-                            self.lib.ft_get_stats(
-                                self._tree_ptr,
-                                ctypes.byref(self._st_i64[0]),
-                                ctypes.byref(self._st_i64[1]),
-                                ctypes.byref(self._st_i64[2]),
-                                ctypes.byref(self._st_i64[3]),
-                                ctypes.byref(self._st_i64[4]),
-                                ctypes.byref(self._st_i64[5]),
-                                ctypes.byref(self._st_i32[0]),
-                                ctypes.byref(self._st_i32[1]),
-                            )
-                            cur_cache_exp = int(self._st_i64[4].value)
-                            if cur_cache_exp > prev_cache_exp:
-                                prev_cache_exp = cur_cache_exp
-                                if max_nodes is not None and (nodes_evaluated + cur_cache_exp) >= max_nodes:
-                                    break
+                            if _should_retry_empty_wave():
                                 continue
                             break
 
@@ -2384,23 +2499,7 @@ class FastTreeSearchBackend:
                         in_flight_n[0] = (h0, nev_0, mply_0)
                         break
                     self.lib.ft_destroy_inflight_batch(h0)
-                    self.lib.ft_get_stats(
-                        self._tree_ptr,
-                        ctypes.byref(self._st_i64[0]),
-                        ctypes.byref(self._st_i64[1]),
-                        ctypes.byref(self._st_i64[2]),
-                        ctypes.byref(self._st_i64[3]),
-                        ctypes.byref(self._st_i64[4]),
-                        ctypes.byref(self._st_i64[5]),
-                        ctypes.byref(self._st_i32[0]),
-                        ctypes.byref(self._st_i32[1]),
-                    )
-                    cur_cache_exp = int(self._st_i64[4].value)
-                    if (
-                        (_pc() >= t_deadline)
-                        or (max_nodes is not None and (nodes_evaluated + cur_cache_exp) >= max_nodes)
-                        or cur_cache_exp == 0
-                    ):
+                    if not _should_retry_empty_wave():
                         break
 
                 buf_idx = 0
@@ -2665,6 +2764,8 @@ class FastTreeSearchBackend:
                 prof["select_s"] += t1 - t0
                 if len(leaves_s) == 0:
                     self.lib.ft_destroy_inflight_batch(hs)
+                    if _should_retry_empty_wave():
+                        continue
                     break
                 if mply_s > max_depth_reached:
                     max_depth_reached = mply_s
@@ -2699,6 +2800,7 @@ class FastTreeSearchBackend:
         prof["cache_expanded_nodes"] = int(self._st_i64[4].value)
         prof["dedup_avoided"] = int(self._st_i64[5].value)
         prof["max_depth_cache"] = int(self._st_i32[0].value)
+        prof["syzygy_leaf_hits"] = int(self.lib.ft_get_syzygy_leaf_hits(self._tree_ptr))
         final_root_visits = int(self._st_i32[1].value)
 
         if prof["max_depth_cache"] > max_depth_reached:

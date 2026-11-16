@@ -340,6 +340,7 @@ private:
 
 struct BatchStats {
     int64_t terminal_backups = 0;
+    int64_t syzygy_leaf_hits = 0;
     int64_t collisions = 0;
     int64_t nn_cache_hits = 0;
     int64_t nn_cache_misses = 0;
@@ -412,6 +413,32 @@ public:
     double root_fpu_reduction;
     int use_exact_solver;
     int use_see_prior_shaping = 0;
+
+    using SyzygyLeafFn = int32_t (*)(
+        void* user_ctx,
+        const uint64_t* w_bbs6,
+        const uint64_t* b_bbs6,
+        int32_t turn_is_white,
+        int32_t ep_sq,
+        int32_t halfmove,
+        double* out_val,
+        int32_t* out_solved,
+        int32_t* out_mate_plies
+    );
+    SyzygyLeafFn syzygy_cb = nullptr;
+    void* syzygy_ctx = nullptr;
+    int32_t syzygy_max_pieces = 5;
+
+    struct SyzCacheEntry {
+        uint64_t hi;
+        uint64_t lo;
+        int32_t eff_hm;
+        int32_t hit;
+        double val;
+        int32_t solved;
+        int32_t mate_plies;
+    };
+    std::unordered_map<std::pair<uint64_t, uint64_t>, SyzCacheEntry, KeyPairHash> syzygy_cache;
 
     // Active batch collection state
     int32_t cur_batch_target = 0;
@@ -550,7 +577,72 @@ public:
 
         int32_t iterm, isolv, pdep;
         double tval, sval;
-        boards[(size_t)new_bidx].evaluate_terminal(iterm, tval, isolv, sval, pdep);
+        const bb::CBoard& cboard = boards[(size_t)new_bidx];
+        cboard.evaluate_terminal(iterm, tval, isolv, sval, pdep);
+        int32_t sz_mate_plies = 0;
+
+        if (!iterm && !isolv && syzygy_cb != nullptr && cboard.clean_castling_rights() == 0ULL) {
+            int pc = bb::popcnt64(cboard.occ_w | cboard.occ_b);
+            if (pc <= syzygy_max_pieces) {
+                int32_t eff_hm = (cboard.halfmove_clock > 0) ? (int32_t)cboard.halfmove_clock : 0;
+                uint64_t mix_lo = cboard.zobrist_lo ^ bb::splitmix64((uint64_t)eff_hm + 0x517CC1B727220A95ULL);
+                std::pair<uint64_t, uint64_t> ckey{cboard.zobrist_hi, mix_lo};
+                int32_t hit = 0;
+                double sz_val = 0.0;
+                int32_t sz_solved = 0;
+                int32_t sz_mp = 0;
+                auto it = syzygy_cache.find(ckey);
+                if (it != syzygy_cache.end() &&
+                    it->second.hi == cboard.zobrist_hi &&
+                    it->second.lo == cboard.zobrist_lo &&
+                    it->second.eff_hm == eff_hm) {
+                    hit = it->second.hit;
+                    sz_val = it->second.val;
+                    sz_solved = it->second.solved;
+                    sz_mp = it->second.mate_plies;
+                } else {
+                    uint64_t w_bbs[6] = {
+                        cboard.pawns & cboard.occ_w,
+                        cboard.knights & cboard.occ_w,
+                        cboard.bishops & cboard.occ_w,
+                        cboard.rooks & cboard.occ_w,
+                        cboard.queens & cboard.occ_w,
+                        cboard.kings & cboard.occ_w
+                    };
+                    uint64_t b_bbs[6] = {
+                        cboard.pawns & cboard.occ_b,
+                        cboard.knights & cboard.occ_b,
+                        cboard.bishops & cboard.occ_b,
+                        cboard.rooks & cboard.occ_b,
+                        cboard.queens & cboard.occ_b,
+                        cboard.kings & cboard.occ_b
+                    };
+                    hit = syzygy_cb(
+                        syzygy_ctx,
+                        w_bbs,
+                        b_bbs,
+                        (int32_t)cboard.turn_is_white,
+                        (int32_t)cboard.ep_square,
+                        (int32_t)cboard.halfmove_clock,
+                        &sz_val,
+                        &sz_solved,
+                        &sz_mp
+                    );
+                    if (syzygy_cache.size() >= 131072ULL) {
+                        syzygy_cache.clear();
+                    }
+                    syzygy_cache[ckey] = {cboard.zobrist_hi, cboard.zobrist_lo, eff_hm, hit, sz_val, sz_solved, sz_mp};
+                }
+                if (hit) {
+                    iterm = 1;
+                    tval = sz_val;
+                    isolv = sz_solved;
+                    sval = sz_solved ? sz_val : 0.0;
+                    sz_mate_plies = sz_solved ? sz_mp : 0;
+                    stats.syzygy_leaf_hits += 1;
+                }
+            }
+        }
 
         Node& n = nodes[(size_t)node_idx];
         n.board_idx = new_bidx;
@@ -559,9 +651,12 @@ public:
         n.terminal_value = tval;
         n.is_solved = (uint8_t)isolv;
         n.solved_value = sval;
+        if (sz_mate_plies > 0) {
+            n.mate_plies = sz_mate_plies;
+        }
         n.path_dep_draw = (uint8_t)pdep;
-        n.zobrist_hash = boards[(size_t)new_bidx].zobrist_hi;
-        n.verify_hash = boards[(size_t)new_bidx].zobrist_lo;
+        n.zobrist_hash = cboard.zobrist_hi;
+        n.verify_hash = cboard.zobrist_lo;
         n.has_cache_key = 1;
         if (isolv) {
             sync_node_to_soa(node_idx);
@@ -991,6 +1086,7 @@ public:
     }
 
     int32_t run_selection_slots(int32_t* out_node_idx, int32_t* out_parent_idx, uint16_t* out_move_packed) {
+        int32_t term_retries = 0;
         while (cur_slot < cur_batch_target) {
             if (use_exact_solver && nodes[0].is_solved && nodes[0].mate_plies <= 3) {
                 break;
@@ -1020,7 +1116,15 @@ public:
                 }
             }
 
+            bool leaf_is_term = (nodes[(size_t)curr].is_terminal != 0) ||
+                                (use_exact_solver && nodes[(size_t)curr].is_solved != 0);
             process_instantiated_leaf(curr);
+            if (leaf_is_term && leaves_to_eval.empty() &&
+                !(use_exact_solver && nodes[0].is_solved) &&
+                term_retries < 16) {
+                term_retries++;
+                continue;
+            }
             cur_slot++;
             if (should_flush_collisions()) {
                 break;
@@ -2529,6 +2633,18 @@ FT_EXPORT int32_t ft_test_math_guards_active(double d_val, float f_val) {
 FT_EXPORT void ft_tree_set_see_prior_shaping(void* tree_ptr, int32_t enabled) {
     auto* t = static_cast<FastTreeArena*>(tree_ptr);
     t->use_see_prior_shaping = enabled ? 1 : 0;
+}
+
+FT_EXPORT void ft_tree_set_syzygy_cb(void* tree_ptr, void* cb_ptr, void* user_ctx, int32_t max_pieces) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    t->syzygy_cb = reinterpret_cast<FastTreeArena::SyzygyLeafFn>(cb_ptr);
+    t->syzygy_ctx = user_ctx;
+    t->syzygy_max_pieces = (max_pieces > 0) ? max_pieces : 5;
+}
+
+FT_EXPORT int64_t ft_get_syzygy_leaf_hits(void* tree_ptr) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    return t->stats.syzygy_leaf_hits;
 }
 
 FT_EXPORT void ft_get_depth_stats(

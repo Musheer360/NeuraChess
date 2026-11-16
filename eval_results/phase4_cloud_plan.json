@@ -1,0 +1,99 @@
+{
+  "timestamp_utc": "2026-11-16T11:12:24Z",
+  "aws_guard": {
+    "stage": "OK",
+    "frozen_iam_policy_attached": true,
+    "estimate_spend_gross_usd": 47.016,
+    "worst_case_total_usd": 47.016,
+    "freeze_at_usd": 75.0,
+    "kill_at_usd": 82.0,
+    "remaining_below_freeze_usd": 27.984,
+    "active_running_jobs_guard": 0,
+    "active_sagemaker_jobs_by_region": {
+      "us-east-1": 0,
+      "us-west-2": "err:ClientError",
+      "ap-south-1": "err:ClientError"
+    },
+    "quotas": {
+      "ml.g6e.xlarge_spot": 1.0,
+      "ml.g5.2xlarge_spot": 1.0,
+      "ml.g6e.xlarge_ondemand": 1.0,
+      "ml.g5.2xlarge_ondemand": 1.0
+    }
+  },
+  "lc0_converter_sample": {
+    "source_archive": "training-run1-test80-20250924-0317.tar (12.58 MB prefix, 557 real .gz chunks)",
+    "single_sample": {
+      "chunks_seen": 557,
+      "records_in": 61413,
+      "records_written": 53519,
+      "skipped_ply": 4778,
+      "skipped_960": 3116,
+      "skipped_invalid": 0,
+      "ep_detected": 1764,
+      "elapsed_s": 0.1411,
+      "in_records_per_s": 435139,
+      "written_pos_per_s": 379206
+    },
+    "sustained_stream": {
+      "chunks_seen": 3899,
+      "records_in": 429891,
+      "records_written": 374633,
+      "skipped_ply": 33446,
+      "skipped_960": 21812,
+      "skipped_invalid": 0,
+      "ep_detected": 12348,
+      "elapsed_s": 0.8417,
+      "in_records_per_s": 510714,
+      "written_pos_per_s": 445067
+    },
+    "python_parity_500": {
+      "illegal_moves": 0,
+      "max_prob_sum_err": 1.38e-07,
+      "max_18plane_err": 5.960464477539063e-08,
+      "ep_boards_verified": 20
+    }
+  },
+  "jobs": {
+    "job_a_10x192_hl_gauss64_40m_mix": {
+      "description": "40M-pos joint BF16 fine-tune of 346M 10x192 + HL-Gauss-64 (20M Stockfish + 20M Lc0 T80 top-8) + 150K unified GPU eval before teardown",
+      "primary_instance": "ml.g6e.xlarge (1x L40S 48GB, Spot)",
+      "fallback_instance": "ml.g5.2xlarge (1x A10G 24GB, Spot)",
+      "est_runtime_g6e_min": 21.5,
+      "est_spot70_cost_g6e_usd": 0.28,
+      "est_hist83_cost_g6e_usd": 0.78,
+      "max_ondemand_cost_g6e_usd": 0.93,
+      "est_runtime_g5_min": 46.5,
+      "est_spot70_cost_g5_usd": 0.35,
+      "est_hist90_cost_g5_usd": 1.06,
+      "max_ondemand_cost_g5_usd": 1.17,
+      "guard_max_runtime_s": 3600,
+      "guard_worst_case_cap_usd": 2.61
+    },
+    "job_b_beast_scale": {
+      "architecture": "12x192_mid2_9_hl64",
+      "param_millions": 8.52,
+      "scale_vs_10x192": 1.27,
+      "description": "Full-scale Spot training of winning Step 2 architecture (12x192_mid2_9_hl64, 8.52M params) + HL-Gauss-64 + MLH on hybrid Lc0 T80 + Stockfish stream (~300M positions)",
+      "primary_instance": "ml.g6e.xlarge (1x L40S 48GB, Spot)",
+      "fallback_instance": "ml.g5.2xlarge (1x A10G 24GB, Spot)",
+      "est_runtime_g6e_hr": 2.96,
+      "est_spot70_cost_g6e_usd": 2.32,
+      "est_hist83_cost_g6e_usd": 6.42,
+      "max_ondemand_cost_g6e_usd": 7.72,
+      "est_runtime_g5_hr": 6.39,
+      "est_spot70_cost_g5_usd": 2.91,
+      "est_hist90_cost_g5_usd": 8.73,
+      "max_ondemand_cost_g5_usd": 9.69,
+      "guard_max_runtime_s": 21600,
+      "guard_worst_case_cap_usd": 15.66
+    }
+  },
+  "total_expected_spot70_usd": 2.6,
+  "total_expected_hist83_usd": 7.2,
+  "total_worst_case_ondemand_cap_usd": 18.27,
+  "projected_spend_after_both_spot70_usd": 49.62,
+  "projected_spend_after_both_hist83_usd": 54.22,
+  "projected_spend_after_both_worst_usd": 65.29,
+  "note": "Account currently has NeuraChessFreeze attached (frozen=True); owner approval (`python cloud/guard/guardctl.py unfreeze`) is required before Spot submission."
+}
