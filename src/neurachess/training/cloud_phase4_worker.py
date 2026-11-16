@@ -451,10 +451,12 @@ class LichessContinuousStream:
         out, _ = proc.communicate(timeout=300)
         lines = out.decode("utf-8", "ignore").strip().splitlines()
         stats = json.loads(lines[-1]) if lines else {}
+        n_wr = int(stats.get("records_written", 0))
+        print(f"[LichessStream] chunk #{self._chunk_seq}: wrote {n_wr:,} records (total_skipped={stats.get('skipped_overlap', 0):,})", flush=True)
         return (
             Path(stats.get("out_bin", str(out_prefix) + ".bin")),
             Path(stats.get("out_sidecar", str(out_prefix) + ".sidecar68.bin")),
-            int(stats.get("records_written", 0)),
+            n_wr,
         )
 
 
@@ -507,6 +509,9 @@ def compute_cosine_lr(step: int, total_steps: int, warmup_steps: int, peak_lr: f
     return min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + math.cos(math.pi * prog))
 
 
+_EVAL_SPLIT_CACHE: dict[tuple[str, int], tuple[np.ndarray, np.ndarray]] = {}
+
+
 @torch.no_grad()
 def evaluate_unified_150k(
     model: ChessSEResNetPhase4,
@@ -527,13 +532,19 @@ def evaluate_unified_150k(
         if not path or not path.is_file():
             results[split_name] = {"error": f"missing {path}"}
             continue
-        raw = path.read_bytes()
-        n = min(max_eval, len(raw) // RECORD_SIZE_V1)
-        arr = np.frombuffer(raw[: n * RECORD_SIZE_V1], dtype=np.uint8).reshape(n, RECORD_SIZE_V1)
-        masks_bool = np.empty((n, 4672), dtype=np.bool_)
-        for i in range(n):
-            rec = unpack_position(raw[i * RECORD_SIZE_V1 : (i + 1) * RECORD_SIZE_V1])
-            masks_bool[i] = get_legal_action_mask(rec["board"]) > 0.5
+        cache_k = (str(path.resolve()), int(max_eval))
+        if cache_k in _EVAL_SPLIT_CACHE:
+            arr, masks_bool = _EVAL_SPLIT_CACHE[cache_k]
+            n = len(arr)
+        else:
+            raw = path.read_bytes()
+            n = min(max_eval, len(raw) // RECORD_SIZE_V1)
+            arr = np.frombuffer(raw[: n * RECORD_SIZE_V1], dtype=np.uint8).reshape(n, RECORD_SIZE_V1)
+            masks_bool = np.empty((n, 4672), dtype=np.bool_)
+            for i in range(n):
+                rec = unpack_position(raw[i * RECORD_SIZE_V1 : (i + 1) * RECORD_SIZE_V1])
+                masks_bool[i] = get_legal_action_mask(rec["board"]) > 0.5
+            _EVAL_SPLIT_CACHE[cache_k] = (arr, masks_bool)
 
         tot_ce = 0.0
         tot_hl_ce = 0.0
@@ -835,40 +846,55 @@ def run_job_a(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
         m_a1 = m_a1.to(memory_format=torch.channels_last)
     ref_pol = _capture_first_batch_pol_logits(m_a1, eval_files, device)
 
-    for p in list(m_a1.init_conv.parameters()) + list(m_a1.init_bn.parameters()) + list(m_a1.res_blocks.parameters()) + list(m_a1.pol_conv.parameters()) + list(m_a1.pol_bn.parameters()):
-        p.requires_grad_(False)
-    for mod in (m_a1.init_bn, m_a1.res_blocks, m_a1.pol_bn):
-        mod.eval()
-
-    head_params = list(m_a1.hl_head.parameters()) + list(m_a1.ml_head.parameters())
-    opt_a1 = torch.optim.AdamW(head_params, lr=1e-3, weight_decay=1e-4, fused=(device.type == "cuda"))
-    tot_steps_a1 = max(1, (args.total_positions + args.batch_size - 1) // args.batch_size)
-    st_a1 = {"step": 0, "seen": 0, "seed": args.seed, "t0": time.time(), "last_ckpt": time.time()}
-
-    def _lr_a1(opt, stp, _seen):
-        lr = compute_cosine_lr(stp, tot_steps_a1, min(500, tot_steps_a1 // 10), 1e-3, 1e-5)
-        for pg in opt.param_groups:
-            pg["lr"] = lr
-
-    print("\n=== [Job A1] Training Frozen-Trunk HL-Gauss-64 + MLH (40M pos) ===", flush=True)
-    m_a1.hl_head.train(); m_a1.ml_head.train()
-    while st_a1["seen"] < args.total_positions:
-        _train_on_pool(
-            m_a1, mix_v1, mix_sc, device, opt_a1,
-            batch_size=args.batch_size, freeze_trunk=True,
-            pol_weight=0.0, val_weight=1.0, mlh_weight=0.05,
-            ema_list=[], step_state=st_a1, lr_fn=_lr_a1,
-            max_positions=args.total_positions,
-        )
-
-    eval_a1 = evaluate_unified_150k(m_a1, eval_files, device, ref_baseline_pol=ref_pol)
-    print(f"[Job A1 Eval 150K] {json.dumps(eval_a1)}", flush=True)
-    exp_a1 = export_phase4_to_folded_npz_and_ov(m_a1, model_dir / "A1", "ckpt_A1_frozen_trunk")
     a1_pt = model_dir / "A1" / "ckpt_A1_frozen_trunk.pt"
-    torch.save({"model_state_dict": m_a1.state_dict(), "eval_150k": eval_a1, "seen": st_a1["seen"]}, a1_pt)
-    if s3_client and args.bucket:
-        for fn in list((model_dir / "A1").glob("*")):
-            s3_client.upload_file(str(fn), args.bucket, f"checkpoints/phase4_job_a/A1/{fn.name}")
+    a1_resumed = False
+    if args.resume and s3_client and args.bucket:
+        try:
+            a1_pt.parent.mkdir(parents=True, exist_ok=True)
+            s3_client.download_file(args.bucket, "checkpoints/phase4_job_a/A1/ckpt_A1_frozen_trunk.pt", str(a1_pt))
+            ck1 = torch.load(str(a1_pt), map_location=device, weights_only=False)
+            m_a1.load_state_dict(ck1["model_state_dict"])
+            eval_a1 = ck1.get("eval_150k") or evaluate_unified_150k(m_a1, eval_files, device, ref_baseline_pol=ref_pol)
+            exp_a1 = {"resumed_from_s3": "checkpoints/phase4_job_a/A1/ckpt_A1_frozen_trunk.pt"}
+            a1_resumed = True
+            print(f"[Job A1 Resumed from S3] seen={ck1.get('seen', 0):,}", flush=True)
+        except Exception:
+            a1_resumed = False
+
+    if not a1_resumed:
+        for p in list(m_a1.init_conv.parameters()) + list(m_a1.init_bn.parameters()) + list(m_a1.res_blocks.parameters()) + list(m_a1.pol_conv.parameters()) + list(m_a1.pol_bn.parameters()):
+            p.requires_grad_(False)
+        for mod in (m_a1.init_bn, m_a1.res_blocks, m_a1.pol_bn):
+            mod.eval()
+
+        head_params = list(m_a1.hl_head.parameters()) + list(m_a1.ml_head.parameters())
+        opt_a1 = torch.optim.AdamW(head_params, lr=1e-3, weight_decay=1e-4, fused=(device.type == "cuda"))
+        tot_steps_a1 = max(1, (args.total_positions + args.batch_size - 1) // args.batch_size)
+        st_a1 = {"step": 0, "seen": 0, "seed": args.seed, "t0": time.time(), "last_ckpt": time.time()}
+
+        def _lr_a1(opt, stp, _seen):
+            lr = compute_cosine_lr(stp, tot_steps_a1, min(500, tot_steps_a1 // 10), 1e-3, 1e-5)
+            for pg in opt.param_groups:
+                pg["lr"] = lr
+
+        print("\n=== [Job A1] Training Frozen-Trunk HL-Gauss-64 + MLH (40M pos) ===", flush=True)
+        m_a1.hl_head.train(); m_a1.ml_head.train()
+        while st_a1["seen"] < args.total_positions:
+            _train_on_pool(
+                m_a1, mix_v1, mix_sc, device, opt_a1,
+                batch_size=args.batch_size, freeze_trunk=True,
+                pol_weight=0.0, val_weight=1.0, mlh_weight=0.05,
+                ema_list=[], step_state=st_a1, lr_fn=_lr_a1,
+                max_positions=args.total_positions,
+            )
+
+        eval_a1 = evaluate_unified_150k(m_a1, eval_files, device, ref_baseline_pol=ref_pol)
+        print(f"[Job A1 Eval 150K] {json.dumps(eval_a1)}", flush=True)
+        exp_a1 = export_phase4_to_folded_npz_and_ov(m_a1, model_dir / "A1", "ckpt_A1_frozen_trunk")
+        torch.save({"model_state_dict": m_a1.state_dict(), "eval_150k": eval_a1, "seen": st_a1["seen"]}, a1_pt)
+        if s3_client and args.bucket:
+            for fn in list((model_dir / "A1").glob("*")):
+                s3_client.upload_file(str(fn), args.bucket, f"checkpoints/phase4_job_a/A1/{fn.name}")
 
     # -------------------- Checkpoint A2: Joint Middle-Block (2..7) W8A8 QAT --------------------
     print("\n=== [Job A2] Unfreezing + W8A8 Middle 2..7 QAT (40M pos, LR 2e-5 -> 1e-6) ===", flush=True)
