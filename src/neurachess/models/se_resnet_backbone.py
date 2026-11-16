@@ -142,29 +142,37 @@ def _build_se_resnet_core(
 
 
 def _build_standard_value_head(x, channels, weights_dict, get_w, maybe_add_bias, maybe_add_dense_bias):
-    val_dim = 1
-    if weights_dict and "val_dense2_w" in weights_dict:
-        val_dim = weights_dict["val_dense2_w"].shape[0]
+    val_ch = int(weights_dict["val_conv_w"].shape[0]) if (weights_dict and "val_conv_w" in weights_dict) else 16
+    val_h = int(weights_dict["val_dense1_w"].shape[0]) if (weights_dict and "val_dense1_w" in weights_dict) else 128
+    val_dim = int(weights_dict["val_dense2_w"].shape[0]) if (weights_dict and "val_dense2_w" in weights_dict) else 1
 
-    w_val_conv = get_w("val_conv_w", (16, channels, 1, 1))
+    w_val_conv = get_w("val_conv_w", (val_ch, channels, 1, 1))
     val_conv = ops.convolution(
         x, w_val_conv, strides=[1, 1], pads_begin=[0, 0], pads_end=[0, 0], dilations=[1, 1], name="val_conv"
     )
-    val_conv = maybe_add_bias(val_conv, "val_conv_b", 16, op_name="val_conv_add")
+    val_conv = maybe_add_bias(val_conv, "val_conv_b", val_ch, op_name="val_conv_add")
     val_conv = ops.relu(val_conv, name="val_conv_relu")
     val_flat = ops.reshape(
-        val_conv, ops.constant(np.array([0, 16 * 8 * 8], dtype=np.int64), name="val_flat_shape"), True, name="val_flat"
+        val_conv,
+        ops.constant(np.array([0, val_ch * 8 * 8], dtype=np.int64), name="val_flat_shape"),
+        True,
+        name="val_flat",
     )
-    w_val_d1 = get_w("val_dense1_w", (128, 16 * 8 * 8))
+    w_val_d1 = get_w("val_dense1_w", (val_h, val_ch * 8 * 8))
     val_d1 = ops.matmul(val_flat, w_val_d1, transpose_a=False, transpose_b=True, name="val_dense1")
-    val_d1 = maybe_add_dense_bias(val_d1, "val_dense1_b", 128, op_name="val_dense1_add")
+    val_d1 = maybe_add_dense_bias(val_d1, "val_dense1_b", val_h, op_name="val_dense1_add")
     val_d1 = ops.relu(val_d1, name="val_dense1_relu")
-    w_val_d2 = get_w("val_dense2_w", (val_dim, 128))
+    w_val_d2 = get_w("val_dense2_w", (val_dim, val_h))
     val_logits = ops.matmul(val_d1, w_val_d2, transpose_a=False, transpose_b=True, name="val_dense2")
     val_logits = maybe_add_dense_bias(val_logits, "val_dense2_b", val_dim, op_name="val_dense2_add")
 
     if val_dim == 1:
         val_out = ops.tanh(val_logits, name="value")
+    elif weights_dict and "val_hl_z" in weights_dict:
+        z_arr = np.asarray(weights_dict["val_hl_z"], dtype=np.float32).reshape(val_dim, 1)
+        val_probs = ops.softmax(val_logits, axis=1, name="val_hl_probs")
+        z_const = ops.constant(z_arr, ov.Type.f32, name="val_hl_z")
+        val_out = ops.matmul(val_probs, z_const, transpose_a=False, transpose_b=False, name="value")
     else:
         val_out = ops.softmax(val_logits, axis=1, name="wdl")
     return val_d1, val_out

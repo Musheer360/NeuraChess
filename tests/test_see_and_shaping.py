@@ -216,7 +216,7 @@ class TestSEEAndGearShiftSearchFlags(unittest.TestCase):
             batch_models=models,
             use_fast_tree=True,
         )
-        # Rule (b) Narrow Root: In check -> B=4 (reason 2) even beyond 16 visits
+        # Rule (b) Narrow Root: In check -> B=4 (reason 2) while root_visits < 32, then graduates to B=16 (>= 32)
         in_check_fen = "4k3/8/8/8/8/8/4r3/4K2R w - - 0 1"
         s.clear_state()
         _, uci_chk, _, nodes_chk, _, _ = s.search(chess.Board(in_check_fen), movetime_ms=200, max_nodes=32)
@@ -228,7 +228,13 @@ class TestSEEAndGearShiftSearchFlags(unittest.TestCase):
         self.assertEqual(list(gears_chk.keys()), ["4"])
         self.assertIn("2", reasons_chk)
 
-        # Rule (b) Narrow Root: <= 5 legal moves (not in check) -> B=4 (reason 2)
+        s.clear_state()
+        s.search(chess.Board(in_check_fen), movetime_ms=300, max_nodes=64)
+        self.assertIn("4", s.last_profile.get("batch_gear_counts", {}))
+        self.assertIn("16", s.last_profile.get("batch_gear_counts", {}))
+        self.assertIn("2", s.last_profile.get("gear_reasons", {}))
+
+        # Rule (b) Narrow Root: <= 5 legal moves (not in check) -> B=4 (reason 2) while < 32 visits
         five_moves_board = chess.Board("7k/8/8/8/4p3/4P3/8/4K3 w - - 0 1")
         self.assertEqual(five_moves_board.legal_moves.count(), 5)
         self.assertFalse(five_moves_board.is_check())
@@ -236,6 +242,47 @@ class TestSEEAndGearShiftSearchFlags(unittest.TestCase):
         s.search(five_moves_board, movetime_ms=200, max_nodes=32)
         self.assertEqual(list(s.last_profile.get("batch_gear_counts", {}).keys()), ["4"])
         self.assertIn("2", s.last_profile.get("gear_reasons", {}))
+
+        # Async nireq=2 double-buffered B=16 inside gear_shift_v3
+        class _AsyncReqStub:
+            def __init__(self, bs: int):
+                self.bs = bs
+                self.results: dict = {}
+
+            def start_async(self, feeds=None):
+                b = self.bs if feeds is None else feeds["board_state"].shape[0]
+                self.results = {
+                    0: np.zeros((b, 4672), dtype=np.float32),
+                    1: np.zeros((b, 1), dtype=np.float32),
+                }
+
+            def wait(self):
+                return None
+
+        class _AsyncBatchModelStub:
+            def __init__(self, bs: int):
+                self.batch_size = bs
+                self.infer_request = _AsyncReqStub(bs)
+                self.infer_request_async = _AsyncReqStub(bs)
+
+            def infer(self, x):
+                b = x.shape[0]
+                return np.zeros((b, 4672), dtype=np.float32), np.zeros((b, 1), dtype=np.float32)
+
+        async_b16 = _AsyncBatchModelStub(16)
+        s_async = NPUBatchedPUCTSearch(
+            root_model=_FixedDummyModel(1),
+            batch_model=async_b16,
+            batch_size=16,
+            use_dynamic_batch_shift=True,
+            batch_models={4: _FixedDummyModel(4), 8: _FixedDummyModel(8), 16: async_b16},
+            use_fast_tree=True,
+        )
+        _, uci_as, _, nodes_as, _, _ = s_async.search(chess.Board(), movetime_ms=300, max_nodes=64)
+        self.assertTrue(uci_as)
+        self.assertTrue(s_async.last_profile.get("dynamic_async_b16"))
+        self.assertGreaterEqual(s_async.last_profile.get("batch_gear_counts", {}).get("16", 0), 2)
+        self.assertGreaterEqual(nodes_as, 48)
 
         # 6 legal moves (not in check) -> Cold-Start B=4 (<16 visits, reason 1), then B=16 (>=16 visits, reason 0)
         six_moves_board = chess.Board("7k/8/8/8/8/4P3/8/4K3 w - - 0 1")
@@ -428,6 +475,57 @@ class TestSEEAndGearShiftSearchFlags(unittest.TestCase):
             self.assertEqual(len(m.outputs), len(expected_shapes))
             for out_port, exp_shape in zip(m.outputs, expected_shapes):
                 self.assertEqual(tuple(out_port.shape), exp_shape)
+
+    def test_hl_gauss_value_head_and_openvino_fold(self) -> None:
+        import openvino as ov
+        import torch
+        import torch.nn.functional as F
+
+        from neurachess.models.se_resnet_backbone import build_openvino_se_resnet
+        from neurachess.training.train_hl_gauss_value import (
+            HLGaussValueHead,
+            compute_hl_gauss_targets,
+            hl_gauss_centers_and_edges,
+        )
+
+        z_np, edges_np, sigma = hl_gauss_centers_and_edges(64)
+        self.assertEqual(z_np.shape, (64,))
+        self.assertAlmostEqual(float(z_np[0]), -1.0, places=6)
+        self.assertAlmostEqual(float(z_np[-1]), 1.0, places=6)
+
+        cps = torch.tensor([0.0, 200.0, -400.0, 2500.0], dtype=torch.float32)
+        probs = compute_hl_gauss_targets(cps, torch.from_numpy(edges_np), sigma)
+        self.assertEqual(probs.shape, (4, 64))
+        self.assertTrue(torch.allclose(probs.sum(dim=-1), torch.ones(4), atol=1e-5))
+        exp_val = probs @ torch.from_numpy(z_np)
+        self.assertAlmostEqual(float(exp_val[0]), 0.0, places=4)
+        self.assertGreater(float(exp_val[1]), 0.3)
+        self.assertLess(float(exp_val[2]), -0.7)
+
+        # Verify OpenVINO HL-Gauss expectation folding matches PyTorch head on [B, 1] value output
+        torch.manual_seed(7)
+        head = HLGaussValueHead(in_channels=32, val_channels=16, hidden_dim=256, num_bins=64).eval()
+        rng = np.random.default_rng(7)
+        w = {
+            "init_conv_w": (rng.standard_normal((32, 18, 3, 3)) * 0.05).astype(np.float32),
+            "val_conv_w": head.val_conv.weight.detach().numpy(),
+            "val_conv_b": head.val_conv.bias.detach().numpy(),
+            "val_dense1_w": head.val_fc1.weight.detach().numpy(),
+            "val_dense1_b": head.val_fc1.bias.detach().numpy(),
+            "val_dense2_w": head.val_fc2.weight.detach().numpy(),
+            "val_dense2_b": head.val_fc2.bias.detach().numpy(),
+            "val_hl_z": z_np,
+        }
+        ov_m = build_openvino_se_resnet(batch_size=2, num_blocks=0, channels=32, in_channels=18, weights_dict=w)
+        comp = ov.Core().compile_model(ov_m, "CPU")
+        x = rng.standard_normal((2, 18, 8, 8)).astype(np.float32)
+        ov_outs = list(comp({"board_state": x}).values())
+        self.assertEqual(tuple(ov_outs[0].shape), (2, 4672))
+        self.assertEqual(tuple(ov_outs[1].shape), (2, 1))
+        with torch.no_grad():
+            feat = F.relu(F.conv2d(torch.from_numpy(x), torch.from_numpy(w["init_conv_w"]), padding=1))
+            pt_val = (F.softmax(head(feat), dim=-1) @ torch.from_numpy(z_np)).unsqueeze(-1).numpy()
+        self.assertLess(float(np.max(np.abs(ov_outs[1] - pt_val))), 1e-4)
 
 
 if __name__ == "__main__":

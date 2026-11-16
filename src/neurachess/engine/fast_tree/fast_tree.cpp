@@ -2313,16 +2313,16 @@ FT_EXPORT void* ft_select_dynamic_native(
         }
     }
 
-    // Strict Collision & Cold-Start Gear-Shifter reason codes:
+    // Strict Collision & Cold-Start Gear-Shifter v3 reason codes:
     //   0 -> B=16 (workhorse wave)
     //   1 -> B=4  (Cold-Start Ramp: root visit_count < 16)
-    //   2 -> B=4  (Narrow Root: in check or <= 5 legal moves)
+    //   2 -> B=4  (Narrow Root capped at root visit_count < 32: in check or <= 5 legal moves)
     //   3 -> B=4  (Collision-Bounded Flush: >= 6 non-leaf hits with 1..4 unique uncached leaves)
     //   4 -> B=8  (Collision-Bounded Flush: >= 6 non-leaf hits with 5..8 unique uncached leaves)
     int32_t target_b = 16;
     int32_t reason = 0;
     int enable_flush = 1;
-    if (in_chk || (nc > 0 && nc <= 5)) {
+    if (root_visits < 32 && (in_chk || (nc > 0 && nc <= 5))) {
         target_b = 4;
         reason = 2;
         enable_flush = 0;
@@ -2579,8 +2579,8 @@ FT_EXPORT int32_t ft_recommend_batch_size(
     // Reason codes match `ft_select_dynamic_native`:
     //   0 -> B=16 (workhorse wave)
     //   1 -> B=4  (Cold-Start Ramp: root visit_count < 16)
-    //   2 -> B=4  (Narrow Root: in check or <= 5 legal moves)
-    if (in_chk || (nc > 0 && nc <= 5)) {
+    //   2 -> B=4  (Narrow Root capped at root visit_count < 32: in check or <= 5 legal moves)
+    if (root_visits < 32 && (in_chk || (nc > 0 && nc <= 5))) {
         if (out_reason) *out_reason = 2;
         return 4;
     }

@@ -1,0 +1,399 @@
+{
+  "total_games": 60,
+  "wins": 21,
+  "draws": 29,
+  "losses": 10,
+  "points": 35.5,
+  "score_pct": 59.17,
+  "wilson_95_ci_pct": [
+    46.55,
+    70.68
+  ],
+  "pentanomial": [
+    2,
+    1,
+    14,
+    10,
+    3
+  ],
+  "sprt": {
+    "llr": 0.9349,
+    "lower": -2.9444,
+    "upper": 2.9444,
+    "elo0": 0.0,
+    "elo1": 20.0,
+    "pentanomial": [
+      2,
+      1,
+      14,
+      10,
+      3
+    ],
+    "pairs": 30,
+    "status": "CONTINUE"
+  },
+  "nps_a": 4092.4,
+  "nps_b": 3314.4,
+  "games": [
+    {
+      "pair": 0,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 211
+    },
+    {
+      "pair": 0,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 116
+    },
+    {
+      "pair": 1,
+      "a_color": "white",
+      "a_score": 1.0,
+      "plies": 99
+    },
+    {
+      "pair": 1,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 125
+    },
+    {
+      "pair": 2,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 153
+    },
+    {
+      "pair": 2,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 128
+    },
+    {
+      "pair": 3,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 185
+    },
+    {
+      "pair": 3,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 158
+    },
+    {
+      "pair": 4,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 118
+    },
+    {
+      "pair": 4,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 106
+    },
+    {
+      "pair": 5,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 172
+    },
+    {
+      "pair": 5,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 144
+    },
+    {
+      "pair": 6,
+      "a_color": "white",
+      "a_score": 1.0,
+      "plies": 175
+    },
+    {
+      "pair": 6,
+      "a_color": "black",
+      "a_score": 0.0,
+      "plies": 177
+    },
+    {
+      "pair": 7,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 220
+    },
+    {
+      "pair": 7,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 181
+    },
+    {
+      "pair": 8,
+      "a_color": "white",
+      "a_score": 1.0,
+      "plies": 129
+    },
+    {
+      "pair": 8,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 169
+    },
+    {
+      "pair": 9,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 212
+    },
+    {
+      "pair": 9,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 104
+    },
+    {
+      "pair": 10,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 113
+    },
+    {
+      "pair": 10,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 128
+    },
+    {
+      "pair": 11,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 145
+    },
+    {
+      "pair": 11,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 158
+    },
+    {
+      "pair": 12,
+      "a_color": "white",
+      "a_score": 1.0,
+      "plies": 129
+    },
+    {
+      "pair": 12,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 144
+    },
+    {
+      "pair": 13,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 65
+    },
+    {
+      "pair": 13,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 150
+    },
+    {
+      "pair": 14,
+      "a_color": "white",
+      "a_score": 1.0,
+      "plies": 149
+    },
+    {
+      "pair": 14,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 180
+    },
+    {
+      "pair": 15,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 220
+    },
+    {
+      "pair": 15,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 141
+    },
+    {
+      "pair": 16,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 129
+    },
+    {
+      "pair": 16,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 106
+    },
+    {
+      "pair": 17,
+      "a_color": "white",
+      "a_score": 1.0,
+      "plies": 87
+    },
+    {
+      "pair": 17,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 158
+    },
+    {
+      "pair": 18,
+      "a_color": "white",
+      "a_score": 0.0,
+      "plies": 100
+    },
+    {
+      "pair": 18,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 124
+    },
+    {
+      "pair": 19,
+      "a_color": "white",
+      "a_score": 0.0,
+      "plies": 86
+    },
+    {
+      "pair": 19,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 126
+    },
+    {
+      "pair": 20,
+      "a_color": "white",
+      "a_score": 1.0,
+      "plies": 189
+    },
+    {
+      "pair": 20,
+      "a_color": "black",
+      "a_score": 0.0,
+      "plies": 103
+    },
+    {
+      "pair": 21,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 153
+    },
+    {
+      "pair": 21,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 66
+    },
+    {
+      "pair": 22,
+      "a_color": "white",
+      "a_score": 1.0,
+      "plies": 85
+    },
+    {
+      "pair": 22,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 180
+    },
+    {
+      "pair": 23,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 89
+    },
+    {
+      "pair": 23,
+      "a_color": "black",
+      "a_score": 1.0,
+      "plies": 128
+    },
+    {
+      "pair": 24,
+      "a_color": "white",
+      "a_score": 0.0,
+      "plies": 140
+    },
+    {
+      "pair": 24,
+      "a_color": "black",
+      "a_score": 0.0,
+      "plies": 99
+    },
+    {
+      "pair": 25,
+      "a_color": "white",
+      "a_score": 0.0,
+      "plies": 66
+    },
+    {
+      "pair": 25,
+      "a_color": "black",
+      "a_score": 0.0,
+      "plies": 149
+    },
+    {
+      "pair": 26,
+      "a_color": "white",
+      "a_score": 1.0,
+      "plies": 125
+    },
+    {
+      "pair": 26,
+      "a_color": "black",
+      "a_score": 0.0,
+      "plies": 121
+    },
+    {
+      "pair": 27,
+      "a_color": "white",
+      "a_score": 1.0,
+      "plies": 87
+    },
+    {
+      "pair": 27,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 82
+    },
+    {
+      "pair": 28,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 191
+    },
+    {
+      "pair": 28,
+      "a_color": "black",
+      "a_score": 0.0,
+      "plies": 89
+    },
+    {
+      "pair": 29,
+      "a_color": "white",
+      "a_score": 0.5,
+      "plies": 110
+    },
+    {
+      "pair": 29,
+      "a_color": "black",
+      "a_score": 0.5,
+      "plies": 138
+    }
+  ]
+}

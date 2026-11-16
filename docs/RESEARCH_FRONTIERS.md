@@ -219,4 +219,57 @@ Compiled & benchmarked experimental heads (`B=16`, `LATENCY`, `NPU_TURBO=True`, 
 - **Moves-Left Head (MLH):** **Not in position shards** — fixed 107B/691B records have no remaining game-length/ply labels; requires PGN or self-play trajectory extraction.
 - **Conv73 Action-Value $Q(s,a)$ Head:** **Requires MultiPV sidecar generation** — **zero `.sidecar.bin` files** exist locally or in `s3://neurachess-spot-162290422654-us-east-1/`. Supervising all legal moves per position requires running Stockfish MultiPV sidecar generation or MCTS leaf-value distillation.
 
+---
+
+## Phase 3 Empirical Lock-In ($0 Cloud Spend, NPU 3720)
+
+All raw Phase 3 telemetry is stored in [`eval_results/research_spikes_phase3.json`](../eval_results/research_spikes_phase3.json), [`eval_results/phase3_h2h_60g.json`](../eval_results/phase3_h2h_60g.json), [`eval_results/phase3_sf3000_50g.json`](../eval_results/phase3_sf3000_50g.json), and [`eval_results/phase3_control_fp16_sf3000_20g.json`](../eval_results/phase3_control_fp16_sf3000_20g.json).
+
+### 1. `gear_shift_v3` (`check < 32` Cap + `nireq=2` Async `B=16`) + `Hybrid_Middle_2_to_7_ConvOnly`
+Upgraded [fast_tree.cpp](../src/neurachess/engine/fast_tree/fast_tree.cpp) (`ft_select_dynamic_native`, `ft_recommend_batch_size`) to cap Narrow-Root Rule (b) (`reason=2`, in check or `<= 5` legal moves) at `root.visit_count < 32` before escalating to `B=16`, and added `nireq=2` async double-buffering for `B=16` waves inside `FastTreeSearchBackend.search` ([`__init__.py`](../src/neurachess/engine/fast_tree/__init__.py)).
+
+- **Co-resident Hybrid IR (`neurachess-10x192-hybrid-mid27-int8.xml`, `15.33 MB` `.bin`):** `B=1`: `0.708 ms` (`1,412.5 pos/s`), `B=4`: `1.603 ms` (`2,495.6 pos/s`), `B=8`: `2.859 ms` (`2,797.8 pos/s`), `B=16`: `5.412 ms` (`2,956.6 pos/s`) vs Pure FP16 `0.739 / 1.894 / 3.360 / 6.262 ms`.
+
+| Suite | Arm | Solve / SF Best | Blunders >=150cp / Drop | Total Nodes | Avg / Max Ply | `B=16` Share % |
+|---|---|---|---|---|---|---|
+| 500 Clean Puzzles @ `50 ms` | `V0_Pure_FP16_baseline_b16_prod_db` | `400/500 (80.00%)` | — | `67,401` (`2,661 nps`) | `2.21 / 4.33` | `100%` |
+| 500 Clean Puzzles @ `50 ms` | `V0_Pure_FP16_gear_shift_v3` | `436/500 (87.20%)` | — | `57,983` (`2,562 nps`) | `3.12 / 6.68` | `54.73%` |
+| 500 Clean Puzzles @ `50 ms` | `Hybrid_Mid27_ConvOnly_gear_shift_v3` | **`440/500 (88.00%)`** | — | `67,426` (`3,007 nps`) | **`3.35 / 7.12`** | `58.71%` |
+| 500 Clean Puzzles @ `100 ms` | `V0_Pure_FP16_baseline_b16_prod_db` | `428/500 (85.60%)` | — | `118,324` (`2,679 nps`) | `3.32 / 7.05` | `100%` |
+| 500 Clean Puzzles @ `100 ms` | `V0_Pure_FP16_gear_shift_v3` | `459/500 (91.80%)` | — | `111,480` (`2,661 nps`) | `4.26 / 8.81` | `66.80%` |
+| 500 Clean Puzzles @ `100 ms` | `Hybrid_Mid27_ConvOnly_gear_shift_v3` | **`463/500 (92.60%)`** | — | **`129,411` (`3,139 nps`)** | **`4.50 / 9.23`** | `69.42%` |
+| 500 Clean Puzzles @ `200 ms` | `V0_Pure_FP16_baseline_b16_prod_db` | `471/500 (94.20%)` | — | `229,266` (`2,788 nps`) | `4.84 / 10.07` | `100%` |
+| 500 Clean Puzzles @ `200 ms` | `V0_Pure_FP16_gear_shift_v3` | **`478/500 (95.60%)`** | — | `223,738` (`2,814 nps`) | `5.45 / 10.44` | `73.05%` |
+| 500 Clean Puzzles @ `200 ms` | `Hybrid_Mid27_ConvOnly_gear_shift_v3` | **`478/500 (95.60%)`** | — | **`260,544` (`3,300 nps`)** | **`5.65 / 10.57`** | `73.65%` |
+| Cat (a) 19 @ `400 ms` | `V0_Pure_FP16_baseline_b16_prod_db` | `15/19` (`16/19` live) | `1/19` (`32.32 cp`) | `23,355` (`1,229.2`) | `6.51 / 13.58` | `100%` |
+| Cat (a) 19 @ `400 ms` | `V0_Pure_FP16_gear_shift_v3` | `15/19` (`16/19` live) | `1/19` (`33.47 cp`) | `23,607` (`1,242.5`) | `6.75 / 13.63` | **`81.30%`** |
+| Cat (a) 19 @ `400 ms` | `Hybrid_Mid27_ConvOnly_gear_shift_v3` | `15/19` (`14/19` live) | `1/19` (`39.32 cp`) | **`27,588` (`+18.1%`)** | **`6.94 / 13.95`** | **`80.62%`** |
+| Cat (c) 19 @ `400 ms` | `V0_Pure_FP16_baseline_b16_prod_db` | `11/19` (`11/19` live) | `5/19` (`88.79 cp`) | `22,500` (`1,184.2`) | `6.46 / 13.42` | `100%` |
+| Cat (c) 19 @ `400 ms` | `V0_Pure_FP16_gear_shift_v3` | `10/19` (`11/19` live) | `6/19` (`90.79 cp`) | `22,476` (`1,183.0`) | `6.60 / 13.32` | **`82.17%`** |
+| Cat (c) 19 @ `400 ms` | `Hybrid_Mid27_ConvOnly_gear_shift_v3` | `9/19` (`11/19` live) | `6/19` (`97.21 cp`) | **`26,463` (`+17.6%`)** | **`6.84 / 13.47`** | **`80.95%`** |
+
+---
+
+### 2. Frozen-Backbone `HL-Gauss-64` Value Head (`$0`, 1 Pass over 2,299,414 Positions)
+Using [`train_hl_gauss_value.py`](../src/neurachess/training/train_hl_gauss_value.py), froze 100% of the stem, 10 SE-ResNet blocks, and `Conv73` policy head, extracted frozen `[B, 192, 8, 8]` features via dual `OV NPU + Arc GPU` throughput pipelines (`3,316 pos/s` end-to-end training throughput), excluded `586` holdout-overlap positions (`test_far_50k`, `test_in_region_50k_v2`, puzzles, Cat (a)/(c)), and trained `val_conv(16) -> val_fc1(256) -> val_fc2(64)` with HL-Gauss CE (`sigma = 1.5 * bin_width`), folding `E[V] = sum_i softmax(logits)_i * z_i` directly to `[B, 1]` inside OpenVINO FP16 IR ([`se_resnet_backbone.py`](../src/neurachess/models/se_resnet_backbone.py)).
+
+| Variant | Far5k Value MSE | Far5k Decisive Sign | Far5k Top-1 / MaxPolDiff | Cat (a) `400 ms` (`orig` / `live` / `Bl>=150` / `MeanDrop`) |
+|---|---|---|---|---|
+| `scalar_fp16_from_npz` (`346M` head) | `0.06117` | `93.49%` | `50.46%` / `0.0` (ref) | `15/19` / `16/19` / `1/19` / `32.32 cp` (med `1.0`) |
+| `hl_gauss64_fp16` (`1`-pass head) | **`0.06037`** | **`95.15%`** | `50.46%` / `0.000000` | `15/19` / `14/19` / `1/19` / `33.47 cp` (med `0.0`) |
+| `hl_gauss64_hybrid_mid27_int8` (`+ v3`) | **`0.05954`** | **`95.18%`** | `50.54%` / — | `15/19` / `13/19` / `1/19` / `34.05 cp` (`27,681` n) |
+
+- **Gate Outcome (`KEEP_HL_GAUSS_64=False`):** While `HL-Gauss-64` kept policy outputs bit-for-bit identical (`MaxPolDiff=0.000000`) and strongly improved offline value calibration (`MSE 0.06117 -> 0.06037` FP16 / `0.05954` Hybrid; `DecSign 93.49% -> 95.18%`), Category (a) `400 ms` dipped slightly (`live_sf 16/19 -> 14/19`, `MeanDrop 32.32 -> 33.47 cp`), likely reflecting 1 pass over `2.3M` positions (`0.66%` of the 346M corpus) and `sigma=1.5*w` tail smoothing on tactical extremes. Per the pre-registered rule, the 346M scalar head (`neurachess-10x192-hybrid-mid27-int8.xml` + `gear_shift_v3`) advanced to Step 3.
+
+---
+
+### 3. Validation Matches (`400 ms/move`, AC Power)
+- **Step 3A — `60`-Game H2H (`OPENINGS_50[:30]`, `use_ponder=False`):**
+  - `Hybrid_Mid27_ConvOnly + gear_shift_v3` vs `v1.0.2 (V0_Pure_FP16, B=16)`: **`35.5 / 60` (`59.17%`, `W=21 D=29 L=10`)**, Wilson 95% CI `[46.55%, 70.68%]`, Pentanomial `[2, 1, 14, 10, 3]`, SPRT LLR `+0.9349` (`[0, 20]` Elo bounds), **`4,092.4 NPS`** vs **`3,314.4 NPS`** (`+23.5%`). Passed the `>= 53.0%` gate.
+- **Step 3B — `50`-Game vs Stockfish 19 `UCI_Elo 3000` (`OPENINGS_50[:25]`, `use_ponder=True`, `max_plies=220`):**
+  - `Hybrid_Mid27_ConvOnly + gear_shift_v3`: **`15.0 / 50` (`30.00%`, `W=3 D=24 L=23`)**, Wilson 95% CI `[19.10%, 43.75%]`, **`effective_nps = 4,108.0`** (vs historical `49.00%`, `24.5/50` in `step4_stockfish_ladder_final.json`).
+- **Opening-Suite Control Check (`20` games, `OPENINGS_50[:10]`, `400 ms/move`, `use_ponder=True` vs SF 19 `UCI_Elo 3000`):**
+  - `v1.0.2` (`V0_Pure_FP16`, `B=16`) scored **`5.5 / 20` (`27.50%`, `W=0 D=11 L=9`, `3,340.8 NPS`)** on the exact same first 10 `OPENINGS_50` pairs where Phase 3 scored **`5.0 / 20` (`25.00%`, `W=0 D=10 L=10`)**. This isolates the `30.0%` vs `49.0%` difference primarily to `OPENINGS_50` GM mainline openings + `220`-ply play vs `step4`'s randomized `openings_320[75:100]` (`max_plies=150` + material adjudication), while Phase 3 demonstrated **`+59.17%` H2H (`+64.5` Elo)** over `v1.0.2` and `+8.0% / +7.0%` gains on `50/100 ms` tactics.
+
+
 

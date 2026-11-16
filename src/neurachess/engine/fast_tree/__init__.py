@@ -2128,78 +2128,174 @@ class FastTreeSearchBackend:
                     b: self._bind_zero_copy_req(getattr(avail_models[b], "infer_request", None))
                     for b in sorted_shapes
                 }
-                prof["zero_copy_staging"] = all(z is not None for z in zc_by_b.values())
+                m16 = avail_models.get(16, batch_model if self.batch_size == 16 else None)
+                b16_has_async = (
+                    (m16 is not None)
+                    and hasattr(m16, "infer_request_async")
+                    and hasattr(getattr(m16, "infer_request", None), "start_async")
+                )
+                b16_reqs = [m16.infer_request, m16.infer_request_async] if b16_has_async else []
+                b16_zcs = [self._bind_zero_copy_req(r) for r in b16_reqs] if b16_has_async else []
+                prof["zero_copy_staging"] = all(z is not None for z in zc_by_b.values()) and (
+                    all(z is not None for z in b16_zcs) if b16_has_async else True
+                )
                 prof["mode"] = "dynamic_gear_shift"
+                prof["dynamic_async_b16"] = b16_has_async
                 prev_cache_exp = 0
+                b16_buf_idx = 0
+                inflight_16 = None
 
-                while _pc() < t_deadline:
-                    if max_nodes is not None and nodes_evaluated >= max_nodes:
-                        break
+                def _record_gear_wave(cb: int, rc: int, nev_v: int, mply_v: int) -> None:
+                    nonlocal max_depth_reached, nodes_evaluated
+                    if mply_v > max_depth_reached:
+                        max_depth_reached = mply_v
+                    nodes_evaluated += cb
+                    prof["batches"] += 1
+                    prof["slots"] += cb
+                    prof["unique_leaves"] += nev_v
+                    bk = str(cb)
+                    prof["batch_gear_counts"][bk] = prof["batch_gear_counts"].get(bk, 0) + 1
+                    rk = str(rc)
+                    prof["gear_reasons"][rk] = prof["gear_reasons"].get(rk, 0) + 1
 
-                    t0 = _pc()
-                    hs, rec_b, reason_code, nev_s, mply_s = self.select_dynamic_native(
-                        max_depth=max_depth,
-                        use_pending=False,
-                    )
-                    if nev_s == 0:
-                        prof["select_s"] += _pc() - t0
-                        self.lib.ft_destroy_inflight_batch(hs)
-                        self.lib.ft_get_stats(
-                            self._tree_ptr,
-                            ctypes.byref(self._st_i64[0]),
-                            ctypes.byref(self._st_i64[1]),
-                            ctypes.byref(self._st_i64[2]),
-                            ctypes.byref(self._st_i64[3]),
-                            ctypes.byref(self._st_i64[4]),
-                            ctypes.byref(self._st_i64[5]),
-                            ctypes.byref(self._st_i32[0]),
-                            ctypes.byref(self._st_i32[1]),
-                        )
-                        cur_cache_exp = int(self._st_i64[4].value)
-                        if cur_cache_exp > prev_cache_exp:
-                            prev_cache_exp = cur_cache_exp
-                            if max_nodes is not None and (nodes_evaluated + cur_cache_exp) >= max_nodes:
-                                break
-                            continue
-                        break
-
-                    chosen_b = next((b for b in sorted_shapes if b >= rec_b), sorted_shapes[-1])
-                    zc_cur = zc_by_b.get(chosen_b)
-                    cur_m = avail_models.get(chosen_b, batch_model)
-                    bt = self.pack_inflight_batch_native(
-                        hs,
-                        chosen_b,
-                        target_in_ptr=zc_cur[1] if zc_cur is not None else None,
-                    )
-                    t1 = _pc()
-                    prof["select_s"] += t1 - t0
-
-                    if mply_s > max_depth_reached:
-                        max_depth_reached = mply_s
-                    b_key = str(chosen_b)
-                    prof["batch_gear_counts"][b_key] = prof["batch_gear_counts"].get(b_key, 0) + 1
-                    r_key = str(reason_code)
-                    prof["gear_reasons"][r_key] = prof["gear_reasons"].get(r_key, 0) + 1
-
-                    if zc_cur is not None:
-                        zc_cur[0].infer()
-                        t3 = _pc()
-                        prof["wait_s"] += t3 - t1
-                        nodes_evaluated += chosen_b
-                        prof["batches"] += 1
-                        prof["slots"] += chosen_b
-                        prof["unique_leaves"] += nev_s
-                        self.backup_batch_native_ptrs(hs, zc_cur[2], zc_cur[3], zc_cur[4], max_depth, prof)
+                def _exec_sync_wave(hs_s, bt_s, cb: int, rc: int, nev_s: int, mply_s: int, zc_s, cm_s) -> None:
+                    t_inf0 = _pc()
+                    if zc_s is not None:
+                        zc_s[0].infer()
+                        t_bk = _pc()
+                        prof["wait_s"] += t_bk - t_inf0
+                        _record_gear_wave(cb, rc, nev_s, mply_s)
+                        self.backup_batch_native_ptrs(hs_s, zc_s[2], zc_s[3], zc_s[4], max_depth, prof)
                     else:
-                        p_logits_batch, val_batch = cur_m.infer(bt)
-                        t3 = _pc()
-                        prof["wait_s"] += t3 - t1
-                        nodes_evaluated += chosen_b
-                        prof["batches"] += 1
-                        prof["slots"] += chosen_b
-                        prof["unique_leaves"] += nev_s
-                        self.backup_batch_native(hs, p_logits_batch, val_batch, max_depth, prof)
-                    prof["backup_s"] += _pc() - t3
+                        pl_s, vb_s = cm_s.infer(bt_s)
+                        t_bk = _pc()
+                        prof["wait_s"] += t_bk - t_inf0
+                        _record_gear_wave(cb, rc, nev_s, mply_s)
+                        self.backup_batch_native(hs_s, pl_s, vb_s, max_depth, prof)
+                    prof["backup_s"] += _pc() - t_bk
+
+                def _finish_async_16(inf_t) -> None:
+                    slot_i, hs_i, _bt_i, nev_i, mply_i, rc_i = inf_t
+                    tw0 = _pc()
+                    b16_reqs[slot_i].wait()
+                    tw1 = _pc()
+                    prof["wait_s"] += tw1 - tw0
+                    _record_gear_wave(16, rc_i, nev_i, mply_i)
+                    zcc = b16_zcs[slot_i]
+                    if zcc is not None:
+                        self.backup_batch_native_ptrs(hs_i, zcc[2], zcc[3], zcc[4], max_depth, prof)
+                    else:
+                        outs = list(b16_reqs[slot_i].results.values())
+                        self.backup_batch_native(hs_i, outs[0], outs[1], max_depth, prof)
+                    prof["backup_s"] += _pc() - tw1
+
+                def _launch_async_16(hs_a, nev_a: int, mply_a: int, rc_a: int, t_sel_start: float):
+                    nonlocal b16_buf_idx
+                    slot_a = b16_buf_idx
+                    zca = b16_zcs[slot_a]
+                    bta = self.pack_inflight_batch_native(
+                        hs_a,
+                        16,
+                        target_in_ptr=zca[1] if zca is not None else None,
+                    )
+                    t_disp = _pc()
+                    prof["select_s"] += t_disp - t_sel_start
+                    if zca is not None:
+                        b16_reqs[slot_a].start_async()
+                    else:
+                        b16_reqs[slot_a].start_async({"board_state": bta})
+                    prof["dispatch_s"] += _pc() - t_disp
+                    b16_buf_idx = 1 - slot_a
+                    return (slot_a, hs_a, bta, nev_a, mply_a, rc_a)
+
+                while True:
+                    if inflight_16 is None:
+                        if _pc() >= t_deadline or (max_nodes is not None and nodes_evaluated >= max_nodes):
+                            break
+                        t0 = _pc()
+                        hs, rec_b, reason_code, nev_s, mply_s = self.select_dynamic_native(
+                            max_depth=max_depth,
+                            use_pending=False,
+                        )
+                        if nev_s == 0:
+                            prof["select_s"] += _pc() - t0
+                            self.lib.ft_destroy_inflight_batch(hs)
+                            self.lib.ft_get_stats(
+                                self._tree_ptr,
+                                ctypes.byref(self._st_i64[0]),
+                                ctypes.byref(self._st_i64[1]),
+                                ctypes.byref(self._st_i64[2]),
+                                ctypes.byref(self._st_i64[3]),
+                                ctypes.byref(self._st_i64[4]),
+                                ctypes.byref(self._st_i64[5]),
+                                ctypes.byref(self._st_i32[0]),
+                                ctypes.byref(self._st_i32[1]),
+                            )
+                            cur_cache_exp = int(self._st_i64[4].value)
+                            if cur_cache_exp > prev_cache_exp:
+                                prev_cache_exp = cur_cache_exp
+                                if max_nodes is not None and (nodes_evaluated + cur_cache_exp) >= max_nodes:
+                                    break
+                                continue
+                            break
+
+                        chosen_b = next((b for b in sorted_shapes if b >= rec_b), sorted_shapes[-1])
+                        if chosen_b == 16 and b16_has_async:
+                            inflight_16 = _launch_async_16(hs, nev_s, mply_s, reason_code, t0)
+                            continue
+
+                        zc_cur = zc_by_b.get(chosen_b)
+                        cur_m = avail_models.get(chosen_b, batch_model)
+                        bt = self.pack_inflight_batch_native(
+                            hs,
+                            chosen_b,
+                            target_in_ptr=zc_cur[1] if zc_cur is not None else None,
+                        )
+                        prof["select_s"] += _pc() - t0
+                        _exec_sync_wave(hs, bt, chosen_b, reason_code, nev_s, mply_s, zc_cur, cur_m)
+                    else:
+                        # Async nireq=2 overlap: select + pack next wave while inflight_16 executes on NPU
+                        next_inflight = None
+                        next_sync = None
+                        time_up_next = (_pc() >= t_deadline) or (
+                            max_nodes is not None and (nodes_evaluated + 16) >= max_nodes
+                        )
+                        if not time_up_next:
+                            t0 = _pc()
+                            hn, rec_bn, r_bn, nev_n, mply_n = self.select_dynamic_native(
+                                max_depth=max_depth,
+                                use_pending=False,
+                            )
+                            if nev_n == 0:
+                                prof["select_s"] += _pc() - t0
+                                self.lib.ft_destroy_inflight_batch(hn)
+                            else:
+                                chosen_bn = next((b for b in sorted_shapes if b >= rec_bn), sorted_shapes[-1])
+                                if chosen_bn == 16 and b16_has_async:
+                                    next_inflight = _launch_async_16(hn, nev_n, mply_n, r_bn, t0)
+                                else:
+                                    zc_n = zc_by_b.get(chosen_bn)
+                                    cm_n = avail_models.get(chosen_bn, batch_model)
+                                    btn = self.pack_inflight_batch_native(
+                                        hn,
+                                        chosen_bn,
+                                        target_in_ptr=zc_n[1] if zc_n is not None else None,
+                                    )
+                                    prof["select_s"] += _pc() - t0
+                                    next_sync = (hn, btn, chosen_bn, r_bn, nev_n, mply_n, zc_n, cm_n)
+
+                        _finish_async_16(inflight_16)
+                        inflight_16 = next_inflight
+
+                        if next_sync is not None:
+                            hsn, btn, cbn, rbn, nevn, mplyn, zcn, cmn = next_sync
+                            if (_pc() >= t_deadline) or (max_nodes is not None and nodes_evaluated >= max_nodes):
+                                self.lib.ft_revert_batch_vl_and_clear_pending(self._tree_ptr, hsn)
+                                self.lib.ft_destroy_inflight_batch(hsn)
+                            else:
+                                _exec_sync_wave(hsn, btn, cbn, rbn, nevn, mplyn, zcn, cmn)
+                        elif inflight_16 is None and time_up_next:
+                            break
 
             elif has_async and self.use_async_overlap:
                 from collections import deque

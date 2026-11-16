@@ -167,11 +167,62 @@ def _resolve_sf(explicit_path: str | None) -> str:
     raise FileNotFoundError("Stockfish binary not found; pass --stockfish-path or set STOCKFISH_PATH.")
 
 
-def _build_engine(xml_path: str | None, batch_size: int = 16, device: str = "NPU", use_fast_tree: bool = True, encoder_layout: str = "gpu_unpack") -> NPUBatchedPUCTSearch:
+def _build_engine(
+    xml_path: str | None,
+    batch_size: int = 16,
+    device: str = "NPU",
+    use_fast_tree: bool = True,
+    encoder_layout: str = "gpu_unpack",
+    use_dynamic_batch_shift: bool = False,
+    cache_dir: str | None = None,
+) -> NPUBatchedPUCTSearch:
     resolved_xml = xml_path or resolve_default_model_paths()[0]
-    root_m = NPUModel(batch_size=1, cache_dir=DEFAULT_CACHE_DIR, device=device, use_turbo=True, performance_hint="LATENCY", ov_ir_xml_path=resolved_xml, verbose=False)
-    batch_m = NPUModel(batch_size=batch_size, cache_dir=DEFAULT_CACHE_DIR, device=device, use_turbo=True, performance_hint="LATENCY", ov_ir_xml_path=resolved_xml, verbose=False)
-    return NPUBatchedPUCTSearch(root_model=root_m, batch_model=batch_m, batch_size=batch_size, use_fast_tree=use_fast_tree, encoder_layout=encoder_layout)
+    eff_cache = cache_dir or DEFAULT_CACHE_DIR
+    root_m = NPUModel(
+        batch_size=1,
+        cache_dir=eff_cache,
+        device=device,
+        use_turbo=True,
+        performance_hint="LATENCY",
+        ov_ir_xml_path=resolved_xml,
+        verbose=False,
+    )
+    batch_m = NPUModel(
+        batch_size=batch_size,
+        cache_dir=eff_cache,
+        device=device,
+        use_turbo=True,
+        performance_hint="LATENCY",
+        ov_ir_xml_path=resolved_xml,
+        verbose=False,
+    )
+    batch_models = None
+    if use_dynamic_batch_shift:
+        batch_models = {
+            b: (
+                batch_m
+                if b == batch_size
+                else NPUModel(
+                    batch_size=b,
+                    cache_dir=eff_cache,
+                    device=device,
+                    use_turbo=True,
+                    performance_hint="LATENCY",
+                    ov_ir_xml_path=resolved_xml,
+                    verbose=False,
+                )
+            )
+            for b in (4, 8, 16)
+        }
+    return NPUBatchedPUCTSearch(
+        root_model=root_m,
+        batch_model=batch_m,
+        batch_size=batch_size,
+        use_fast_tree=use_fast_tree,
+        encoder_layout=encoder_layout,
+        use_dynamic_batch_shift=use_dynamic_batch_shift,
+        batch_models=batch_models,
+    )
 
 
 def _select_engine_move(
@@ -197,7 +248,14 @@ def _select_engine_move(
 
 def run_stockfish_match(args: argparse.Namespace) -> dict:
     sf_bin = _resolve_sf(args.stockfish_path)
-    searcher = _build_engine(str(args.xml) if args.xml else None, batch_size=args.batch_size, device=args.device, use_fast_tree=not args.python_tree)
+    searcher = _build_engine(
+        str(args.xml) if args.xml else None,
+        batch_size=args.batch_size,
+        device=args.device,
+        use_fast_tree=not args.python_tree,
+        use_dynamic_batch_shift=getattr(args, "dynamic_gear", False),
+        cache_dir=getattr(args, "cache_dir", None),
+    )
     ponder = PonderManager(searcher, use_ponder=args.ponder)
     book_driver = UCIEngine(own_book=True, book_seed=42) if getattr(args, "own_book", False) else None
 
@@ -217,6 +275,8 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
     games_log = []
 
     try:
+        searcher.search(chess.Board(), board_to_tensor(chess.Board(), layout=searcher.encoder_layout), movetime_ms=50, max_nodes=32)
+        searcher.clear_state()
         for pair_idx in range(args.pairs):
             opening = OPENINGS_50[pair_idx % len(OPENINGS_50)]
             for nc_color in (chess.WHITE, chess.BLACK):
@@ -258,6 +318,27 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
                 games_log.append({"pair": pair_idx, "nc_color": "white" if nc_color == chess.WHITE else "black", "nc_score": score, "plies": board.ply()})
                 played = wins + draws + losses
                 print(f"[Game {played}/{args.pairs * 2}] W={wins} D={draws} L={losses} ({100.0*(wins+0.5*draws)/played:.1f}%)", flush=True)
+                if args.output:
+                    pts_now = wins + 0.5 * draws
+                    lo_now, hi_now = wilson_interval(pts_now, played)
+                    args.output.parent.mkdir(parents=True, exist_ok=True)
+                    args.output.write_text(
+                        json.dumps(
+                            {
+                                "total_games": played,
+                                "wins": wins,
+                                "draws": draws,
+                                "losses": losses,
+                                "points": pts_now,
+                                "score_pct": round(100.0 * pts_now / max(1, played), 2),
+                                "wilson_95_ci_pct": [round(lo_now * 100.0, 2), round(hi_now * 100.0, 2)],
+                                "effective_nps": round(total_nodes / max(1e-6, total_search_s), 1),
+                                "games": games_log,
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
     finally:
         ponder.stop()
         sf_engine.quit()
@@ -283,12 +364,51 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
 
 
 def run_h2h_match(args: argparse.Namespace) -> dict:
-    eng_a = _build_engine(str(args.xml_a), batch_size=args.batch_size, device=args.device)
-    eng_b = _build_engine(str(args.xml_b), batch_size=args.batch_size, device=args.device)
+    eng_a = _build_engine(
+        str(args.xml_a),
+        batch_size=args.batch_size,
+        device=args.device,
+        use_dynamic_batch_shift=getattr(args, "dynamic_gear_a", False),
+        cache_dir=getattr(args, "cache_dir_a", None),
+    )
+    eng_b = _build_engine(
+        str(args.xml_b),
+        batch_size=args.batch_size,
+        device=args.device,
+        use_dynamic_batch_shift=getattr(args, "dynamic_gear_b", False),
+        cache_dir=getattr(args, "cache_dir_b", None),
+    )
     book_driver = UCIEngine(own_book=True, book_seed=42) if getattr(args, "own_book", False) else None
+    warm_t = board_to_tensor(chess.Board(), layout=eng_a.encoder_layout)
+    eng_a.search(chess.Board(), warm_t, movetime_ms=50, max_nodes=32)
+    eng_b.search(chess.Board(), warm_t, movetime_ms=50, max_nodes=32)
+    eng_a.clear_state()
+    eng_b.clear_state()
 
     wins_a = draws = losses_a = 0
     pent = [0, 0, 0, 0, 0]
+    nodes_a = nodes_b = 0
+    time_a = time_b = 0.0
+    games_log = []
+
+    def _summarize_h2h() -> dict:
+        total_g = wins_a + draws + losses_a
+        pts = wins_a + 0.5 * draws
+        lo, hi = wilson_interval(pts, total_g)
+        return {
+            "total_games": total_g,
+            "wins": wins_a,
+            "draws": draws,
+            "losses": losses_a,
+            "points": pts,
+            "score_pct": round(100.0 * pts / max(1, total_g), 2),
+            "wilson_95_ci_pct": [round(lo * 100.0, 2), round(hi * 100.0, 2)],
+            "pentanomial": list(pent),
+            "sprt": compute_pentanomial_sprt_llr(pent),
+            "nps_a": round(nodes_a / max(1e-6, time_a), 1),
+            "nps_b": round(nodes_b / max(1e-6, time_b), 1),
+            "games": games_log,
+        }
 
     for pair_idx in range(args.pairs):
         opening = OPENINGS_50[pair_idx % len(OPENINGS_50)]
@@ -301,8 +421,15 @@ def run_h2h_match(args: argparse.Namespace) -> dict:
                 board.push_uci(uci)
 
             while not board.is_game_over(claim_draw=True) and board.ply() < args.max_plies:
-                active = eng_a if board.turn == a_color else eng_b
-                best_uci, _, _, _ = _select_engine_move(board, active, args.movetime_ms, book_driver)
+                is_a = board.turn == a_color
+                active = eng_a if is_a else eng_b
+                best_uci, mv_nodes, _, mv_dt = _select_engine_move(board, active, args.movetime_ms, book_driver)
+                if is_a:
+                    nodes_a += mv_nodes
+                    time_a += mv_dt
+                else:
+                    nodes_b += mv_nodes
+                    time_b += mv_dt
                 board.push_uci(best_uci)
 
             outcome = board.outcome(claim_draw=True)
@@ -316,23 +443,29 @@ def run_h2h_match(args: argparse.Namespace) -> dict:
                 losses_a += 1
                 g_score = 0.0
             pair_score += g_score
+            games_log.append(
+                {
+                    "pair": pair_idx,
+                    "a_color": "white" if a_color == chess.WHITE else "black",
+                    "a_score": g_score,
+                    "plies": board.ply(),
+                }
+            )
 
         pent[int(round(pair_score * 2))] += 1
         sprt = compute_pentanomial_sprt_llr(pent)
-        print(f"[Pair {pair_idx+1}/{args.pairs}] W={wins_a} D={draws} L={losses_a} | Pent={pent} | SPRT={sprt['status']}", flush=True)
+        pts_now = wins_a + 0.5 * draws
+        g_now = wins_a + draws + losses_a
+        print(
+            f"[Pair {pair_idx+1}/{args.pairs}] W={wins_a} D={draws} L={losses_a} "
+            f"({100.0 * pts_now / max(1, g_now):.1f}%) | Pent={pent} | SPRT={sprt['status']} ({sprt['llr']})",
+            flush=True,
+        )
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(_summarize_h2h(), indent=2), encoding="utf-8")
 
-    total_g = wins_a + draws + losses_a
-    pts = wins_a + 0.5 * draws
-    lo, hi = wilson_interval(pts, total_g)
-    summary = {
-        "total_games": total_g,
-        "wins": wins_a,
-        "draws": draws,
-        "losses": losses_a,
-        "score_pct": round(100.0 * pts / max(1, total_g), 2),
-        "wilson_95_ci_pct": [round(lo * 100.0, 2), round(hi * 100.0, 2)],
-        "pentanomial": pent,
-    }
+    summary = _summarize_h2h()
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -354,6 +487,8 @@ def main() -> None:
     p_sf.add_argument("--max-plies", type=int, default=220)
     p_sf.add_argument("--device", type=str, default="NPU")
     p_sf.add_argument("--ponder", action="store_true")
+    p_sf.add_argument("--dynamic-gear", action="store_true", help="Enable co-resident B=4/8/16 dynamic gear-shifting")
+    p_sf.add_argument("--cache-dir", type=str, default=None)
     p_sf.add_argument("--own-book", action="store_true", help="Use bundled CC0 Lichess opening book up to ply 15")
     p_sf.add_argument("--python-tree", action="store_true")
     p_sf.add_argument("--output", type=Path, default=None)
@@ -366,6 +501,10 @@ def main() -> None:
     p_h2h.add_argument("--batch-size", type=int, default=16)
     p_h2h.add_argument("--max-plies", type=int, default=220)
     p_h2h.add_argument("--device", type=str, default="NPU")
+    p_h2h.add_argument("--dynamic-gear-a", action="store_true", help="Enable B=4/8/16 dynamic gear-shifting on Engine A")
+    p_h2h.add_argument("--dynamic-gear-b", action="store_true", help="Enable B=4/8/16 dynamic gear-shifting on Engine B")
+    p_h2h.add_argument("--cache-dir-a", type=str, default=None)
+    p_h2h.add_argument("--cache-dir-b", type=str, default=None)
     p_h2h.add_argument("--own-book", action="store_true", help="Use bundled CC0 Lichess opening book up to ply 15")
     p_h2h.add_argument("--output", type=Path, default=None)
 

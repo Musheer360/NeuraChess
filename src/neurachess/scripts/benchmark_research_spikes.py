@@ -1562,10 +1562,452 @@ def run_phase2_step3(private_root: Path) -> dict:
         shutil.rmtree(tmp_cache_dir, ignore_errors=True)
 
 
+def build_hybrid_mid27_convonly_ir(
+    out_xml_path: Path,
+    private_root: Path,
+    weights_dict: dict[str, np.ndarray] | None = None,
+) -> Path:
+    """Build or load cached `Hybrid_Middle_2_to_7_ConvOnly` OpenVINO FP16/INT8 hybrid IR."""
+    import nncf
+
+    out_xml_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_xml_path.exists() and out_xml_path.with_suffix(".bin").exists():
+        return out_xml_path
+
+    if weights_dict is None:
+        with np.load(DEFAULT_WEIGHTS_NPZ) as npz:
+            weights_dict = {k: npz[k] for k in npz.files}
+
+    base_ov = build_openvino_se_resnet(
+        batch_size=-1, num_blocks=10, channels=192, in_channels=18, weights_dict=weights_dict
+    )
+    calib_2000 = _load_2000_calib(private_root)
+    calib_ds_2000 = nncf.Dataset([calib_2000[i : i + 1] for i in range(2000)], lambda a: {"board_state": a})
+    ig_patterns = [
+        "^init_.*",
+        ".*_se_.*",
+        "^pol_.*",
+        "^val_.*",
+        "^(value|wdl)$",
+        "^res_0_.*",
+        "^res_1_.*",
+        "^res_8_.*",
+        "^res_9_.*",
+        ".*_out_.*",
+    ]
+    ig = nncf.IgnoredScope(patterns=ig_patterns, validate=True)
+    qm = nncf.quantize(
+        base_ov,
+        calib_ds_2000,
+        target_device=nncf.TargetDevice.NPU,
+        subset_size=2000,
+        fast_bias_correction=True,
+        ignored_scope=ig,
+    )
+    ov.save_model(qm, str(out_xml_path), compress_to_fp16=True)
+    return out_xml_path
+
+
+def _measure_coresident_shape_latencies(co_models: dict[int, NPUModel]) -> dict[str, dict]:
+    shape_profile: dict[str, dict] = {}
+    for b in sorted(co_models.keys()):
+        req = co_models[b].infer_request
+        in_arr = req.get_input_tensor().data
+        in_arr[...] = 0.0
+        for _ in range(10):
+            req.infer()
+        lats_ms = []
+        for _ in range(80):
+            t0 = time.perf_counter()
+            req.infer()
+            lats_ms.append((time.perf_counter() - t0) * 1000.0)
+        med = float(np.median(lats_ms))
+        shape_profile[f"B={b}"] = {
+            "batch_size": b,
+            "compile_time_s": round(co_models[b].compile_time_s, 3),
+            "turnaround_median_ms": round(med, 3),
+            "turnaround_mean_ms": round(float(np.mean(lats_ms)), 3),
+            "turnaround_p10_ms": round(float(np.percentile(lats_ms, 10)), 3),
+            "turnaround_p90_ms": round(float(np.percentile(lats_ms, 90)), 3),
+            "raw_pos_per_sec": round(b * 1000.0 / max(1e-6, med), 1),
+        }
+    return shape_profile
+
+
+def _run_step1_arm_suite(
+    arm_name: str,
+    srch: NPUBatchedPUCTSearch,
+    grader: FenStockfishGrader,
+    puzzles_500: list[dict],
+    cat_a: list[dict],
+    cat_c: list[dict],
+    results: dict,
+) -> None:
+    assert_ac_power()
+    srch.search(chess.Board(), movetime_ms=80, max_nodes=32)
+
+    for label, mt in (("clean_500_puzzles_50ms", 50), ("clean_500_puzzles_100ms", 100), ("clean_500_puzzles_200ms", 200)):
+        rp = _eval_500_puzzles(srch, puzzles_500, max_nodes=None, movetime_ms=mt)
+        results[label][arm_name] = rp
+        print(
+            f"[P3 Step 1] 500 Pz @ {mt:3d}ms | {arm_name:34s}: {rp['solved']}/500 ({rp['accuracy_pct']:.2f}%) | "
+            f"Nodes={rp['total_nodes']} (mean={rp['mean_nodes']:.1f}) NPS={rp['nps_search']:.0f} "
+            f"avg_ply={rp['mean_avg_ply']:.2f} max_ply={rp['mean_max_ply']:.2f} | "
+            f"Shares%={rp['batch_share_pct']} Reasons={rp['gear_reasons']}",
+            flush=True,
+        )
+
+    ra = _eval_loss_fens(srch, grader, cat_a, max_nodes=None, movetime_ms=400)
+    results["value_search_cat_a_19_400ms"][arm_name] = ra
+    print(
+        f"[P3 Step 1] Cat(a) 19 @400ms | {arm_name:34s}: SF={ra['orig_sf_best_matches']}/19 (live={ra['live_sf_d14_matches']}/19) | "
+        f"Bl>=150={ra['blunders_ge_150cp']}/19 MeanDrop={ra['mean_cp_drop']:.2f}cp | "
+        f"Nodes={ra['total_nodes']} ({ra['mean_nodes']:.1f}) avg_ply={ra['mean_avg_ply']:.2f} max_ply={ra['mean_max_ply']:.2f} | "
+        f"Shares%={ra['batch_share_pct']} Reasons={ra['gear_reasons']}",
+        flush=True,
+    )
+
+    rc = _eval_loss_fens(srch, grader, cat_c, max_nodes=None, movetime_ms=400)
+    results["tactical_horizon_cat_c_19_400ms"][arm_name] = rc
+    print(
+        f"[P3 Step 1] Cat(c) 19 @400ms | {arm_name:34s}: SF={rc['orig_sf_best_matches']}/19 (live={rc['live_sf_d14_matches']}/19) | "
+        f"Bl>=150={rc['blunders_ge_150cp']}/19 MeanDrop={rc['mean_cp_drop']:.2f}cp | "
+        f"Nodes={rc['total_nodes']} ({rc['mean_nodes']:.1f}) avg_ply={rc['mean_avg_ply']:.2f} max_ply={rc['mean_max_ply']:.2f} | "
+        f"Shares%={rc['batch_share_pct']} Reasons={rc['gear_reasons']}",
+        flush=True,
+    )
+
+
+def run_phase3_step1(private_root: Path, sf_path: str | None) -> dict:
+    """Phase 3 Step 1: gear_shift_v3 (check < 32 + nireq=2 B=16 async DB) + Hybrid_Middle_2_to_7_ConvOnly."""
+    import gc
+
+    print("\n" + "=" * 80, flush=True)
+    print("PHASE 3 STEP 1: GEAR_SHIFT_V3 (ASYNC B=16 DB + CHECK<32) + HYBRID_MIDDLE_2_TO_7", flush=True)
+    print("=" * 80, flush=True)
+    assert_ac_power()
+
+    exp_dir = ROOT_DIR / "weights" / "experimental"
+    exp_cache = str(exp_dir / "ov_cache")
+    hybrid_xml = build_hybrid_mid27_convonly_ir(exp_dir / "neurachess-10x192-hybrid-mid27-int8.xml", private_root)
+
+    cat_c, cat_a = load_loss_anatomy_subsets(private_root)
+    puzzles_500 = load_clean_500_puzzles(private_root)
+    grader = FenStockfishGrader(sf_path, depth=14)
+
+    res: dict = {
+        "hybrid_ir_xml": str(hybrid_xml),
+        "hybrid_ir_size_mb": round(hybrid_xml.with_suffix(".bin").stat().st_size / 1048576.0, 2),
+        "coresident_latencies": {},
+        "clean_500_puzzles_50ms": {},
+        "clean_500_puzzles_100ms": {},
+        "clean_500_puzzles_200ms": {},
+        "value_search_cat_a_19_400ms": {},
+        "tactical_horizon_cat_c_19_400ms": {},
+    }
+
+    try:
+        # 1. Pure FP16 arms (baseline static B=16 prod_db + FP16 gear_shift_v3 ablation)
+        fp16_ov = ov.Core().read_model(DEFAULT_MODEL_XML)
+        fp16_models = {
+            b: NPUModel(
+                batch_size=b,
+                cache_dir=DEFAULT_CACHE_DIR,
+                device="NPU",
+                use_turbo=True,
+                performance_hint="LATENCY",
+                ov_model_override=fp16_ov,
+                verbose=False,
+            )
+            for b in (1, 4, 8, 16)
+        }
+        res["coresident_latencies"]["V0_Pure_FP16"] = _measure_coresident_shape_latencies(fp16_models)
+
+        srch_base = _make_prod_searcher(fp16_models[1], fp16_models[16], use_dynamic_batch_shift=False)
+        _run_step1_arm_suite("V0_Pure_FP16_baseline_b16_prod_db", srch_base, grader, puzzles_500, cat_a, cat_c, res)
+
+        srch_fp16_v3 = _make_prod_searcher(
+            fp16_models[1],
+            fp16_models[16],
+            use_dynamic_batch_shift=True,
+            batch_models={4: fp16_models[4], 8: fp16_models[8], 16: fp16_models[16]},
+        )
+        _run_step1_arm_suite("V0_Pure_FP16_gear_shift_v3", srch_fp16_v3, grader, puzzles_500, cat_a, cat_c, res)
+        del srch_base, srch_fp16_v3, fp16_models, fp16_ov
+        gc.collect()
+
+        # 2. Combined Hybrid_Middle_2_to_7_ConvOnly + gear_shift_v3
+        hyb_ov = ov.Core().read_model(str(hybrid_xml))
+        hyb_models = {
+            b: NPUModel(
+                batch_size=b,
+                cache_dir=exp_cache,
+                device="NPU",
+                use_turbo=True,
+                performance_hint="LATENCY",
+                ov_model_override=hyb_ov,
+                verbose=False,
+            )
+            for b in (1, 4, 8, 16)
+        }
+        res["coresident_latencies"]["Hybrid_Middle_2_to_7_ConvOnly"] = _measure_coresident_shape_latencies(hyb_models)
+        print(
+            "[P3 Step 1] Hybrid B=1/4/8/16 med(ms):",
+            {k: v["turnaround_median_ms"] for k, v in res["coresident_latencies"]["Hybrid_Middle_2_to_7_ConvOnly"].items()},
+            flush=True,
+        )
+
+        srch_hyb_v3 = _make_prod_searcher(
+            hyb_models[1],
+            hyb_models[16],
+            use_dynamic_batch_shift=True,
+            batch_models={4: hyb_models[4], 8: hyb_models[8], 16: hyb_models[16]},
+        )
+        _run_step1_arm_suite("Hybrid_Mid27_ConvOnly_gear_shift_v3", srch_hyb_v3, grader, puzzles_500, cat_a, cat_c, res)
+        del srch_hyb_v3, hyb_models, hyb_ov
+        gc.collect()
+        return res
+    finally:
+        grader.close()
+
+
+def run_phase3_step2(private_root: Path, sf_path: str | None) -> dict:
+    """Phase 3 Step 2: Train frozen-backbone HL-Gauss-64 value head (1 pass) and run GT + Cat(a) gate."""
+    import gc
+    from neurachess.training.train_hl_gauss_value import train_frozen_hl_gauss_64
+
+    print("\n" + "=" * 80, flush=True)
+    print("PHASE 3 STEP 2: FROZEN-BACKBONE HL-GAUSS-64 VALUE HEAD ($0, 1 SHUFFLED PASS)", flush=True)
+    print("=" * 80, flush=True)
+    assert_ac_power()
+
+    exp_dir = ROOT_DIR / "weights" / "experimental"
+    exp_cache = str(exp_dir / "ov_cache")
+    hl_npz = exp_dir / "neurachess-10x192-hl-gauss64-fp16.npz"
+    hl_xml = exp_dir / "neurachess-10x192-hl-gauss64-fp16.xml"
+
+    train_res = train_frozen_hl_gauss_64(
+        private_root=private_root,
+        out_npz_path=hl_npz,
+        out_xml_path=hl_xml,
+        val_channels=16,
+        batch_size=256,
+        chunk_size=16384,
+    )
+
+    assert_ac_power()
+    x_5000, masks_5000, acts_5000, val_targets_5000, cps_5000 = _load_5000_far_test_with_targets(private_root)
+    _, cat_a = load_loss_anatomy_subsets(private_root)
+    grader = FenStockfishGrader(sf_path, depth=14)
+
+    try:
+        # Compare scalar V0_Pure_FP16 (built identically from DEFAULT_WEIGHTS_NPZ) vs HL-Gauss-64 FP16 on NPU 3720
+        with np.load(DEFAULT_WEIGHTS_NPZ) as npz:
+            scalar_weights = {k: npz[k] for k in npz.files}
+        scalar_xml = exp_dir / "neurachess-10x192-scalar-fp16-from-npz.xml"
+        if not scalar_xml.exists():
+            ov_sc = build_openvino_se_resnet(
+                batch_size=-1, num_blocks=10, channels=192, in_channels=18, weights_dict=scalar_weights
+            )
+            ov.save_model(ov_sc, str(scalar_xml), compress_to_fp16=True)
+
+        eval_arms = [
+            ("scalar_fp16_from_npz", scalar_xml, DEFAULT_CACHE_DIR),
+            ("hl_gauss64_fp16", hl_xml, exp_cache),
+        ]
+
+        far_test_res: dict = {}
+        cat_a_res: dict = {}
+        ref_logits = None
+
+        for label, xml_p, cdir in eval_arms:
+            vm = ov.Core().read_model(str(xml_p))
+            root_m = NPUModel(
+                batch_size=1, cache_dir=cdir, device="NPU", use_turbo=True, performance_hint="LATENCY", ov_model_override=vm, verbose=False
+            )
+            batch_m = NPUModel(
+                batch_size=16, cache_dir=cdir, device="NPU", use_turbo=True, performance_hint="LATENCY", ov_model_override=vm, verbose=False
+            )
+            l_out, v_out, raw_pos_s = _eval_5000_on_npu_model(batch_m, x_5000)
+            gt = _compute_ground_truth_metrics(l_out, v_out, masks_5000, acts_5000, val_targets_5000, cps_5000)
+            if ref_logits is None:
+                ref_logits = l_out
+                max_pol_diff = 0.0
+            else:
+                max_pol_diff = float(np.max(np.abs(l_out.astype(np.float64) - ref_logits.astype(np.float64))))
+
+            far_test_res[label] = {
+                "raw_npu_b16_pos_s": raw_pos_s,
+                "max_policy_logit_diff_vs_scalar": round(max_pol_diff, 6),
+                **gt,
+            }
+
+            srch = _make_prod_searcher(root_m, batch_m, use_dynamic_batch_shift=False)
+            srch.search(chess.Board(), movetime_ms=80, max_nodes=32)
+            ra = _eval_loss_fens(srch, grader, cat_a, max_nodes=None, movetime_ms=400)
+            cat_a_res[label] = ra
+            print(
+                f"[P3 Step 2] {label:24s} | Far5k ValueMSE={gt['gt_value_mse']:.5f} DecSign={gt['gt_decisive_sign_pct']:.2f}% "
+                f"Top1={gt['gt_masked_top1_pct']:.2f}% MaxPolDiff={max_pol_diff:.6f} | "
+                f"Cat(a)@400ms: SF={ra['orig_sf_best_matches']}/19 (live={ra['live_sf_d14_matches']}/19) "
+                f"Bl>=150={ra['blunders_ge_150cp']}/19 MeanDrop={ra['mean_cp_drop']:.2f}cp",
+                flush=True,
+            )
+            del srch, root_m, batch_m, vm
+            gc.collect()
+
+        # Check DEFAULT_MODEL_XML baseline Cat(a) & Far5k for strict comparison parity too
+        base_sc = far_test_res["scalar_fp16_from_npz"]
+        hl_sc = far_test_res["hl_gauss64_fp16"]
+        base_ca = cat_a_res["scalar_fp16_from_npz"]
+        hl_ca = cat_a_res["hl_gauss64_fp16"]
+
+        mse_improved = hl_sc["gt_value_mse"] < base_sc["gt_value_mse"]
+        cat_a_no_reg = (
+            hl_ca["orig_sf_best_matches"] >= base_ca["orig_sf_best_matches"]
+            and hl_ca["blunders_ge_150cp"] <= base_ca["blunders_ge_150cp"]
+            and hl_ca["mean_cp_drop"] <= (base_ca["mean_cp_drop"] + 1.0)
+        )
+        keep_hl = bool(mse_improved and cat_a_no_reg)
+
+        winning_hyb_xml = exp_dir / "neurachess-10x192-hybrid-mid27-int8.xml"
+        if keep_hl:
+            with np.load(hl_npz) as npz_hl:
+                hl_weights = {k: npz_hl[k] for k in npz_hl.files}
+            winning_hyb_xml = build_hybrid_mid27_convonly_ir(
+                exp_dir / "neurachess-10x192-hl-gauss64-hybrid-mid27-int8.xml",
+                private_root,
+                weights_dict=hl_weights,
+            )
+
+        print(
+            f"[P3 Step 2 Gate] MSE improved ({hl_sc['gt_value_mse']:.5f} < {base_sc['gt_value_mse']:.5f})={mse_improved} | "
+            f"Cat(a) non-regressing={cat_a_no_reg} => KEEP_HL_GAUSS_64={keep_hl} | Phase3 challenger IR={winning_hyb_xml.name}",
+            flush=True,
+        )
+        return {
+            "training": train_res,
+            "far_test_5000": far_test_res,
+            "value_search_cat_a_19_400ms": cat_a_res,
+            "gate": {
+                "far5k_mse_improved": mse_improved,
+                "cat_a_no_regression": cat_a_no_reg,
+                "keep_hl_gauss_64": keep_hl,
+                "winning_hybrid_ir_xml": str(winning_hyb_xml),
+            },
+        }
+    finally:
+        grader.close()
+
+
+def run_phase3_step3(private_root: Path, sf_path: str | None, existing_payload: dict) -> dict:
+    """Phase 3 Step 3: 60-game H2H vs v1.0.2 and conditional 50-game SF UCI_Elo=3000 validation match."""
+    assert_ac_power()
+    exp_dir = ROOT_DIR / "weights" / "experimental"
+    exp_cache = str(exp_dir / "ov_cache")
+
+    step2_gate = (existing_payload.get("phase3_step2_hl_gauss_64") or {}).get("gate") or {}
+    challenger_xml = Path(
+        step2_gate.get("winning_hybrid_ir_xml") or (exp_dir / "neurachess-10x192-hybrid-mid27-int8.xml")
+    )
+    if not challenger_xml.exists():
+        challenger_xml = build_hybrid_mid27_convonly_ir(
+            exp_dir / "neurachess-10x192-hybrid-mid27-int8.xml",
+            private_root,
+        )
+
+    h2h_out = ROOT_DIR / "eval_results" / "phase3_h2h_60g.json"
+    sf_out = ROOT_DIR / "eval_results" / "phase3_sf3000_50g.json"
+
+    print("\n" + "=" * 80, flush=True)
+    print(f"PHASE 3 STEP 3A: 60-GAME H2H ({challenger_xml.name} + gear_shift_v3 vs v1.0.2 B=16 FP16)", flush=True)
+    print("=" * 80, flush=True)
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT_DIR / "src")
+    env["PYTHONUNBUFFERED"] = "1"
+    h2h_cmd = [
+        sys.executable,
+        "-m",
+        "neurachess.scripts.match_runner",
+        "h2h",
+        "--xml-a",
+        str(challenger_xml),
+        "--xml-b",
+        str(DEFAULT_MODEL_XML),
+        "--pairs",
+        "30",
+        "--movetime-ms",
+        "400",
+        "--max-plies",
+        "220",
+        "--dynamic-gear-a",
+        "--cache-dir-a",
+        exp_cache,
+        "--cache-dir-b",
+        DEFAULT_CACHE_DIR,
+        "--output",
+        str(h2h_out),
+    ]
+    subprocess.run(h2h_cmd, check=True, env=env)
+    h2h_summary = json.loads(h2h_out.read_text(encoding="utf-8"))
+    passed_h2h_gate = float(h2h_summary.get("score_pct", 0.0)) >= 53.0 or float(h2h_summary.get("points", 0.0)) >= 32.0
+
+    result: dict = {
+        "challenger_xml": str(challenger_xml),
+        "baseline_xml": str(DEFAULT_MODEL_XML),
+        "h2h_60_games_400ms_no_ponder": h2h_summary,
+        "h2h_gate_passed_ge_53pct": passed_h2h_gate,
+        "stockfish_3000_50_games_400ms_ponder": None,
+    }
+
+    if passed_h2h_gate:
+        assert_ac_power()
+        print("\n" + "=" * 80, flush=True)
+        print("PHASE 3 STEP 3B: H2H GATE PASSED (>= 53.0%) -> 50-GAME VS STOCKFISH 19 UCI_Elo 3000 (PONDER=ON)", flush=True)
+        print("=" * 80, flush=True)
+        sf_cmd = [
+            sys.executable,
+            "-m",
+            "neurachess.scripts.match_runner",
+            "vs-stockfish",
+            "--xml",
+            str(challenger_xml),
+            "--sf-elo",
+            "3000",
+            "--pairs",
+            "25",
+            "--movetime-ms",
+            "400",
+            "--max-plies",
+            "220",
+            "--ponder",
+            "--dynamic-gear",
+            "--cache-dir",
+            exp_cache,
+            "--output",
+            str(sf_out),
+        ]
+        if sf_path:
+            sf_cmd.extend(["--stockfish-path", sf_path])
+        subprocess.run(sf_cmd, check=True, env=env)
+        sf_summary = json.loads(sf_out.read_text(encoding="utf-8"))
+        result["stockfish_3000_50_games_400ms_ponder"] = sf_summary
+    else:
+        print(
+            f"[P3 Step 3] Challenger scored {h2h_summary.get('score_pct')}% ({h2h_summary.get('points')}/60) < 53.0% threshold; "
+            "skipping 50-game Stockfish validation match per pre-registered rule.",
+            flush=True,
+        )
+
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run NeuraChess local NPU research spikes (v1.1)")
     parser.add_argument("--spike", choices=["1", "2", "3", "all", "none"], default="all")
     parser.add_argument("--phase2", choices=["1", "2", "3", "all"], default=None)
+    parser.add_argument("--phase3", choices=["1", "2", "3", "all"], default=None)
     parser.add_argument("--private-root", type=Path, default=ROOT_DIR.parent / "NeuraChess-Private")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--stockfish-path", type=str, default=None)
@@ -1573,7 +2015,12 @@ def main() -> None:
 
     out_path = args.output
     if out_path is None:
-        out_path = ROOT_DIR / "eval_results" / ("research_spikes_phase2.json" if args.phase2 else "research_spikes.json")
+        if args.phase3:
+            out_path = ROOT_DIR / "eval_results" / "research_spikes_phase3.json"
+        elif args.phase2:
+            out_path = ROOT_DIR / "eval_results" / "research_spikes_phase2.json"
+        else:
+            out_path = ROOT_DIR / "eval_results" / "research_spikes.json"
 
     ac = assert_ac_power()
     payload: dict = {}
@@ -1587,7 +2034,17 @@ def main() -> None:
     payload["model"] = "neurachess-10x192-fp16"
     payload["ac_power"] = ac
 
-    if args.phase2:
+    if args.phase3:
+        if args.phase3 in ("1", "all"):
+            payload["phase3_step1_hybrid_gear_shift_v3"] = run_phase3_step1(args.private_root, args.stockfish_path)
+            _save_report(out_path, payload)
+        if args.phase3 in ("2", "all"):
+            payload["phase3_step2_hl_gauss_64"] = run_phase3_step2(args.private_root, args.stockfish_path)
+            _save_report(out_path, payload)
+        if args.phase3 in ("3", "all"):
+            payload["phase3_step3_validation_matches"] = run_phase3_step3(args.private_root, args.stockfish_path, payload)
+            _save_report(out_path, payload)
+    elif args.phase2:
         if args.phase2 in ("1", "all"):
             payload["phase2_step1_collision_cold_start_gear_shift"] = run_phase2_step1(args.private_root, args.stockfish_path)
             _save_report(out_path, payload)
