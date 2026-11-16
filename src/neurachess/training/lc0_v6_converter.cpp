@@ -11,7 +11,7 @@
  * shards across multi-threaded P-core/CPU workers at >50,000 pos/s.
  */
 
-#include "../engine/fast_tree/bitboard_chess.hpp"
+#include "unified_pack_common.hpp"
 
 #include <algorithm>
 #include <array>
@@ -76,29 +76,11 @@ struct V6TrainingData {
     float q_st;
 };
 
-struct PackedV1 {
-    uint64_t bbs[12];
-    uint8_t turn;
-    uint8_t castling;
-    uint8_t ep_square;
-    uint8_t halfmove;
-    uint16_t action_index;
-    int16_t eval_cp;
-    uint8_t wdl[3];
-};
-
-struct Lc0Sidecar68 {
-    uint8_t num_topk;
-    uint8_t flags;
-    uint16_t visits_clamped;
-    uint16_t top8_actions[8];
-    float top8_probs[8];
-    float backed_q;
-    float backed_d;
-    float result_q;
-    float plies_left;
-};
 #pragma pack(pop)
+
+using nc_pack::ExcludeSet;
+using nc_pack::PackedV1;
+using Lc0Sidecar68 = nc_pack::UnifiedSidecar68;
 
 static_assert(sizeof(V6TrainingData) == 8356, "V6TrainingData must be 8356 bytes");
 static_assert(sizeof(PackedV1) == 107, "PackedV1 must be 107 bytes");
@@ -247,68 +229,7 @@ static inline uint64_t reverse_bytes_in_u64(uint64_t x) noexcept {
 }
 
 static void init_nc_action_table() noexcept {
-    auto& tb = bb::tables();
-    if (tb.action_table_ready) return;
-
-    static constexpr int dr[8] = {+1, +1,  0, -1, -1, -1,  0, +1};
-    static constexpr int dc[8] = { 0, +1, +1, +1,  0, -1, -1, -1};
-    static constexpr int k_dr[8] = {+2, +1, -1, -2, -2, -1, +1, +2};
-    static constexpr int k_dc[8] = {+1, +2, +2, +1, -1, -2, -2, -1};
-    static constexpr int p_dc[3] = {-1, 0, +1};
-    static constexpr int p_id[3] = {bb::PT_KNIGHT, bb::PT_BISHOP, bb::PT_ROOK};
-
-    uint16_t raw_tbl[64][64][6];
-    std::memset(raw_tbl, 0, sizeof(raw_tbl));
-
-    for (int f_sq = 0; f_sq < 64; ++f_sq) {
-        int fr = f_sq >> 3, fc = f_sq & 7;
-        for (int d = 0; d < 8; ++d) {
-            for (int dist = 1; dist <= 7; ++dist) {
-                int tr = fr + dr[d] * dist;
-                int tc = fc + dc[d] * dist;
-                if (tr >= 0 && tr < 8 && tc >= 0 && tc < 8) {
-                    int t_sq = tr * 8 + tc;
-                    uint16_t act = (uint16_t)(f_sq * 73 + d * 7 + (dist - 1));
-                    raw_tbl[f_sq][t_sq][0] = act;
-                    if (fr == 6 && tr == 7 && dist == 1 && std::abs(dc[d]) <= 1) {
-                        raw_tbl[f_sq][t_sq][bb::PT_QUEEN] = act;
-                    }
-                }
-            }
-        }
-        for (int k = 0; k < 8; ++k) {
-            int tr = fr + k_dr[k], tc = fc + k_dc[k];
-            if (tr >= 0 && tr < 8 && tc >= 0 && tc < 8) {
-                int t_sq = tr * 8 + tc;
-                raw_tbl[f_sq][t_sq][0] = (uint16_t)(f_sq * 73 + 56 + k);
-            }
-        }
-        if (fr == 6) {
-            int tr = 7;
-            for (int di = 0; di < 3; ++di) {
-                int tc = fc + p_dc[di];
-                if (tc >= 0 && tc < 8) {
-                    int t_sq = tr * 8 + tc;
-                    for (int pi = 0; pi < 3; ++pi) {
-                        raw_tbl[f_sq][t_sq][p_id[pi]] = (uint16_t)(f_sq * 73 + 64 + 3 * di + pi);
-                    }
-                }
-            }
-        }
-    }
-
-    for (int is_blk = 0; is_blk < 2; ++is_blk) {
-        for (int f_sq = 0; f_sq < 64; ++f_sq) {
-            int cf = is_blk ? ((7 - (f_sq >> 3)) * 8 + (f_sq & 7)) : f_sq;
-            for (int t_sq = 0; t_sq < 64; ++t_sq) {
-                int ct = is_blk ? ((7 - (t_sq >> 3)) * 8 + (t_sq & 7)) : t_sq;
-                for (int pr = 0; pr < 6; ++pr) {
-                    tb.action_table[is_blk][f_sq][t_sq][pr] = raw_tbl[cf][ct][pr];
-                }
-            }
-        }
-    }
-    tb.action_table_ready = true;
+    nc_pack::init_nc_action_table();
 }
 
 // Zero-dependency RFC-1952 (gzip) + RFC-1951 (DEFLATE) streaming decompressor
@@ -575,7 +496,8 @@ static void convert_record_stream(
     int min_ply,
     std::vector<PackedV1>& out_v1,
     std::vector<Lc0Sidecar68>& out_sc,
-    ConvertStats& stats
+    ConvertStats& stats,
+    const ExcludeSet* excl = nullptr
 ) {
     size_t n_rec = raw_bytes / sizeof(V6TrainingData);
     if (n_rec == 0) return;
@@ -855,9 +777,15 @@ static void convert_record_stream(
         pv1.wdl[1] = (uint8_t)std::clamp((int)std::lround(d * 255.0f), 0, 255);
         pv1.wdl[2] = (uint8_t)std::clamp((int)std::lround(l_p * 255.0f), 0, 255);
 
+        if (excl && excl->is_forbidden_v1(pv1)) {
+            stats.skipped_invalid.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
+        bool has_mlh = (std::isfinite(rec->plies_left) && rec->plies_left > 0.0f);
         Lc0Sidecar68 sc{};
         sc.num_topk = (uint8_t)n_top;
-        sc.flags = (uint8_t)((is_black ? 1 : 0) | ((ep_sq >= 0) ? 2 : 0) | (used_best ? 4 : 0));
+        sc.flags = (uint8_t)((is_black ? 1 : 0) | ((ep_sq >= 0) ? 2 : 0) | (used_best ? 4 : 0) | (has_mlh ? 8 : 0));
         sc.visits_clamped = (uint16_t)std::min<uint32_t>(rec->visits, 65535U);
         for (int k = 0; k < 8; ++k) {
             sc.top8_actions[k] = top_a[k];
@@ -866,7 +794,7 @@ static void convert_record_stream(
         sc.backed_q = q;
         sc.backed_d = d;
         sc.result_q = std::isfinite(rec->result_q) ? std::clamp(rec->result_q, -1.0f, 1.0f) : 0.0f;
-        sc.plies_left = (std::isfinite(rec->plies_left) && rec->plies_left >= 0.0f) ? rec->plies_left : 0.0f;
+        sc.plies_left = has_mlh ? rec->plies_left : 0.0f;
 
         out_v1.push_back(pv1);
         out_sc.push_back(sc);
@@ -908,6 +836,7 @@ static int run_converter(int argc, char** argv) {
     int threads = (int)std::max(1u, std::thread::hardware_concurrency());
     size_t max_records = 0;
     bool verify_18p = false;
+    std::vector<std::string> exclude_bins;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -916,6 +845,7 @@ static int run_converter(int argc, char** argv) {
         else if (a == "--threads" && i + 1 < argc) threads = std::max(1, std::stoi(argv[++i]));
         else if (a == "--max-records" && i + 1 < argc) max_records = (size_t)std::stoull(argv[++i]);
         else if (a == "--verify-18planes") verify_18p = true;
+        else if (a == "--exclude-bin" && i + 1 < argc) exclude_bins.emplace_back(argv[++i]);
         else if (a == "--input" && i + 1 < argc) inputs.emplace_back(argv[++i]);
         else if (a == "-" || (!a.empty() && a[0] != '-')) inputs.emplace_back(a);
         else {
@@ -960,6 +890,9 @@ static int run_converter(int argc, char** argv) {
     }
 
     ConvertStats stats{};
+    ExcludeSet excl;
+    for (const auto& eb : exclude_bins) excl.load_bin_98(eb, sizeof(PackedV1));
+    const ExcludeSet* excl_ptr = excl.hash98_set.empty() ? nullptr : &excl;
     std::atomic<uint64_t> total_18p_checksum{0};
     size_t total_written = 0;
     auto t0 = std::chrono::steady_clock::now();
@@ -988,7 +921,7 @@ static int run_converter(int argc, char** argv) {
                     rptr = dec_buf.data();
                     rlen = dec_buf.size();
                 }
-                convert_record_stream(rptr, rlen, min_ply, w_v1[si], w_sc[si], stats);
+                convert_record_stream(rptr, rlen, min_ply, w_v1[si], w_sc[si], stats, excl_ptr);
                 if (verify_18p && !w_v1[si].empty()) {
                     const auto& first_p = w_v1[si][0];
                     bb::CBoard tb{};
