@@ -314,12 +314,18 @@ class NPUBatchedPUCTSearch:
         use_fast_tree: bool = True,
         t_root: float = 1.0,
         use_opening_root_guard: bool = False,
+        use_see_prior_shaping: bool = False,
+        use_dynamic_batch_shift: bool = False,
+        batch_models: dict[int, NPUModel] | None = None,
     ):
         self.encoder_layout = encoder_layout
         self.batch_size = batch_size
         self.c_puct = c_puct
         self.t_root = float(t_root)
         self.use_opening_root_guard = bool(use_opening_root_guard)
+        self.use_see_prior_shaping = bool(use_see_prior_shaping)
+        self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
+        self.batch_models = dict(batch_models) if batch_models else None
         self.contempt = contempt
         self.use_fpu_reduction = use_fpu_reduction
         self.fpu_reduction = fpu_reduction
@@ -361,6 +367,9 @@ class NPUBatchedPUCTSearch:
                 encoder_layout=self.encoder_layout,
                 t_root=self.t_root,
                 use_opening_root_guard=self.use_opening_root_guard,
+                use_see_prior_shaping=self.use_see_prior_shaping,
+                use_dynamic_batch_shift=self.use_dynamic_batch_shift,
+                batch_models=self.batch_models,
             )
         else:
             self._fast_backend = None
@@ -392,6 +401,8 @@ class NPUBatchedPUCTSearch:
         root_fpu_reduction: float | None = None,
         t_root: float | None = None,
         use_opening_root_guard: bool | None = None,
+        use_see_prior_shaping: bool | None = None,
+        use_dynamic_batch_shift: bool | None = None,
     ):
         if c_puct is not None:
             self.c_puct = float(c_puct)
@@ -405,6 +416,10 @@ class NPUBatchedPUCTSearch:
             self.t_root = float(t_root)
         if use_opening_root_guard is not None:
             self.use_opening_root_guard = bool(use_opening_root_guard)
+        if use_see_prior_shaping is not None:
+            self.use_see_prior_shaping = bool(use_see_prior_shaping)
+        if use_dynamic_batch_shift is not None:
+            self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
         if self._fast_backend is not None:
             self._fast_backend.reconfigure(
                 c_puct=c_puct,
@@ -413,6 +428,8 @@ class NPUBatchedPUCTSearch:
                 root_fpu_reduction=root_fpu_reduction,
                 t_root=t_root,
                 use_opening_root_guard=use_opening_root_guard,
+                use_see_prior_shaping=use_see_prior_shaping,
+                use_dynamic_batch_shift=use_dynamic_batch_shift,
             )
         self.clear_state()
 

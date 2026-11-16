@@ -883,6 +883,186 @@ struct CBoard {
             fill_plane_64_avx2(out_1152 + 17 * 64, hm);
         }
     }
+
+    static constexpr int SEE_VAL[7] = {0, 100, 320, 330, 500, 900, 20000};
+
+    inline bool is_capture_move(uint16_t mp) const noexcept {
+        int from_sq = mp & 0x3F;
+        int to_sq = (mp >> 6) & 0x3F;
+        uint64_t to_m = 1ULL << to_sq;
+        uint64_t opp_occ = turn_is_white ? occ_b : occ_w;
+        if (opp_occ & to_m) return true;
+        int pt = piece_type_at(from_sq);
+        return (pt == PT_PAWN && ep_square >= 0 && to_sq == ep_square && !(occupied() & to_m));
+    }
+
+    inline uint64_t live_attackers_all(int sq, uint64_t live_occ, uint64_t occ_board) const noexcept {
+        [[assume(sq >= 0 && sq < 64)]];
+        const auto& tb = tables();
+        uint64_t rq = (rooks | queens) & live_occ;
+        uint64_t bq = (bishops | queens) & live_occ;
+        uint64_t pa = (tb.pawn_attacks[BLACK][sq] & pawns & occ_w)
+                    | (tb.pawn_attacks[WHITE][sq] & pawns & occ_b);
+        uint64_t a = pa
+                   | (tb.knight_attacks[sq] & knights)
+                   | (tb.king_attacks[sq] & kings)
+                   | (rook_attacks(sq, occ_board) & rq)
+                   | (bishop_attacks(sq, occ_board) & bq);
+        return a & live_occ;
+    }
+
+    inline uint64_t pinned_to_king_for_see(int color, int king_sq, uint64_t live_occ, uint64_t occ_board) const noexcept {
+        if (king_sq < 0) return 0ULL;
+        const auto& tb = tables();
+        uint64_t us_occ = (color ? occ_w : occ_b) & live_occ;
+        uint64_t opp_occ = (color ? occ_b : occ_w) & live_occ;
+        uint64_t opp_rq = (rooks | queens) & opp_occ;
+        uint64_t opp_bq = (bishops | queens) & opp_occ;
+        uint64_t snipers = (((tb.dir_ray[0][king_sq] | tb.dir_ray[4][king_sq] |
+                              tb.dir_ray[1][king_sq] | tb.dir_ray[5][king_sq]) & opp_rq) |
+                            ((tb.dir_ray[2][king_sq] | tb.dir_ray[3][king_sq] |
+                              tb.dir_ray[6][king_sq] | tb.dir_ray[7][king_sq]) & opp_bq));
+        uint64_t blockers = 0ULL;
+        while (snipers) {
+            int sniper = msb64(snipers);
+            snipers ^= (1ULL << sniper);
+            uint64_t b = tb.between_bb[king_sq][sniper] & occ_board;
+            if (b && (b & (b - 1)) == 0) {
+                blockers |= b;
+            }
+        }
+        return blockers & us_occ;
+    }
+
+    inline uint64_t legal_attackers_for_see(
+        int color,
+        int to_sq,
+        int king_sq,
+        uint64_t live_occ,
+        uint64_t occ_board
+    ) const noexcept {
+        uint64_t all_att = live_attackers_all(to_sq, live_occ, occ_board);
+        uint64_t stm_att = all_att & ((color ? occ_w : occ_b) & live_occ);
+        if (!stm_att || king_sq < 0 || king_sq == to_sq) return stm_att;
+
+        uint64_t pinned = pinned_to_king_for_see(color, king_sq, live_occ, occ_board);
+        if (!(stm_att & pinned)) return stm_att;
+
+        uint64_t legal = stm_att & ~pinned;
+        uint64_t check_pinned = stm_att & pinned;
+        const auto& tb = tables();
+        while (check_pinned) {
+            int sq = msb64(check_pinned);
+            check_pinned ^= (1ULL << sq);
+            if (tb.line_ray_bb[sq][to_sq] & (1ULL << king_sq)) {
+                legal |= (1ULL << sq);
+            }
+        }
+        return legal;
+    }
+
+    // Exact bitboard Static Exchange Evaluation (centipawns from initial mover perspective).
+    // Handles BMI2 PEXT X-ray discovery, absolutely pinned defenders, promotions,
+    // en-passant dual-square clearance, and King legality on the final capture.
+    int see(uint16_t mp) const noexcept {
+        int from_sq = mp & 0x3F;
+        int to_sq = (mp >> 6) & 0x3F;
+        int promo = (mp >> 12) & 0xF;
+
+        int pt = piece_type_at(from_sq);
+        if (pt == PT_NONE) return 0;
+        if (pt == PT_KING && std::abs((to_sq & 7) - (from_sq & 7)) == 2) return 0;
+
+        int cap_pt = piece_type_at(to_sq);
+        bool is_ep = (pt == PT_PAWN && ep_square >= 0 && to_sq == ep_square && cap_pt == PT_NONE);
+        int cap_sq = is_ep ? (turn_is_white ? (to_sq - 8) : (to_sq + 8)) : to_sq;
+
+        int gain[32];
+        int d = 0;
+        int init_gain = is_ep ? SEE_VAL[PT_PAWN] : SEE_VAL[cap_pt];
+        int moving_pt = promo ? promo : pt;
+        if (promo != 0) {
+            init_gain += SEE_VAL[promo] - SEE_VAL[PT_PAWN];
+        }
+        gain[d++] = init_gain;
+
+        int next_victim_val = SEE_VAL[moving_pt];
+
+        uint64_t live_occ = (occ_w | occ_b) ^ (1ULL << from_sq);
+        if (is_ep) {
+            live_occ ^= (1ULL << cap_sq);
+        }
+        live_occ &= ~(1ULL << to_sq);
+        uint64_t occ_board = live_occ | (1ULL << to_sq);
+
+        int king_sq_arr[2] = {
+            (kings & occ_b) ? msb64(kings & occ_b) : -1,
+            (kings & occ_w) ? msb64(kings & occ_w) : -1
+        };
+        if (pt == PT_KING) {
+            king_sq_arr[turn_is_white ? WHITE : BLACK] = to_sq;
+        }
+
+        int cur_stm = turn_is_white ^ 1;
+        while (d < 32) {
+            uint64_t stm_att = legal_attackers_for_see(
+                cur_stm, to_sq, king_sq_arr[cur_stm], live_occ, occ_board
+            );
+            if (!stm_att) break;
+
+            int att_pt = PT_NONE;
+            uint64_t att_bb = 0ULL;
+            if (uint64_t sub = stm_att & pawns) {
+                att_pt = PT_PAWN;
+                att_bb = 1ULL << msb64(sub);
+            } else if (uint64_t sub = stm_att & knights) {
+                att_pt = PT_KNIGHT;
+                att_bb = 1ULL << msb64(sub);
+            } else if (uint64_t sub = stm_att & bishops) {
+                att_pt = PT_BISHOP;
+                att_bb = 1ULL << msb64(sub);
+            } else if (uint64_t sub = stm_att & rooks) {
+                att_pt = PT_ROOK;
+                att_bb = 1ULL << msb64(sub);
+            } else if (uint64_t sub = stm_att & queens) {
+                att_pt = PT_QUEEN;
+                att_bb = 1ULL << msb64(sub);
+            } else if (uint64_t sub = stm_att & kings) {
+                // King can recapture only if opponent has zero pseudo-attackers defending to_sq
+                // (even a pinned enemy piece prevents King capture in legal chess)
+                uint64_t next_live = live_occ ^ sub;
+                uint64_t opp_occ_after = ((cur_stm ^ 1) ? occ_w : occ_b) & next_live;
+                uint64_t opp_after = live_attackers_all(to_sq, next_live, occ_board ^ sub) & opp_occ_after;
+                if (opp_after != 0ULL) break;
+                att_pt = PT_KING;
+                att_bb = sub;
+                king_sq_arr[cur_stm] = to_sq;
+            } else {
+                break;
+            }
+
+            bool is_recap_promo = (att_pt == PT_PAWN) && ((to_sq >> 3) == 0 || (to_sq >> 3) == 7);
+            int gain_val = next_victim_val;
+            int promoted_pt = is_recap_promo ? PT_QUEEN : att_pt;
+            if (is_recap_promo) {
+                gain_val += SEE_VAL[PT_QUEEN] - SEE_VAL[PT_PAWN];
+            }
+            gain[d] = gain_val - gain[d - 1];
+            d++;
+            next_victim_val = SEE_VAL[promoted_pt];
+
+            live_occ ^= att_bb;
+            occ_board = live_occ | (1ULL << to_sq);
+            cur_stm ^= 1;
+        }
+
+        while (--d > 0) {
+            int alt = gain[d];
+            int keep = -gain[d - 1];
+            gain[d - 1] = -(alt > keep ? alt : keep);
+        }
+        return gain[0];
+    }
 };
 
 } // namespace bb
