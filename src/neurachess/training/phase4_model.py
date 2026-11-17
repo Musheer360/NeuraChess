@@ -337,6 +337,14 @@ def expand_10x192_to_12x192_identity(
             else:
                 m12.hl_head.val_conv.bias.zero_()
 
+        if "val_dense1.weight" in src_sd:
+            w_d1 = src_sd["val_dense1.weight"]
+            rows = min(m12.hl_head.val_fc1.weight.shape[0], w_d1.shape[0])
+            cols = min(m12.hl_head.val_fc1.weight.shape[1], w_d1.shape[1])
+            m12.hl_head.val_fc1.weight[:rows, :cols].copy_(w_d1[:rows, :cols])
+            if m12.hl_head.val_fc1.bias is not None:
+                m12.hl_head.val_fc1.bias[:rows].zero_()
+
     # Step 0 function-preservation verification against exact 10x192 reference
     m10 = ChessSEResNet(num_blocks=10, channels=192, value_dim=1, policy_head="conv73", use_bn=True)
     m10.load_state_dict(src_sd, strict=True)

@@ -716,7 +716,9 @@ def _train_step_batch(
     acts8, probs8, plies_left, has_mlh = unpack_unified_sidecar_batch(raw_sc, device)
 
     raw_m = model._orig_mod if hasattr(model, "_orig_mod") else model
-    hl_targets = compute_hl_gauss_targets(cps, raw_m.hl_edges, raw_m.hl_sigma)
+    cps_dev = cps.to(device=device, non_blocking=True)
+    hl_targets = compute_hl_gauss_targets(cps_dev, raw_m.hl_edges, raw_m.hl_sigma)
+    v_target = torch.tanh(cps_dev.float() * CP_TANH_SCALE).clamp(-1.0, 1.0)
 
     optimizer.zero_grad(set_to_none=True)
     amp_ok = device.type == "cuda"
@@ -724,11 +726,13 @@ def _train_step_batch(
         if freeze_trunk:
             with torch.no_grad():
                 feat = raw_m.forward_trunk(inp)
-            pol_logits, hl_logits, _, mlh_pred = raw_m.forward_policy_and_heads(feat)
+            pol_logits, hl_logits, val_exp, mlh_pred = raw_m.forward_policy_and_heads(feat)
         else:
-            pol_logits, hl_logits, _, mlh_pred = model(inp)
+            pol_logits, hl_logits, val_exp, mlh_pred = model(inp)
 
-        l_hl = -(hl_targets * F.log_softmax(hl_logits.float(), dim=-1)).sum(dim=-1).mean()
+        l_hl_ce = -(hl_targets * F.log_softmax(hl_logits.float(), dim=-1)).sum(dim=-1).mean()
+        l_val_mse = F.mse_loss(val_exp.squeeze(-1).float(), v_target)
+        l_hl = l_hl_ce + 2.0 * l_val_mse
         l_pol = torch.tensor(0.0, device=device)
         if pol_weight > 0.0:
             logp = F.log_softmax(pol_logits.float(), dim=-1)
@@ -1443,12 +1447,15 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
     prod_th = threading.Thread(target=_s3_and_fallback_producer, daemon=True)
     prod_th.start()
 
-    # Reserve 7 min before hard MaxRuntimeInSeconds for guaranteed 150K GPU eval + IR export + S3 upload
-    stop_deadline = time.time() + max(600, args.max_runtime_sec - 420)
+    # Reserve 14 min before hard MaxRuntimeInSeconds for Stage-3 20M Middle-2..9 QAT tail + 150K GPU eval + IR export
+    qat_tail_pos = min(20_000_000, max(0, args.total_positions // 15))
+    fp_target_pos = max(args.batch_size, args.total_positions - qat_tail_pos)
+    stop_deadline = time.time() + max(600, args.max_runtime_sec - 840)
     calib_inputs = None
+    last_pool_pair: tuple[np.ndarray, np.ndarray] | None = None
 
-    print(f"\n=== [Job B] Training 12x192_mid2_9_hl64 + MLH (~{args.total_positions:,} pos, B={args.batch_size}) ===", flush=True)
-    while step_state["seen"] < args.total_positions:
+    print(f"\n=== [Job B Stage 1+2] Pure FP16/BF16 12x192 + HL-Gauss-64 + MLH ({fp_target_pos:,} pos, B={args.batch_size}) ===", flush=True)
+    while step_state["seen"] < fp_target_pos:
         item = pool_q.get()
         if item is None:
             break
@@ -1461,16 +1468,14 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
             batch_size=args.batch_size, freeze_trunk=False,
             pol_weight=1.0, val_weight=1.0, mlh_weight=0.05,
             ema_list=[ema_9995, ema_9999], step_state=step_state, lr_fn=_lr_b,
-            max_positions=args.total_positions, s3_ckpt_fn=_save_s3_ckpt,
+            max_positions=fp_target_pos, s3_ckpt_fn=_save_s3_ckpt,
             stop_deadline_ts=stop_deadline,
         )
-        del mv1, msc
-        gc.collect()
+        last_pool_pair = (mv1, msc)
         if hit_deadline:
-            print("[Job B] Reached graceful 7-minute shutdown guard; proceeding to 150K eval + export!", flush=True)
+            print("[Job B] Reached Stage 1+2 graceful deadline; proceeding to Pure FP16 export + Stage 3 Middle-2..9 QAT!", flush=True)
             break
 
-    stop_prod.set()
     _save_s3_ckpt(step_state)
 
     eval_logs = {}
@@ -1478,13 +1483,85 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
         m12.load_state_dict(shadow)
         ev = evaluate_unified_150k(m12, eval_files, device, ref_baseline_pol=ref_pol)
         eval_logs[lbl] = ev
-        print(f"[Job B {lbl} 150K Eval] {json.dumps(ev)}", flush=True)
+        print(f"[Job B {lbl} Pure FP16 150K Eval] {json.dumps(ev)}", flush=True)
         out_sub = model_dir / lbl
-        int8_rng = (2, 3, 4, 5, 6, 7, 8, 9) if lbl == "ema_09999" else None
         export_phase4_to_folded_npz_and_ov(
             m12, out_sub, f"12x192_mid2_9_hl64_{lbl}",
-            calib_inputs=calib_inputs, int8_blocks=int8_rng,
+            calib_inputs=calib_inputs, int8_blocks=(2, 3, 4, 5, 6, 7, 8, 9) if lbl == "ema_09999" else None,
         )
+        if s3_client and args.bucket:
+            for p in out_sub.glob("*"):
+                if p.is_file():
+                    s3_client.upload_file(str(p), args.bucket, f"checkpoints/phase4_job_b/{lbl}/{p.name}")
+
+    # Stage 3: True W8A8 Middle-Block (2..9) QAT Polish (~20M positions) cloned from ema_09999
+    qat_deadline = time.time() + max(180, args.max_runtime_sec - int(time.time() - step_state["t0"]) - 300)
+    if qat_tail_pos > 0 and time.time() < qat_deadline:
+        print(f"\n=== [Job B Stage 3] W8A8 Middle 2..9 QAT Polish ({qat_tail_pos:,} pos, LR 1.5e-5 -> 1e-6) ===", flush=True)
+        m12_qat = ChessSEResNetPhase4(num_blocks=12, channels=192, use_bn=True).to(device)
+        m12_qat.load_state_dict(ema_9999.shadow)
+        for p in m12_qat.parameters():
+            p.requires_grad_(True)
+        apply_middle_w8a8_qat(m12_qat, qat_blocks=(2, 3, 4, 5, 6, 7, 8, 9))
+        if device.type == "cuda":
+            m12_qat = m12_qat.to(memory_format=torch.channels_last)
+        m12_qat.train()
+        enforce_frozen_bn_eval(m12_qat)
+        if calib_inputs:
+            with torch.no_grad():
+                cx_t = torch.from_numpy(np.concatenate(calib_inputs[:128], axis=0)).to(
+                    device=device, memory_format=torch.channels_last if device.type == "cuda" else torch.contiguous_format
+                )
+                m12_qat(cx_t)
+
+        ema_qat = FastModelEMA(m12_qat, decay=0.9995)
+        opt_qat = torch.optim.AdamW(
+            [p for p in m12_qat.parameters() if p.requires_grad],
+            lr=1.5e-5 * lr_scale, weight_decay=1e-4, fused=(device.type == "cuda"),
+        )
+        tot_qat_steps = max(1, (qat_tail_pos + args.batch_size - 1) // args.batch_size)
+        st_qat = {"step": 0, "seen": 0, "seed": args.seed + 777, "t0": time.time(), "last_ckpt": 1e18}
+
+        def _lr_qat(o, stp, _s):
+            lr_q = compute_cosine_lr(stp, tot_qat_steps, min(250, tot_qat_steps // 10), 1.5e-5 * lr_scale, 1e-6)
+            for pg in o.param_groups:
+                pg["lr"] = lr_q
+
+        while st_qat["seen"] < qat_tail_pos and time.time() < qat_deadline:
+            try:
+                q_item = pool_q.get(timeout=5.0)
+            except queue.Empty:
+                q_item = last_pool_pair
+            if q_item is None:
+                q_item = last_pool_pair
+            if q_item is None:
+                break
+            qv1, qsc = q_item
+            hit_q = _train_on_pool(
+                m12_qat, qv1, qsc, device, opt_qat,
+                batch_size=args.batch_size, freeze_trunk=False,
+                pol_weight=1.0, val_weight=1.0, mlh_weight=0.05,
+                ema_list=[ema_qat], step_state=st_qat, lr_fn=_lr_qat,
+                max_positions=qat_tail_pos, stop_deadline_ts=qat_deadline,
+            )
+            last_pool_pair = (qv1, qsc)
+            if hit_q:
+                break
+
+        m12_qat.load_state_dict(ema_qat.shadow)
+        ev_qat = evaluate_unified_150k(m12_qat, eval_files, device, ref_baseline_pol=ref_pol)
+        eval_logs["qat_mid2_9"] = ev_qat
+        print(f"[Job B qat_mid2_9 150K Eval] {json.dumps(ev_qat)}", flush=True)
+        out_qat = model_dir / "qat_mid2_9"
+        export_phase4_to_folded_npz_and_ov(
+            m12_qat, out_qat, "12x192_mid2_9_hl64_qat",
+            calib_inputs=calib_inputs, int8_blocks=(2, 3, 4, 5, 6, 7, 8, 9),
+        )
+        torch.save({"ema_09995_state_dict": ema_qat.shadow, "eval_150k": ev_qat, "seen": st_qat["seen"]}, out_qat / "12x192_mid2_9_hl64_qat.pt")
+
+    stop_prod.set()
+    last_pool_pair = None
+    gc.collect()
 
     final_pt = model_dir / "12x192_mid2_9_hl64_final.pt"
     torch.save({
