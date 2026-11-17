@@ -417,15 +417,22 @@ class LichessContinuousStream:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         assert proc.stdin is not None
 
+        stream_err = None
         while proc.poll() is None:
             assert self._zr is not None
-            raw = self._zr.read(1024 * 1024)
+            try:
+                raw = self._zr.read(1024 * 1024)
+            except Exception as exc:
+                stream_err = exc
+                self.close()
+                break
             if not raw:
                 if self._byte_buf:
                     tail = self._byte_buf + (b"" if self._byte_buf.endswith(b"\n") else b"\n")
                     self._byte_buf = b""
                     try:
                         proc.stdin.write(tail)
+                        proc.stdin.flush()
                     except BrokenPipeError:
                         pass
                 break
@@ -452,7 +459,8 @@ class LichessContinuousStream:
         lines = out.decode("utf-8", "ignore").strip().splitlines()
         stats = json.loads(lines[-1]) if lines else {}
         n_wr = int(stats.get("records_written", 0))
-        print(f"[LichessStream] chunk #{self._chunk_seq}: wrote {n_wr:,} records (total_skipped={stats.get('skipped_overlap', 0):,})", flush=True)
+        note = f" (stream interrupted: {stream_err})" if stream_err is not None else ""
+        print(f"[LichessStream] chunk #{self._chunk_seq}: wrote {n_wr:,} records (total_skipped={stats.get('skipped_overlap', 0):,}){note}", flush=True)
         return (
             Path(stats.get("out_bin", str(out_prefix) + ".bin")),
             Path(stats.get("out_sidecar", str(out_prefix) + ".sidecar68.bin")),
@@ -805,35 +813,47 @@ def run_job_a(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
         if rem_sf > 0:
             sf_fut = data_ex.submit(stream_lichess_sf_chunks, sf_exe, cache_dir, excl_hashes, excl_bin, rem_sf, 1_000_000, 2)
         lc0_pairs, _ = stream_lc0_t80_parallel(
-            lc0_exe, t80_urls, 0, cache_dir, excl_bin, lc0_target, workers=3, threads_per_worker=1, tag="Job A Data"
+            lc0_exe, t80_urls, 0, cache_dir, excl_bin, lc0_target, workers=4, threads_per_worker=1, tag="Job A Data"
         )
         if sf_fut is not None:
             sf_pairs.extend(sf_fut.result())
 
-    # Load 40M into CPU host arrays (pinned-ready ~7GB) for fast shuffling between A1 & A2
-    sf_v1_list, sf_sc_list = [], []
+    # Low-RAM chunk-by-chunk scattered shuffle (~7GB peak instead of ~24GB concat+permute copies)
+    sf_chunks, lc0_chunks = [], []
+    sf_keep = 0
     for bp, sp, cnt in sf_pairs:
-        if cnt > 0 and bp.is_file():
-            v, s = load_unified_chunk(bp, sp)
-            sf_v1_list.append(v); sf_sc_list.append(s)
-    lc0_v1_list, lc0_sc_list = [], []
+        if cnt > 0 and bp.is_file() and sp.is_file() and sf_keep < sf_target:
+            avail = min(bp.stat().st_size // RECORD_SIZE_V1, sp.stat().st_size // SIDECAR_SIZE, sf_target - sf_keep)
+            if avail > 0:
+                sf_chunks.append((bp, sp, avail))
+                sf_keep += avail
+    lc0_keep = 0
     for bp, sp, cnt in lc0_pairs:
-        if cnt > 0 and bp.is_file():
-            v, s = load_unified_chunk(bp, sp)
-            lc0_v1_list.append(v); lc0_sc_list.append(s)
+        if cnt > 0 and bp.is_file() and sp.is_file() and lc0_keep < lc0_target:
+            avail = min(bp.stat().st_size // RECORD_SIZE_V1, sp.stat().st_size // SIDECAR_SIZE, lc0_target - lc0_keep)
+            if avail > 0:
+                lc0_chunks.append((bp, sp, avail))
+                lc0_keep += avail
 
-    v1_sf = np.concatenate(sf_v1_list, axis=0) if sf_v1_list else np.empty((0, RECORD_SIZE_V1), dtype=np.uint8)
-    sc_sf = np.concatenate(sf_sc_list, axis=0) if sf_sc_list else np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
-    v1_lc0 = np.concatenate(lc0_v1_list, axis=0) if lc0_v1_list else np.empty((0, RECORD_SIZE_V1), dtype=np.uint8)
-    sc_lc0 = np.concatenate(lc0_sc_list, axis=0) if lc0_sc_list else np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
-    del sf_v1_list, sf_sc_list, lc0_v1_list, lc0_sc_list
+    n_pool = sf_keep + lc0_keep
+    mix_v1 = np.empty((n_pool, RECORD_SIZE_V1), dtype=np.uint8)
+    mix_sc = np.empty((n_pool, SIDECAR_SIZE), dtype=np.uint8)
+    perm = np.random.default_rng(args.seed).permutation(n_pool)
+    off = 0
+    for bp, sp, take in sf_chunks + lc0_chunks:
+        v, s = load_unified_chunk(bp, sp)
+        k = min(take, len(v))
+        dst_idx = perm[off : off + k]
+        mix_v1[dst_idx] = v[:k]
+        mix_sc[dst_idx] = s[:k]
+        off += k
+        del v, s
+        bp.unlink(missing_ok=True)
+        sp.unlink(missing_ok=True)
+    del perm
     gc.collect()
-
-    mix_v1, mix_sc = _build_mixed_epoch_pool(v1_sf, sc_sf, v1_lc0, sc_lc0, seed=args.seed)
-    del v1_sf, sc_sf, v1_lc0, sc_lc0
-    gc.collect()
-    n_pool = len(mix_v1)
-    print(f"[Job A Ready] Blended 40M pool size: {n_pool:,} positions", flush=True)
+    shutil.rmtree(cache_dir, ignore_errors=True)
+    print(f"[Job A Ready] Blended pool size: {n_pool:,} positions (sf={sf_keep:,}, lc0={lc0_keep:,})", flush=True)
 
     # Build calib 500 inputs from pool for OpenVINO NNCF export
     calib_x = unpack_v1_tensor_to_inputs_and_meta(torch.from_numpy(mix_v1[:500].copy()))[0].numpy().astype(np.float32)
