@@ -1,0 +1,46 @@
+{
+  "model_a": "ckpt_A2_joint_middle_qat_hybrid_int8.xml",
+  "model_b": "neurachess-10x192-fp16.xml",
+  "opening_pairs_range": "openings_320[75:165]",
+  "total_games": 180,
+  "wins": 77,
+  "draws": 55,
+  "losses": 48,
+  "points": 104.5,
+  "score_pct": 58.06,
+  "elo_diff": 56.5,
+  "wilson_95_ci_pct": [
+    50.75,
+    65.02
+  ],
+  "nps_a": 3890.7,
+  "nps_b": 3253.9,
+  "pentanomial": [
+    2,
+    6,
+    49,
+    27,
+    6
+  ],
+  "sprt": {
+    "llr": 3.8313,
+    "lower": -2.9444,
+    "upper": 2.9444,
+    "elo0": 0.0,
+    "elo1": 20.0,
+    "pentanomial": [
+      2,
+      6,
+      49,
+      27,
+      6
+    ],
+    "pairs": 90,
+    "status": "ACCEPT_H1"
+  },
+  "slices": [
+    "phase4_h2h_a2int8_vs_346m_50g.json",
+    "phase4_h2h_a2int8_vs_346m_unseen100_125_50g.json",
+    "phase4_h2h_a2int8_vs_346m_unseen125_165_80g.json"
+  ]
+}

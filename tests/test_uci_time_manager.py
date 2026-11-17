@@ -6,12 +6,17 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
+from argparse import Namespace
 from contextlib import redirect_stdout
+from pathlib import Path
+from unittest import mock
 import chess
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+from neurachess.scripts import match_runner
 from neurachess.scripts.match_runner import _select_engine_move
 from neurachess.uci.engine_uci import UCIEngine
 
@@ -200,6 +205,56 @@ class TestUCITimeManager(unittest.TestCase):
         self.assertEqual(nodes_book, 0)
         self.assertEqual(len(rec.last_movetime_ms), 1)
         self.assertIn(chess.Move.from_uci(mv_book), start_b.legal_moves)
+
+    def test_h2h_forwards_openings_syzygy_fpu_and_adjudication(self):
+        class _WarmableEngine(_RecordingSearchEngine):
+            def search(self, board: chess.Board, board_tensor, movetime_ms: int = 600, max_nodes=None):
+                return super().search(board, board_tensor, movetime_ms=movetime_ms)
+
+        build_calls: list[dict] = []
+
+        def _fake_build(xml_path, **kwargs):
+            build_calls.append({"xml": xml_path, **kwargs})
+            return _WarmableEngine()
+
+        with tempfile.TemporaryDirectory(prefix="nc_h2h_cfg_") as td:
+            td_p = Path(td)
+            op_file = td_p / "openings.json"
+            op_file.write_text(json.dumps([["e2e4"], ["d2d4", "d7d5"]]), encoding="utf-8")
+            out_file = td_p / "h2h.json"
+            args = Namespace(
+                xml_a="a.xml",
+                xml_b="b.xml",
+                pairs=1,
+                movetime_ms=250,
+                batch_size=16,
+                max_plies=4,
+                device="CPU",
+                dynamic_gear_a=False,
+                dynamic_gear_b=False,
+                cache_dir_a=None,
+                cache_dir_b=None,
+                openings_file=op_file,
+                start_pair=1,
+                adjudicate_material=True,
+                fpu_reduction=0.20,
+                syzygy_path="weights/syzygy",
+                own_book=False,
+                output=out_file,
+            )
+            with mock.patch.object(match_runner, "_build_engine", side_effect=_fake_build):
+                with redirect_stdout(io.StringIO()):
+                    summary = match_runner.run_h2h_match(args)
+
+            self.assertEqual(len(build_calls), 2)
+            for call in build_calls:
+                self.assertEqual(call["fpu_reduction"], 0.20)
+                self.assertEqual(call["syzygy_path"], "weights/syzygy")
+                self.assertEqual(call["movetime_ms"], 250)
+            self.assertEqual(summary["total_games"], 2)
+            self.assertEqual(summary["games"][0]["pair"], 1)
+            self.assertTrue(summary["games"][0]["adjudicated"])
+            self.assertTrue(out_file.is_file())
 
 
 if __name__ == "__main__":

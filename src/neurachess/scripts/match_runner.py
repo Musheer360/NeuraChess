@@ -449,19 +449,30 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
 
 
 def run_h2h_match(args: argparse.Namespace) -> dict:
+    openings = load_openings_file(getattr(args, "openings_file", None))
+    start_pair = int(getattr(args, "start_pair", 0) or 0)
+    adjudicate_mat = bool(getattr(args, "adjudicate_material", False))
+    fpu_red = getattr(args, "fpu_reduction", None)
+    syz_path = getattr(args, "syzygy_path", None)
     eng_a = _build_engine(
         str(args.xml_a),
         batch_size=args.batch_size,
         device=args.device,
         use_dynamic_batch_shift=getattr(args, "dynamic_gear_a", False),
+        movetime_ms=int(args.movetime_ms),
         cache_dir=getattr(args, "cache_dir_a", None),
+        fpu_reduction=fpu_red,
+        syzygy_path=syz_path,
     )
     eng_b = _build_engine(
         str(args.xml_b),
         batch_size=args.batch_size,
         device=args.device,
         use_dynamic_batch_shift=getattr(args, "dynamic_gear_b", False),
+        movetime_ms=int(args.movetime_ms),
         cache_dir=getattr(args, "cache_dir_b", None),
+        fpu_reduction=fpu_red,
+        syzygy_path=syz_path,
     )
     book_driver = UCIEngine(own_book=True, book_seed=42) if getattr(args, "own_book", False) else None
     warm_t = board_to_tensor(chess.Board(), layout=eng_a.encoder_layout)
@@ -495,8 +506,9 @@ def run_h2h_match(args: argparse.Namespace) -> dict:
             "games": games_log,
         }
 
-    for pair_idx in range(args.pairs):
-        opening = OPENINGS_50[pair_idx % len(OPENINGS_50)]
+    for pair_offset in range(args.pairs):
+        pair_idx = start_pair + pair_offset
+        opening = openings[pair_idx % len(openings)]
         pair_score = 0.0
         for a_color in (chess.WHITE, chess.BLACK):
             eng_a.clear_state()
@@ -518,20 +530,36 @@ def run_h2h_match(args: argparse.Namespace) -> dict:
                 board.push_uci(best_uci)
 
             outcome = board.outcome(claim_draw=True)
-            if outcome is None or outcome.winner is None:
-                draws += 1
-                g_score = 0.5
-            elif outcome.winner == a_color:
-                wins_a += 1
-                g_score = 1.0
+            adj = False
+            if outcome is not None:
+                res_str = outcome.result()
+            elif adjudicate_mat:
+                res_str = adjudicate_unfinished(board)
+                adj = True
             else:
+                res_str = "1/2-1/2"
+                adj = True
+
+            if res_str == "1-0":
+                g_score = 1.0 if a_color == chess.WHITE else 0.0
+            elif res_str == "0-1":
+                g_score = 0.0 if a_color == chess.WHITE else 1.0
+            else:
+                g_score = 0.5
+
+            if g_score == 1.0:
+                wins_a += 1
+            elif g_score == 0.0:
                 losses_a += 1
-                g_score = 0.0
+            else:
+                draws += 1
             pair_score += g_score
             games_log.append(
                 {
                     "pair": pair_idx,
                     "a_color": "white" if a_color == chess.WHITE else "black",
+                    "result": res_str,
+                    "adjudicated": adj,
                     "a_score": g_score,
                     "plies": board.ply(),
                 }
@@ -542,7 +570,7 @@ def run_h2h_match(args: argparse.Namespace) -> dict:
         pts_now = wins_a + 0.5 * draws
         g_now = wins_a + draws + losses_a
         print(
-            f"[Pair {pair_idx+1}/{args.pairs}] W={wins_a} D={draws} L={losses_a} "
+            f"[Pair {pair_offset+1}/{args.pairs} (idx={pair_idx})] W={wins_a} D={draws} L={losses_a} "
             f"({100.0 * pts_now / max(1, g_now):.1f}%) | Pent={pent} | SPRT={sprt['status']} ({sprt['llr']})",
             flush=True,
         )
@@ -595,6 +623,11 @@ def main() -> None:
     p_h2h.add_argument("--dynamic-gear-b", action="store_true", help="Enable B=4/8/16 dynamic gear-shifting on Engine B")
     p_h2h.add_argument("--cache-dir-a", type=str, default=None)
     p_h2h.add_argument("--cache-dir-b", type=str, default=None)
+    p_h2h.add_argument("--openings-file", type=Path, default=None, help="Optional JSON openings file (e.g., openings_320.json)")
+    p_h2h.add_argument("--start-pair", type=int, default=0, help="Starting pair index into openings list")
+    p_h2h.add_argument("--adjudicate-material", action="store_true", help="Adjudicate max_plies unfinished games by v1.0.2 material difference (>200cp)")
+    p_h2h.add_argument("--fpu-reduction", type=float, default=None, help="Override PUCT fpu_reduction")
+    p_h2h.add_argument("--syzygy-path", type=str, default=None, help="Syzygy tablebase directory")
     p_h2h.add_argument("--own-book", action="store_true", help="Use bundled CC0 Lichess opening book up to ply 15")
     p_h2h.add_argument("--output", type=Path, default=None)
 
