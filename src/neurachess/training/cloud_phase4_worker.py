@@ -342,7 +342,10 @@ def stream_lc0_t80_parallel(
     wave = 0
     while got < target_positions:
         rem = target_positions - got
-        batch_n = 1 if rem <= 3_500_000 else min(workers, max(1, (rem + 3_500_000) // 4_000_000))
+        if workers >= 2:
+            batch_n = min(workers, max(2, (rem + 999_999) // 1_000_000)) if rem > 400_000 else 1
+        else:
+            batch_n = 1
         jobs = []
         for bi in range(batch_n):
             url = tar_urls[(idx + bi) % n_urls]
@@ -350,7 +353,7 @@ def stream_lc0_t80_parallel(
         idx = (idx + batch_n) % n_urls
         wave += 1
 
-        per_cap = rem if batch_n == 1 else max(500_000, rem // batch_n + 500_000)
+        per_cap = max(250_000, rem + 100_000) if batch_n == 1 else max(600_000, (rem + batch_n - 1) // batch_n + 350_000)
         with concurrent.futures.ThreadPoolExecutor(max_workers=batch_n) as ex:
             futs = {
                 ex.submit(
@@ -858,27 +861,56 @@ def run_job_a(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
     excl_bin = dirs["excl_bin"]
     excl_hashes = dirs["excl_hashes"]
 
-    # Stream & cache 40M blend (20M Lc0 T80 + 20M Stockfish = 40M total) cleanly onto NVMe once
+    # Fast-path: consume pre-harvested S3 mix shards first (~1.5 GB/s), streaming only any remainder
+    s3_pref = getattr(args, "s3_shard_prefix", "data/phase4_mix_shards").strip("/")
+    ready_s3_keys = list_ready_s3_mix_shards(s3_client, args.bucket, s3_pref) if (s3_client and args.bucket) else []
+    s3_v1_parts: list[np.ndarray] = []
+    s3_sc_parts: list[np.ndarray] = []
+    s3_got = 0
+    if ready_s3_keys:
+        rng_a = random.Random(args.seed + 7)
+        pick_keys = list(ready_s3_keys)
+        rng_a.shuffle(pick_keys)
+        dl_a = tmp_dir / "job_a_s3_shards"
+        for bkey in pick_keys:
+            if s3_got >= args.total_positions:
+                break
+            try:
+                vv, ss = download_s3_mix_shard(s3_client, args.bucket, bkey, dl_a)
+                take = min(len(vv), args.total_positions - s3_got)
+                s3_v1_parts.append(vv[:take])
+                s3_sc_parts.append(ss[:take])
+                s3_got += take
+            except Exception as exc:
+                print(f"[Job A S3 Shard Warning] {bkey}: {exc}", flush=True)
+        shutil.rmtree(dl_a, ignore_errors=True)
+        print(f"[Job A S3 Fast-Path] Loaded {s3_got:,}/{args.total_positions:,} positions from {len(s3_v1_parts)} S3 shards!", flush=True)
+
+    rem_total = max(0, args.total_positions - s3_got)
     cache_dir = tmp_dir / "job_a_40m_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    sf_target = args.total_positions // 2
-    lc0_target = args.total_positions - sf_target
+    sf_target = rem_total // 2
+    lc0_target = rem_total - sf_target
 
-    # Stream Lichess SF + parallel Lc0 T80 concurrently for maximum wire throughput
-    v2_b, v2_s, v2_n = convert_v2_shards_to_unified(dirs["v2_shards"], cache_dir / "v2_sf")
-    sf_pairs = [(v2_b, v2_s, v2_n)] if v2_n > 0 else []
-    rem_sf = max(0, sf_target - v2_n)
-    t80_urls = list_t80_nonempty_urls(seed=args.seed)
+    sf_pairs: list[tuple[Path, Path, int]] = []
+    lc0_pairs: list[tuple[Path, Path, int]] = []
+    if rem_total > 0:
+        v2_b, v2_s, v2_n = convert_v2_shards_to_unified(dirs["v2_shards"], cache_dir / "v2_sf")
+        if v2_n > 0:
+            sf_pairs.append((v2_b, v2_s, v2_n))
+        rem_sf = max(0, sf_target - v2_n)
+        t80_urls = list_t80_nonempty_urls(seed=args.seed)
 
-    sf_fut = None
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as data_ex:
-        if rem_sf > 0:
-            sf_fut = data_ex.submit(stream_lichess_sf_chunks, sf_exe, cache_dir, excl_hashes, excl_bin, rem_sf, 1_000_000, 2)
-        lc0_pairs, _ = stream_lc0_t80_parallel(
-            lc0_exe, t80_urls, 0, cache_dir, excl_bin, lc0_target, workers=4, threads_per_worker=1, tag="Job A Data"
-        )
-        if sf_fut is not None:
-            sf_pairs.extend(sf_fut.result())
+        sf_fut = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as data_ex:
+            if rem_sf > 0:
+                sf_fut = data_ex.submit(stream_lichess_sf_chunks, sf_exe, cache_dir, excl_hashes, excl_bin, rem_sf, 1_000_000, 2)
+            if lc0_target > 0:
+                lc0_pairs, _ = stream_lc0_t80_parallel(
+                    lc0_exe, t80_urls, 0, cache_dir, excl_bin, lc0_target, workers=4, threads_per_worker=1, tag="Job A Data"
+                )
+            if sf_fut is not None:
+                sf_pairs.extend(sf_fut.result())
 
     # Low-RAM chunk-by-chunk scattered shuffle (~7GB peak instead of ~24GB concat+permute copies)
     sf_chunks, lc0_chunks = [], []
@@ -897,11 +929,19 @@ def run_job_a(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
                 lc0_chunks.append((bp, sp, avail))
                 lc0_keep += avail
 
-    n_pool = sf_keep + lc0_keep
+    n_pool = s3_got + sf_keep + lc0_keep
     mix_v1 = np.empty((n_pool, RECORD_SIZE_V1), dtype=np.uint8)
     mix_sc = np.empty((n_pool, SIDECAR_SIZE), dtype=np.uint8)
     perm = np.random.default_rng(args.seed).permutation(n_pool)
     off = 0
+    for vv, ss in zip(s3_v1_parts, s3_sc_parts):
+        k = len(vv)
+        dst_idx = perm[off : off + k]
+        mix_v1[dst_idx] = vv
+        mix_sc[dst_idx] = ss
+        off += k
+    s3_v1_parts.clear()
+    s3_sc_parts.clear()
     for bp, sp, take in sf_chunks + lc0_chunks:
         v, s = load_unified_chunk(bp, sp)
         k = min(take, len(v))
@@ -915,7 +955,7 @@ def run_job_a(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
     del perm
     gc.collect()
     shutil.rmtree(cache_dir, ignore_errors=True)
-    print(f"[Job A Ready] Blended pool size: {n_pool:,} positions (sf={sf_keep:,}, lc0={lc0_keep:,})", flush=True)
+    print(f"[Job A Ready] Blended pool size: {n_pool:,} positions (s3={s3_got:,}, sf={sf_keep:,}, lc0={lc0_keep:,})", flush=True)
 
     # Build calib 500 inputs from pool for OpenVINO NNCF export
     calib_x = unpack_v1_tensor_to_inputs_and_meta(torch.from_numpy(mix_v1[:500].copy()))[0].numpy().astype(np.float32)
@@ -1176,7 +1216,7 @@ def run_harvest_shards(args: argparse.Namespace, s3_client, dirs: dict) -> None:
 
             while len(lc0_buf_v1) < lc0_per_shard and my_t80:
                 w_dir = tmp_dir / f"harv_lc0_w{w_id}_{sid:03d}"
-                need = max(lc0_per_shard * 3, lc0_per_shard - len(lc0_buf_v1))
+                need = max(lc0_per_shard * 8, lc0_per_shard - len(lc0_buf_v1))
                 pairs, t80_idx = stream_lc0_t80_parallel(
                     lc0_exe, my_t80, t80_idx, w_dir, excl_bin, need,
                     workers=par_t80, threads_per_worker=1, tag=f"Harv-W{w_id}",

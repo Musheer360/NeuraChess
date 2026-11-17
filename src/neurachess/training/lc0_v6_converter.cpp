@@ -946,7 +946,7 @@ static int run_converter(int argc, char** argv) {
                     tb.encode_gpu_unpack(tensor_1152);
                     total_18p_checksum.fetch_add((uint64_t)(tensor_1152[0] > 0.0f ? 1 : 0), std::memory_order_relaxed);
                 }
-                if (max_records > 0 && (total_written + stats.records_written.load(std::memory_order_relaxed)) >= max_records) {
+                if (max_records > 0 && stats.records_written.load(std::memory_order_relaxed) >= max_records) {
                     stop_flag.store(true, std::memory_order_relaxed);
                 }
             }
