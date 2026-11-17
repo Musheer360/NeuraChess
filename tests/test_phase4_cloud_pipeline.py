@@ -28,13 +28,16 @@ from neurachess.scripts.evaluate import unpack_raw_to_gpu_inputs
 from neurachess.training.bitboard_dataset import RECORD_SIZE_V1, pack_position, unpack_position
 from neurachess.training.cloud_phase4_worker import (
     SIDECAR_SIZE,
+    FastModelEMA,
     LichessContinuousStream,
     _build_mixed_epoch_pool,
     _capture_first_batch_pol_logits,
     _train_on_pool,
     compute_cosine_lr,
+    download_s3_mix_shard,
     ensure_cpp_converters,
     evaluate_unified_150k,
+    list_ready_s3_mix_shards,
     load_unified_chunk,
     stream_lc0_t80_parallel,
     unpack_unified_sidecar_batch,
@@ -379,6 +382,82 @@ class TestPhase4CloudPipeline(unittest.TestCase):
                 self.assertEqual(len(keys1 & keys2), 0, "Continuous chunks overlapped instead of advancing!")
             finally:
                 st.close()
+
+            # Verify worker_stride=2 (w_id=0 vs w_id=1) yields 0% overlap and immediate reads
+            st_w0 = LichessContinuousStream(sf_exe, None, None, initial_skip=5, threads=1, opener=lambda _u: io.BytesIO(comp), worker_stride=2, worker_rem=0)
+            st_w1 = LichessContinuousStream(sf_exe, None, None, initial_skip=5, threads=1, opener=lambda _u: io.BytesIO(comp), worker_stride=2, worker_rem=1)
+            try:
+                b0, s0, c0 = st_w0.read_chunk(td_p / "sf_w0", 2500)
+                b1, s1, c1 = st_w1.read_chunk(td_p / "sf_w1", 2500)
+                self.assertEqual(c0, 2500)
+                self.assertEqual(c1, 2500)
+                v_w0, _ = load_unified_chunk(b0, s0)
+                v_w1, _ = load_unified_chunk(b1, s1)
+                kw0 = {v.tobytes()[:98] for v in v_w0}
+                kw1 = {v.tobytes()[:98] for v in v_w1}
+                self.assertEqual(len(kw0 & kw1), 0, "Disjoint stride workers overlapped!")
+            finally:
+                st_w0.close()
+                st_w1.close()
+
+    def test_fast_model_ema_and_s3_atomic_mix_shards(self) -> None:
+        torch.manual_seed(21)
+        m = ChessSEResNetPhase4(num_blocks=2, channels=32, use_bn=True).to(memory_format=torch.channels_last)
+        ref_shadow = {k: v.detach().clone() for k, v in m.state_dict().items()}
+        ema = FastModelEMA(m, decay=0.9)
+
+        with torch.no_grad():
+            for p in m.parameters():
+                p.add_(torch.randn_like(p) * 0.1)
+        m.init_bn.num_batches_tracked.add_(3)
+
+        ema.update(m)
+        for k, v in m.state_dict().items():
+            if v.is_floating_point():
+                ref_shadow[k].mul_(0.9).add_(v.detach(), alpha=0.1)
+                self.assertLess(float((ema.shadow[k] - ref_shadow[k]).abs().max().item()), 1e-6)
+            else:
+                self.assertEqual(int(ema.shadow[k].item()), int(v.item()))
+
+        ema2 = FastModelEMA(m, decay=0.9)
+        ema2.load_shadow_dict(ema.shadow, m)
+        ema2.update(m)
+        for k, v in m.state_dict().items():
+            if v.is_floating_point():
+                ref_shadow[k].mul_(0.9).add_(v.detach(), alpha=0.1)
+                self.assertLess(float((ema2.shadow[k] - ref_shadow[k]).abs().max().item()), 1e-6)
+
+        # Mock S3 atomic shard listing & parallel download
+        with tempfile.TemporaryDirectory(prefix="nc_p4_s3mock_") as td:
+            td_p = Path(td)
+            store: dict[str, bytes] = {
+                # shard_000: complete (.sidecar68.bin + .bin, >= 1000 records)
+                "data/phase4_mix_shards/shard_000.sidecar68.bin": bytes([7]) * (SIDECAR_SIZE * 1024),
+                "data/phase4_mix_shards/shard_000.bin": bytes([3]) * (RECORD_SIZE_V1 * 1024),
+                # shard_001: incomplete (.sidecar68.bin uploaded first, .bin not yet uploaded) -> MUST be hidden!
+                "data/phase4_mix_shards/shard_001.sidecar68.bin": bytes([9]) * (SIDECAR_SIZE * 1024),
+            }
+
+            class _MockPaginator:
+                def paginate(self, Bucket: str, Prefix: str):
+                    contents = [{"Key": k, "Size": len(v)} for k, v in store.items() if k.startswith(Prefix)]
+                    return [{"Contents": contents}]
+
+            class _MockS3:
+                def get_paginator(self, name: str):
+                    return _MockPaginator()
+
+                def download_file(self, bucket: str, key: str, dst: str):
+                    Path(dst).write_bytes(store[key])
+
+            s3_m = _MockS3()
+            ready = list_ready_s3_mix_shards(s3_m, "mock-bkt", "data/phase4_mix_shards")
+            self.assertEqual(ready, ["data/phase4_mix_shards/shard_000"])
+            v1_dl, sc_dl = download_s3_mix_shard(s3_m, "mock-bkt", ready[0], td_p / "dl")
+            self.assertEqual(v1_dl.shape, (1024, RECORD_SIZE_V1))
+            self.assertEqual(sc_dl.shape, (1024, SIDECAR_SIZE))
+            self.assertTrue((v1_dl == 3).all())
+            self.assertTrue((sc_dl == 7).all())
 
 
 if __name__ == "__main__":

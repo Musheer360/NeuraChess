@@ -101,24 +101,55 @@ def unpack_v1_tensor_to_inputs_and_meta(raw_t: torch.Tensor) -> tuple[torch.Tens
 
 
 class FastModelEMA:
-    """Fused multi-tensor EMA tracker for Phase 4 BF16/FP32 training."""
+    """Fused multi-tensor EMA tracker using `torch._foreach_mul_` / `torch._foreach_add_`."""
 
     def __init__(self, model: nn.Module, decay: float = 0.9995):
         self.decay = float(decay)
         raw = model._orig_mod if hasattr(model, "_orig_mod") else model
         self.shadow = {k: v.detach().clone() for k, v in raw.state_dict().items()}
+        self._fp_shadow: list[torch.Tensor] = []
+        self._fp_src: list[torch.Tensor] = []
+        self._int_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self._rebuild_lists(raw)
+
+    def _rebuild_lists(self, model: nn.Module) -> None:
+        raw = model._orig_mod if hasattr(model, "_orig_mod") else model
+        live: dict[str, torch.Tensor] = {}
+        for k, p in raw.named_parameters():
+            live[k] = p
+        for k, b in raw.named_buffers():
+            live[k] = b
+        self._fp_shadow = []
+        self._fp_src = []
+        self._int_pairs = []
+        for k, src in live.items():
+            sh = self.shadow.get(k)
+            if sh is None or sh.shape != src.shape or sh.device != src.device:
+                sh = src.detach().clone()
+                self.shadow[k] = sh
+            if src.is_floating_point():
+                self._fp_shadow.append(sh)
+                self._fp_src.append(src)
+            else:
+                self._int_pairs.append((sh, src))
+
+    def load_shadow_dict(self, state_dict: dict[str, torch.Tensor], model: nn.Module) -> None:
+        raw = model._orig_mod if hasattr(model, "_orig_mod") else model
+        dev = next(raw.parameters()).device
+        self.shadow = {k: v.detach().to(device=dev).clone() for k, v in state_dict.items()}
+        self._rebuild_lists(raw)
 
     def update(self, model: nn.Module) -> None:
         raw = model._orig_mod if hasattr(model, "_orig_mod") else model
         with torch.no_grad():
-            for name, src in raw.state_dict().items():
-                sh = self.shadow.get(name)
-                if sh is None or sh.shape != src.shape:
-                    self.shadow[name] = src.detach().clone()
-                elif src.is_floating_point():
-                    sh.mul_(self.decay).add_(src.detach(), alpha=1.0 - self.decay)
-                else:
-                    sh.copy_(src.detach())
+            if not self._fp_shadow:
+                self._rebuild_lists(raw)
+            if self._fp_shadow:
+                srcs = [t.detach() for t in self._fp_src]
+                torch._foreach_mul_(self._fp_shadow, self.decay)
+                torch._foreach_add_(self._fp_shadow, srcs, alpha=1.0 - self.decay)
+            for sh, src in self._int_pairs:
+                sh.copy_(src.detach())
 
 
 def ensure_cpp_converters(work_dir: Path) -> tuple[Path, Path]:
@@ -357,6 +388,8 @@ class LichessContinuousStream:
         initial_skip: int = 1_000_000,
         threads: int = 2,
         opener=None,
+        worker_stride: int = 1,
+        worker_rem: int = 0,
     ):
         self.sf_exe = sf_exe
         self.exclude_hash_file = exclude_hash_file
@@ -364,10 +397,12 @@ class LichessContinuousStream:
         self.initial_skip = int(initial_skip)
         self.threads = int(threads)
         self.opener = opener
+        self.worker_stride = max(1, int(worker_stride))
+        self.worker_rem = int(worker_rem) % self.worker_stride
         self._resp = None
         self._zr = None
         self._byte_buf = b""
-        self._skipped_initial = False
+        self._py_line_idx = 0
         self._chunk_seq = 0
 
     def _open_stream(self) -> None:
@@ -394,14 +429,33 @@ class LichessContinuousStream:
         self._resp = None
         self._byte_buf = b""
 
+    def _filter_lines_block(self, lines_blk: bytes) -> bytes:
+        if not lines_blk:
+            return b""
+        raw_Part = lines_blk[:-1] if lines_blk.endswith(b"\n") else lines_blk
+        lines = raw_Part.split(b"\n")
+        n_lines = len(lines)
+        cur = self._py_line_idx
+        self._py_line_idx += n_lines
+        if cur + n_lines <= self.initial_skip:
+            return b""
+        start_off = max(0, self.initial_skip - cur)
+        rem = lines[start_off:]
+        if self.worker_stride > 1:
+            rel0 = (cur + start_off - self.initial_skip) % self.worker_stride
+            first_k = (self.worker_rem - rel0) % self.worker_stride
+            rem = rem[first_k :: self.worker_stride]
+        if not rem:
+            return b""
+        return b"\n".join(rem) + b"\n"
+
     def read_chunk(self, out_prefix: Path, target_records: int) -> tuple[Path, Path, int]:
-        skip_arg = self.initial_skip if not self._skipped_initial else 0
         cmd = [
             str(self.sf_exe),
             "--out-prefix",
             str(out_prefix),
             "--skip-lines",
-            str(skip_arg),
+            "0",
             "--max-records",
             str(target_records),
             "--threads",
@@ -430,11 +484,13 @@ class LichessContinuousStream:
                 if self._byte_buf:
                     tail = self._byte_buf + (b"" if self._byte_buf.endswith(b"\n") else b"\n")
                     self._byte_buf = b""
-                    try:
-                        proc.stdin.write(tail)
-                        proc.stdin.flush()
-                    except BrokenPipeError:
-                        pass
+                    filtered = self._filter_lines_block(tail)
+                    if filtered:
+                        try:
+                            proc.stdin.write(filtered)
+                            proc.stdin.flush()
+                        except BrokenPipeError:
+                            pass
                 break
             data = self._byte_buf + raw
             nl = data.rfind(b"\n")
@@ -443,13 +499,15 @@ class LichessContinuousStream:
                 continue
             lines_blk = data[: nl + 1]
             self._byte_buf = data[nl + 1 :]
+            filtered = self._filter_lines_block(lines_blk)
+            if not filtered:
+                continue
             try:
-                proc.stdin.write(lines_blk)
+                proc.stdin.write(filtered)
                 proc.stdin.flush()
             except BrokenPipeError:
                 break
 
-        self._skipped_initial = True
         self._chunk_seq += 1
         try:
             proc.stdin.close()
@@ -719,8 +777,12 @@ def _train_on_pool(
             return True
         end = min(n, start + chunk_cap)
         k = end - start
-        v1_t = torch.from_numpy(v1_np[start:end].copy()).to(device)
-        sc_t = torch.from_numpy(sc_np[start:end].copy()).to(device)
+        if device.type == "cuda":
+            v1_t = torch.from_numpy(v1_np[start:end].copy()).pin_memory().to(device, non_blocking=True)
+            sc_t = torch.from_numpy(sc_np[start:end].copy()).pin_memory().to(device, non_blocking=True)
+        else:
+            v1_t = torch.from_numpy(v1_np[start:end].copy()).to(device)
+            sc_t = torch.from_numpy(sc_np[start:end].copy()).to(device)
         perm = torch.randperm(k, device=device)
 
         num_b = k // batch_size
@@ -971,6 +1033,205 @@ def run_job_a(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
         s3_client.upload_file(str(model_dir / "phase4_job_a_report.json"), args.bucket, "checkpoints/phase4_job_a/phase4_job_a_report.json")
 
 
+def list_ready_s3_mix_shards(s3_client, bucket: str, prefix: str = "data/phase4_mix_shards") -> list[str]:
+    """Return sorted base S3 keys (`<prefix>/shard_XXX`) that have both `.bin` and `.sidecar68.bin` uploaded."""
+    if s3_client is None or not bucket:
+        return []
+    norm_pref = prefix.strip("/") + "/"
+    bins: set[str] = set()
+    scs: set[str] = set()
+    try:
+        paginator = s3_client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=norm_pref):
+            for obj in page.get("Contents", []):
+                k = obj["Key"]
+                sz = int(obj.get("Size", 0))
+                if k.endswith(".sidecar68.bin") and sz >= SIDECAR_SIZE * 1000:
+                    scs.add(k[: -len(".sidecar68.bin")])
+                elif k.endswith(".bin") and not k.endswith(".sidecar68.bin") and sz >= RECORD_SIZE_V1 * 1000:
+                    bins.add(k[: -len(".bin")])
+    except Exception as exc:
+        print(f"[S3 Shards Note] list_objects_v2 ({exc})", flush=True)
+        return []
+    return sorted(bins & scs)
+
+
+def download_s3_mix_shard(s3_client, bucket: str, base_key: str, dst_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Download a pre-packed `(107B .bin, 68B .sidecar68.bin)` shard pair in parallel over S3."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(base_key).name
+    bin_p = dst_dir / f"{stem}.bin"
+    sc_p = dst_dir / f"{stem}.sidecar68.bin"
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        f1 = ex.submit(s3_client.download_file, bucket, f"{base_key}.bin", str(bin_p))
+        f2 = ex.submit(s3_client.download_file, bucket, f"{base_key}.sidecar68.bin", str(sc_p))
+        f1.result()
+        f2.result()
+    v1, sc = load_unified_chunk(bin_p, sc_p)
+    bin_p.unlink(missing_ok=True)
+    sc_p.unlink(missing_ok=True)
+    return v1, sc
+
+
+def run_harvest_shards(args: argparse.Namespace, s3_client, dirs: dict) -> None:
+    """High-throughput CPU Shard Harvester (`ml.c5.4xlarge` 16 vCPUs): streams 70% Lc0 T80 + 30% SF into S3."""
+    tmp_dir: Path = dirs["tmp"]
+    lc0_exe, sf_exe = ensure_cpp_converters(tmp_dir)
+    excl_bin = dirs["excl_bin"]
+    excl_hashes = dirs["excl_hashes"]
+
+    shard_sz = max(10_000, int(args.shard_size))
+    tot_shards = max(1, (args.total_positions + shard_sz - 1) // shard_sz)
+    w_id = int(args.worker_id)
+    n_workers = max(1, int(args.num_workers))
+    prefix = args.s3_shard_prefix.strip("/")
+    my_shard_ids = [sid for sid in range(tot_shards) if (sid % n_workers) == w_id]
+
+    existing = set(list_ready_s3_mix_shards(s3_client, args.bucket, prefix)) if args.resume else set()
+    todo_ids = [sid for sid in my_shard_ids if f"{prefix}/shard_{sid:03d}" not in existing]
+    print(
+        f"=== [Harvester w={w_id}/{n_workers}] Assigned {len(my_shard_ids)} shards "
+        f"({len(todo_ids)} remaining, shard_size={shard_sz:,}) -> s3://{args.bucket}/{prefix}/ ===",
+        flush=True,
+    )
+    if not todo_ids:
+        return
+
+    sf_per_shard = int(round(shard_sz * 0.30))
+    lc0_per_shard = shard_sz - sf_per_shard
+    all_t80 = list_t80_nonempty_urls(seed=args.seed)
+    my_t80 = all_t80[w_id::n_workers] if all_t80 else []
+    t80_idx = (len(my_shard_ids) - len(todo_ids)) % max(1, len(my_t80))
+
+    stop_ev = threading.Event()
+    sf_q: queue.Queue = queue.Queue(maxsize=6)
+    sf_ring: list[tuple[np.ndarray, np.ndarray]] = []
+
+    if dirs["v2_shards"]:
+        v2_b, v2_s, v2_n = convert_v2_shards_to_unified(dirs["v2_shards"], tmp_dir / f"harv_v2_sf_w{w_id}")
+        if v2_n > 0 and v2_b.is_file():
+            v_init, s_init = load_unified_chunk(v2_b, v2_s)
+            v2_b.unlink(missing_ok=True)
+            v2_s.unlink(missing_ok=True)
+            for off in range(0, len(v_init), sf_per_shard):
+                sub_v = v_init[off : off + sf_per_shard]
+                sub_s = s_init[off : off + sf_per_shard]
+                if len(sub_v) >= sf_per_shard // 2:
+                    sf_ring.append((sub_v, sub_s))
+                    if not sf_q.full():
+                        sf_q.put((sub_v, sub_s))
+
+    def _harv_sf_worker():
+        init_skip = 1_000_000 + (len(my_shard_ids) - len(todo_ids)) * sf_per_shard * n_workers
+        st = LichessContinuousStream(
+            sf_exe, excl_hashes, excl_bin,
+            initial_skip=init_skip, threads=3,
+            worker_stride=n_workers, worker_rem=w_id,
+        )
+        sf_seq = 0
+        sf_dir = tmp_dir / f"harv_sf_w{w_id}"
+        sf_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            while not stop_ev.is_set():
+                try:
+                    bp, sp, cnt = st.read_chunk(sf_dir / f"sf_{sf_seq:04d}", sf_per_shard)
+                    if cnt > 0 and bp.is_file():
+                        v, s = load_unified_chunk(bp, sp)
+                        bp.unlink(missing_ok=True)
+                        sp.unlink(missing_ok=True)
+                        while not stop_ev.is_set():
+                            try:
+                                sf_q.put((v, s), timeout=2.0)
+                                break
+                            except queue.Full:
+                                continue
+                        sf_seq += 1
+                    else:
+                        st.close()
+                        time.sleep(2.0)
+                except Exception as exc:
+                    print(f"[Harvester SF w={w_id}] Stream reopen ({exc})", flush=True)
+                    st.close()
+                    time.sleep(3.0)
+        finally:
+            st.close()
+            shutil.rmtree(sf_dir, ignore_errors=True)
+
+    sf_th = threading.Thread(target=_harv_sf_worker, daemon=True)
+    sf_th.start()
+
+    stop_deadline = time.time() + max(300, args.max_runtime_sec - 120)
+    lc0_buf_v1 = np.empty((0, RECORD_SIZE_V1), dtype=np.uint8)
+    lc0_buf_sc = np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
+    cpu_cnt = os.cpu_count() or 8
+    par_t80 = max(4, min(10, cpu_cnt - 4))
+    t0_all = time.time()
+    done_cnt = 0
+
+    try:
+        for sid in todo_ids:
+            if time.time() >= stop_deadline:
+                print(f"[Harvester w={w_id}] Hit graceful deadline before shard_{sid:03d}; exiting cleanly.", flush=True)
+                break
+
+            while len(lc0_buf_v1) < lc0_per_shard and my_t80:
+                w_dir = tmp_dir / f"harv_lc0_w{w_id}_{sid:03d}"
+                need = max(lc0_per_shard * 3, lc0_per_shard - len(lc0_buf_v1))
+                pairs, t80_idx = stream_lc0_t80_parallel(
+                    lc0_exe, my_t80, t80_idx, w_dir, excl_bin, need,
+                    workers=par_t80, threads_per_worker=1, tag=f"Harv-W{w_id}",
+                )
+                v_add, s_add = [lc0_buf_v1], [lc0_buf_sc]
+                for bp, sp, cnt in pairs:
+                    if cnt > 0 and bp.is_file():
+                        vv, ss = load_unified_chunk(bp, sp)
+                        v_add.append(vv)
+                        s_add.append(ss)
+                shutil.rmtree(w_dir, ignore_errors=True)
+                lc0_buf_v1 = np.concatenate(v_add, axis=0)
+                lc0_buf_sc = np.concatenate(s_add, axis=0)
+
+            take_lc = min(lc0_per_shard, len(lc0_buf_v1))
+            v1_lc, sc_lc = lc0_buf_v1[:take_lc], lc0_buf_sc[:take_lc]
+            lc0_buf_v1, lc0_buf_sc = lc0_buf_v1[take_lc:], lc0_buf_sc[take_lc:]
+
+            v1_sf, sc_sf = np.empty((0, RECORD_SIZE_V1), dtype=np.uint8), np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
+            try:
+                v1_sf, sc_sf = sf_q.get(timeout=8.0 if sf_ring else 120.0)
+                if len(sf_ring) >= 8:
+                    sf_ring.pop(0)
+                sf_ring.append((v1_sf, sc_sf))
+            except queue.Empty:
+                if sf_ring:
+                    v1_sf, sc_sf = sf_ring[sid % len(sf_ring)]
+
+            mv1, msc = _build_mixed_epoch_pool(v1_sf[:sf_per_shard], sc_sf[:sf_per_shard], v1_lc, sc_lc, seed=args.seed + sid)
+            out_dir = tmp_dir / f"upload_w{w_id}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            b_file = out_dir / f"shard_{sid:03d}.bin"
+            s_file = out_dir / f"shard_{sid:03d}.sidecar68.bin"
+            s_file.write_bytes(msc.tobytes())
+            b_file.write_bytes(mv1.tobytes())
+
+            if s3_client and args.bucket:
+                # Upload sidecar FIRST and main .bin SECOND so list_ready_s3_mix_shards sees atomic pairs
+                s3_client.upload_file(str(s_file), args.bucket, f"{prefix}/shard_{sid:03d}.sidecar68.bin")
+                s3_client.upload_file(str(b_file), args.bucket, f"{prefix}/shard_{sid:03d}.bin")
+            b_file.unlink(missing_ok=True)
+            s_file.unlink(missing_ok=True)
+            done_cnt += 1
+            rate = (done_cnt * len(mv1)) / max(1.0, time.time() - t0_all)
+            print(
+                f"[Harvester w={w_id}] Uploaded shard_{sid:03d} ({len(mv1):,} pos, "
+                f"done={done_cnt}/{len(todo_ids)}, avg={rate:,.0f} pos/s)",
+                flush=True,
+            )
+            del mv1, msc
+            gc.collect()
+    finally:
+        stop_ev.set()
+
+
 def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: dict) -> None:
     tmp_dir: Path = dirs["tmp"]
     model_dir: Path = dirs["model"]
@@ -1001,8 +1262,9 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
     new_ids = {id(p) for p in new_params}
     base_params = [p for p in m12.parameters() if p.requires_grad and id(p) not in new_ids]
 
+    lr_scale = math.sqrt(max(1.0, args.batch_size / 512.0))
     opt = torch.optim.AdamW(
-        [{"params": new_params, "lr": 2e-4}, {"params": base_params, "lr": 2e-5}],
+        [{"params": new_params, "lr": 2e-4 * lr_scale}, {"params": base_params, "lr": 2e-5 * lr_scale}],
         weight_decay=1e-4,
         fused=(device.type == "cuda"),
     )
@@ -1017,8 +1279,8 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
             s3_client.download_file(args.bucket, s3_resume_key, str(local_resume))
             ck = torch.load(str(local_resume), map_location=device, weights_only=False)
             m12.load_state_dict(ck["model_state_dict"])
-            ema_9995.shadow = ck["ema_09995_state_dict"]
-            ema_9999.shadow = ck["ema_09999_state_dict"]
+            ema_9995.load_shadow_dict(ck["ema_09995_state_dict"], m12)
+            ema_9999.load_shadow_dict(ck["ema_09999_state_dict"], m12)
             opt.load_state_dict(ck["optimizer_state_dict"])
             step_state["step"] = int(ck.get("step", 0))
             step_state["seen"] = int(ck.get("seen", 0))
@@ -1026,16 +1288,25 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
         except Exception as e:
             print(f"[Job B Resume Note] Starting fresh ({e})", flush=True)
 
+    fwd_m12: nn.Module = m12
+    if device.type == "cuda" and os.name != "nt":
+        try:
+            fwd_m12 = torch.compile(m12, mode="default")
+            print("[Job B] Enabled torch.compile(mode='default') on CUDA L40S!", flush=True)
+        except Exception as exc:
+            print(f"[Job B Note] Using eager CUDA ({exc})", flush=True)
+            fwd_m12 = m12
+
     stage1_pos = min(20_000_000, args.total_positions // 5 if args.total_positions < 20_000_000 else 20_000_000)
     tot_steps_est = max(1, (args.total_positions + args.batch_size - 1) // args.batch_size)
     stage1_steps = max(1, stage1_pos // args.batch_size)
 
     def _lr_b(o, stp, seen):
         if seen < stage1_pos:
-            lr_new = compute_cosine_lr(stp, stage1_steps, min(500, stage1_steps // 10), 2e-4, 1e-4)
-            lr_base = 2e-5
+            lr_new = compute_cosine_lr(stp, stage1_steps, min(500, stage1_steps // 10), 2e-4 * lr_scale, 1e-4 * lr_scale)
+            lr_base = 2e-5 * lr_scale
         else:
-            lr_c = compute_cosine_lr(stp - stage1_steps, max(1, tot_steps_est - stage1_steps), 0, 1e-4, 5e-6)
+            lr_c = compute_cosine_lr(stp - stage1_steps, max(1, tot_steps_est - stage1_steps), 0, 1e-4 * lr_scale, 5e-6)
             lr_new = lr_c
             lr_base = lr_c
         o.param_groups[0]["lr"] = lr_new
@@ -1057,98 +1328,86 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
             except Exception as e:
                 print(f"  [Checkpoint Warning] {e}", flush=True)
 
-    # Async rolling 5M mixed pool producer (~70% fresh parallel Lc0 T80 + ~30% non-resetting Stockfish stream)
-    t80_urls = list_t80_nonempty_urls(seed=args.seed)
-    t80_idx = [(step_state["seen"] // 3_500_000) % max(1, len(t80_urls))]
-    pool_q: queue.Queue = queue.Queue(maxsize=3)
-    sf_q: queue.Queue = queue.Queue(maxsize=3)
+    # S3-first high-bandwidth double-buffered shard prefetcher (with seamless live-stream fallback)
+    pool_q: queue.Queue = queue.Queue(maxsize=4)
     stop_prod = threading.Event()
-    v2_b, v2_s, v2_n = convert_v2_shards_to_unified(dirs["v2_shards"], tmp_dir / "job_b_v2_sf")
-    sf_ring: list[tuple[np.ndarray, np.ndarray]] = []
-    if v2_n > 0 and v2_b.is_file():
-        sf_ring.append(load_unified_chunk(v2_b, v2_s))
-        if step_state["seen"] == 0:
-            sf_q.put(sf_ring[0])
+    s3_pref = args.s3_shard_prefix.strip("/")
 
-    def _sf_streamer():
-        sf_stream = LichessContinuousStream(sf_exe, excl_hashes, excl_bin, initial_skip=1_000_000, threads=1)
-        sf_idx = 0
-        sf_dir = tmp_dir / "job_b_sf_stream"
-        sf_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            while not stop_prod.is_set():
-                try:
-                    bp, sp, cnt = sf_stream.read_chunk(sf_dir / f"sf_{sf_idx:04d}", 1_500_000)
-                    if cnt > 0 and bp.is_file():
-                        v, s = load_unified_chunk(bp, sp)
-                        bp.unlink(missing_ok=True)
-                        sp.unlink(missing_ok=True)
+    def _s3_and_fallback_producer():
+        dl_dir = tmp_dir / "job_b_s3_prefetch"
+        pass_idx = step_state["seen"] // 60_000_000
+        seen_in_pass: set[str] = set()
+        t80_urls = None
+        t80_idx = 0
+        v2_pair = None
+
+        while not stop_prod.is_set():
+            ready_keys = list_ready_s3_mix_shards(s3_client, args.bucket, s3_pref)
+            unseen = [k for k in ready_keys if k not in seen_in_pass]
+            if not unseen and ready_keys:
+                seen_in_pass.clear()
+                pass_idx += 1
+                unseen = list(ready_keys)
+
+            if unseen:
+                rng_p = random.Random(args.seed + pass_idx * 1009 + len(seen_in_pass))
+                rng_p.shuffle(unseen)
+                for bkey in unseen:
+                    if stop_prod.is_set():
+                        break
+                    try:
+                        mv1, msc = download_s3_mix_shard(s3_client, args.bucket, bkey, dl_dir)
+                        seen_in_pass.add(bkey)
                         while not stop_prod.is_set():
                             try:
-                                sf_q.put((v, s), timeout=2.0)
+                                pool_q.put((mv1, msc), timeout=2.0)
                                 break
                             except queue.Full:
                                 continue
-                        sf_idx += 1
-                    else:
-                        sf_stream.close()
-                        time.sleep(2.0)
-                except Exception as exc:
-                    print(f"[Job B SF Stream Note] Reopening Lichess stream ({exc})", flush=True)
-                    sf_stream.close()
-                    time.sleep(3.0)
-        finally:
-            sf_stream.close()
-            shutil.rmtree(sf_dir, ignore_errors=True)
+                    except Exception as exc:
+                        print(f"[Job B S3 Prefetch Warning] {bkey}: {exc}", flush=True)
+                    # Re-check S3 list periodically during Pass 0 so newly harvested shards join immediately
+                    if pass_idx == 0 and (len(seen_in_pass) % 4 == 0):
+                        break
+                continue
 
-    def _producer():
-        p_id = 0
-        while not stop_prod.is_set() and (p_id * 5_000_000) < (args.total_positions + 5_000_000):
-            p_dir = tmp_dir / f"job_b_pool_{p_id:03d}"
-            p_dir.mkdir(parents=True, exist_ok=True)
-            lc0_pairs, next_idx = stream_lc0_t80_parallel(
-                lc0_exe, t80_urls, t80_idx[0], p_dir, excl_bin, 3_500_000, workers=2, threads_per_worker=1, tag="Job B Lc0"
+            # Fallback if S3 mix shards are still empty at startup: stream 1 mixed pool directly
+            if t80_urls is None:
+                t80_urls = list_t80_nonempty_urls(seed=args.seed)
+                t80_idx = (step_state["seen"] // 3_500_000) % max(1, len(t80_urls))
+                vb, vs, vn = convert_v2_shards_to_unified(dirs["v2_shards"], tmp_dir / "job_b_v2_sf")
+                if vn > 0 and vb.is_file():
+                    v2_pair = load_unified_chunk(vb, vs)
+            p_dir = tmp_dir / "job_b_fallback_stream"
+            lc0_pairs, t80_idx = stream_lc0_t80_parallel(
+                lc0_exe, t80_urls, t80_idx, p_dir, excl_bin, 2_000_000, workers=3, threads_per_worker=1, tag="Job B Fallback"
             )
-            t80_idx[0] = next_idx
             lc0_v1s, lc0_scs = [], []
             for bp, sp, cnt in lc0_pairs:
                 if cnt > 0 and bp.is_file():
-                    v, s = load_unified_chunk(bp, sp)
-                    lc0_v1s.append(v); lc0_scs.append(s)
-
-            v1_sf, sc_sf = np.empty((0, RECORD_SIZE_V1), dtype=np.uint8), np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
-            try:
-                v1_sf, sc_sf = sf_q.get(timeout=5.0 if sf_ring else 120.0)
-                if len(sf_ring) >= 6:
-                    sf_ring.pop(0)
-                sf_ring.append((v1_sf, sc_sf))
-            except queue.Empty:
-                if sf_ring:
-                    v1_sf, sc_sf = sf_ring[p_id % len(sf_ring)]
-
+                    vv, ss = load_unified_chunk(bp, sp)
+                    lc0_v1s.append(vv); lc0_scs.append(ss)
+            shutil.rmtree(p_dir, ignore_errors=True)
+            v1_sf, sc_sf = v2_pair if v2_pair is not None else (np.empty((0, RECORD_SIZE_V1), dtype=np.uint8), np.empty((0, SIDECAR_SIZE), dtype=np.uint8))
             v1_lc = np.concatenate(lc0_v1s, axis=0) if lc0_v1s else np.empty((0, RECORD_SIZE_V1), dtype=np.uint8)
             sc_lc = np.concatenate(lc0_scs, axis=0) if lc0_scs else np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
-            mv1, msc = _build_mixed_epoch_pool(v1_sf, sc_sf, v1_lc, sc_lc, seed=args.seed + p_id)
-            shutil.rmtree(p_dir, ignore_errors=True)
+            mv1, msc = _build_mixed_epoch_pool(v1_sf[:600_000], sc_sf[:600_000], v1_lc, sc_lc, seed=args.seed + pass_idx)
             while not stop_prod.is_set():
                 try:
                     pool_q.put((mv1, msc), timeout=2.0)
                     break
                 except queue.Full:
                     continue
-            p_id += 1
         pool_q.put(None)
 
-    sf_th = threading.Thread(target=_sf_streamer, daemon=True)
-    sf_th.start()
-    prod_th = threading.Thread(target=_producer, daemon=True)
+    prod_th = threading.Thread(target=_s3_and_fallback_producer, daemon=True)
     prod_th.start()
 
     # Reserve 7 min before hard MaxRuntimeInSeconds for guaranteed 150K GPU eval + IR export + S3 upload
     stop_deadline = time.time() + max(600, args.max_runtime_sec - 420)
     calib_inputs = None
 
-    print(f"\n=== [Job B] Training 12x192_mid2_9_hl64 + MLH (~{args.total_positions:,} pos) ===", flush=True)
+    print(f"\n=== [Job B] Training 12x192_mid2_9_hl64 + MLH (~{args.total_positions:,} pos, B={args.batch_size}) ===", flush=True)
     while step_state["seen"] < args.total_positions:
         item = pool_q.get()
         if item is None:
@@ -1158,7 +1417,7 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
             cx = unpack_v1_tensor_to_inputs_and_meta(torch.from_numpy(mv1[:500].copy()))[0].numpy().astype(np.float32)
             calib_inputs = [cx[i : i + 1] for i in range(len(cx))]
         hit_deadline = _train_on_pool(
-            m12, mv1, msc, device, opt,
+            fwd_m12, mv1, msc, device, opt,
             batch_size=args.batch_size, freeze_trunk=False,
             pol_weight=1.0, val_weight=1.0, mlh_weight=0.05,
             ema_list=[ema_9995, ema_9999], step_state=step_state, lr_fn=_lr_b,
@@ -1210,7 +1469,7 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["job_a", "job_b"], required=True)
+    parser.add_argument("--mode", choices=["job_a", "job_b", "harvest_shards"], required=True)
     parser.add_argument("--bucket", type=str, default=DEFAULT_BUCKET)
     parser.add_argument("--region", type=str, default=DEFAULT_REGION)
     parser.add_argument("--batch_size", type=int, default=512)
@@ -1218,6 +1477,10 @@ def main() -> None:
     parser.add_argument("--max_runtime_sec", type=int, default=18000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--resume", type=lambda x: str(x).lower() in ("true", "1", "yes"), default=True)
+    parser.add_argument("--worker_id", type=int, default=0)
+    parser.add_argument("--num_workers", type=int, default=1)
+    parser.add_argument("--shard_size", type=int, default=2_000_000)
+    parser.add_argument("--s3_shard_prefix", type=str, default="data/phase4_mix_shards")
     args = parser.parse_args()
     _ensure_runtime_deps()
 
@@ -1250,7 +1513,12 @@ def main() -> None:
     excl_hashes = _download_or_locate(search_dirs, "eval_disjoint_hashes_v2.json", s3_client, args.bucket, "deploy/eval_disjoint_hashes_v2.json", tmp_dir / "eval_disjoint_hashes_v2.json")
 
     v2_shards = []
-    for sfn in ("shard_000.bin", "shard_001.bin"):
+    s3_v2_names = ("shard_000.bin", "shard_001.bin")
+    if args.mode == "harvest_shards":
+        my_v2 = [s3_v2_names[i] for i in range(len(s3_v2_names)) if (i % max(1, int(args.num_workers))) == int(args.worker_id)]
+    else:
+        my_v2 = list(s3_v2_names)
+    for sfn in my_v2:
         v2_shards.append(_download_or_locate(search_dirs, sfn, s3_client, args.bucket, f"data/shards/{sfn}", tmp_dir / f"v2_{sfn}"))
 
     dirs = {
@@ -1259,7 +1527,9 @@ def main() -> None:
         "excl_hashes": excl_hashes, "v2_shards": v2_shards,
     }
 
-    if args.mode == "job_a":
+    if args.mode == "harvest_shards":
+        run_harvest_shards(args, s3_client, dirs)
+    elif args.mode == "job_a":
         run_job_a(args, device, s3_client, dirs)
     else:
         run_job_b(args, device, s3_client, dirs)
