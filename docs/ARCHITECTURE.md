@@ -37,13 +37,15 @@ Rather than flattening `C x 8 x 8 -> 4,672` with a giant fully connected project
 
 ## 3. Backbone & OpenVINO NPU Compilation (`src/neurachess/models/se_resnet_backbone.py`, `src/neurachess/models/npu_compiler.py`)
 
-Each backbone is a pre-folded Squeeze-and-Excitation ResNet (`10x192` or `10x128`):
+Each backbone is a pre-folded Squeeze-and-Excitation ResNet (`10x192` default, `12x192` deep, or `10x128` compact):
 - Initial `3x3` stem convolution (`18 -> C`) + folded BatchNorm bias + ReLU.
 - `B` residual blocks, each with:
   - `Conv2d(C, C, 3x3)` + folded BN bias + ReLU
   - `Conv2d(C, C, 3x3)` + folded BN bias
-  - Squeeze-and-Excitation gate (`GlobalAvgPool -> Conv1x1(C, C//8) -> ReLU -> Conv1x1(C//8, 2*C)` generating scale + shift modulation before residual addition and ReLU)
-- `Conv73` policy head + Value head (`Conv1x1(C, 1) -> ReLU -> Flatten -> Linear(64, 128) -> ReLU -> Linear(128, 1) -> Tanh`).
+  - Squeeze-and-Excitation gate (`GlobalAvgPool -> Conv1x1(C, C//8) -> ReLU -> Conv1x1(C//8, 2*C)` generating scale + shift modulation before residual addition and ReLU in `v1.0.x`; `se_reduction=4` SE modulation in `v1.1.0`)
+- `Conv73` policy head + Value head:
+  - **`v1.1.0` (`HL-Gauss-64` + `MLH`):** `Conv1x1(C, 16) -> ReLU -> Flatten -> Linear(1024, 256) -> ReLU -> Linear(256, 64) -> Softmax @ z` (`val_hl_z` expected value `[-1, +1]`), plus sensitivity-guided **Middle-Block W8A8 QAT (`res_2..7` INT8 for `10x192`, `res_2..9` INT8 for `12x192`)** keeping `{stem, blocks 0,1,end-2,end-1, SE gates, heads}` in FP16 ([`phase4_model.py`](../src/neurachess/training/phase4_model.py)).
+  - **`v1.0.x` FP16:** `Conv1x1(C, 1) -> ReLU -> Flatten -> Linear(64, 128) -> ReLU -> Linear(128, 1) -> Tanh`.
 
 **Static BatchNorm Folding & NPU Properties:**
 During `.npz` export (`ChessSEResNet.export_to_npz`), running `BatchNorm2d` mean/variance and affine `(gamma, beta)` parameters are analytically absorbed into convolution weights/biases (`fold_conv_bn`), eliminating normalization layers inside the OpenVINO graph. Static `B=1` (root/ponder) and `B=16` (leaf search batches) graphs compile under `PERFORMANCE_HINT="LATENCY"` and `NPU_TURBO=True`, with compiled OpenVINO blobs cached in `weights/cache` for fast restarts.

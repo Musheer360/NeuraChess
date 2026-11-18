@@ -1,8 +1,8 @@
 """
 NeuraChess Model Weight Downloader (`neurachess.scripts.download_weights`).
 
-Downloads official NeuraChess OpenVINO FP16 IR and folded NumPy weights from GitHub Releases
-and verifies integrity via SHA-256 checksums before placement in `weights/`.
+Downloads official NeuraChess OpenVINO IR (v1.1.0 Mid-2..7 QAT INT8 & v1.0.x FP16) and folded NumPy
+weights from GitHub Releases and verifies integrity via SHA-256 checksums before placement in `weights/`.
 """
 
 import argparse
@@ -19,6 +19,40 @@ DEFAULT_WEIGHTS_DIR = ROOT_DIR / "weights"
 
 MODEL_ASSETS = {
     "10x192": [
+        {
+            "filename": "neurachess-10x192-qat-int8.xml",
+            "aliases": ["neurachess-10x192-qat-int8.xml"],
+            "sha256": "86fce43ef5a89580f548cf56fa79079b055afdf1da8eb0903ff6537874df5bcb",
+        },
+        {
+            "filename": "neurachess-10x192-qat-int8.bin",
+            "aliases": ["neurachess-10x192-qat-int8.bin"],
+            "sha256": "9db3c4d6e1f45a07a4cc0cd6cfc5898edc1c3ffdc8171137a754de0b7f3db260",
+        },
+        {
+            "filename": "neurachess-10x192-qat-int8.npz",
+            "aliases": ["neurachess-10x192-qat-int8.npz"],
+            "sha256": "99d2689b76cec74927f425d121cddc6a9e2b6360704a721ba0b0f67cc30c5df2",
+        },
+    ],
+    "12x192": [
+        {
+            "filename": "neurachess-12x192-qat-int8.xml",
+            "aliases": ["neurachess-12x192-qat-int8.xml"],
+            "sha256": "975589f19b1fb721b4c5eca966eec997c589df2685bbcd3f17e6ac809fc1e52b",
+        },
+        {
+            "filename": "neurachess-12x192-qat-int8.bin",
+            "aliases": ["neurachess-12x192-qat-int8.bin"],
+            "sha256": "eceadf14d505efeb81d94d0bfa99cefbc6aa702ac2b16839993ab07ff0bdf1fb",
+        },
+        {
+            "filename": "neurachess-12x192-qat-int8.npz",
+            "aliases": ["neurachess-12x192-qat-int8.npz"],
+            "sha256": "149f17785aac782e697e8c5744372765e62c559af2f7d9ec485bff323ef82d3a",
+        },
+    ],
+    "10x192-fp16": [
         {
             "filename": "neurachess-10x192-fp16.xml",
             "aliases": ["neurachess-10x192-fp16.xml", "346M_10x192_V0_FP16.xml"],
@@ -52,6 +86,16 @@ MODEL_ASSETS = {
             "sha256": "2f993da939572cc02c7962e6b69761706229b2331434d44e887369804cf65137",
         },
     ],
+}
+
+MODEL_ALIASES = {
+    "10x192": "10x192",
+    "10x192-qat-int8": "10x192",
+    "12x192": "12x192",
+    "12x192-qat-int8": "12x192",
+    "10x192-fp16": "10x192-fp16",
+    "10x128": "10x128",
+    "10x128-fp16": "10x128",
 }
 
 
@@ -99,14 +143,18 @@ def verify_or_download_asset(repo: str, tag: str, out_dir: Path, spec: dict, for
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download and SHA-256 verify NeuraChess weights")
-    parser.add_argument("--model", choices=["10x192", "10x128", "all"], default="10x192")
+    parser.add_argument(
+        "--model",
+        choices=["10x192", "10x192-qat-int8", "12x192", "12x192-qat-int8", "10x192-fp16", "10x128", "all"],
+        default="10x192",
+    )
     parser.add_argument("--repo", type=str, default="Musheer360/NeuraChess")
-    parser.add_argument("--tag", type=str, default="v1.0.0")
+    parser.add_argument("--tag", type=str, default="v1.1.0")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_WEIGHTS_DIR)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
-    keys = ["10x192", "10x128"] if args.model == "all" else [args.model]
+    keys = ["10x192", "12x192", "10x192-fp16", "10x128"] if args.model == "all" else [MODEL_ALIASES[args.model]]
     for k in keys:
         for asset in MODEL_ASSETS[k]:
             verify_or_download_asset(args.repo, args.tag, args.out_dir, asset, force=args.force)

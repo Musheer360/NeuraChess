@@ -138,3 +138,38 @@ All 44 lost games from the 150-game Stockfish 19 calibration (`2800 / 3000 / 319
 **Calibration & Interval Notes (`v1.0.0` Baseline):**
 - Each 50-game Stockfish `UCI_Elo` ladder rung carries a wide 95% Wilson interval (roughly `±95 Elo` binomial half-width, ~190 Elo CI width at `n=50`) and should be read alongside the cumulative 150-game result (`50.00%`, 95% Wilson CI `[42.10%, 57.90%]`) and fixed-node Stockfish rungs.
 - All `v1.0.0` Stockfish 19 calibration matches in this document and `README.md` ran with `OwnBook=False` (no opening book) under fixed `movetime=400 ms` (prior to adding the `v1.0.2` CC0 Lichess opening book and cold-start `1.30x` `wtime`/`btime` buffer).
+
+---
+
+## 6. Phase 4 Spot Training, Sensitivity-Guided QAT INT8 & `v1.1.0` Validation
+
+### 6.1 Cloud Spot Training (`Job A` `10x192` & `Job B` `12x192`, `HL-Gauss-64` + `MLH`)
+Building on the local NPU discovery that keeping sensitive boundary layers (`stem, blocks 0,1,N-2,N-1, SE gates, heads`) in FP16 while quantizing middle blocks (`res_2..7` on `10x192`, `res_2..9` on `12x192`) recovers PTQ value degradation, two SageMaker Spot runs trained with `HL-Gauss-64` distributional value + `MLH` auxiliary head on 60 blended shards:
+
+- **`Job A` (`A2` `10x192 Mid-2..7 QAT`, 40M positions):** Reached **`1.4589`** `far_test` Policy CE (`51.58%` Top-1 / `80.74%` Top-3 / `2.5658` HL-Gauss CE / `95.54%` Decisive Sign). In a **180-game paired H2H SPRT** (`openings_320[75:165]`, `400 ms/move`, static `B=16`, Syzygy), `A2_base` beat **`v1.0.2` Pure FP16 (`neurachess-10x192-fp16`)** by **`+56.5` Elo** (**`58.06%`**, `77W-55D-48L`, Wilson 95% CI `[50.75%, 65.02%]`, pentanomial `[2, 6, 49, 27, 6]`, SPRT `ACCEPT_H1` **`LLR = +3.8313 > 2.9444`**) at **`3,890.7` vs `3,253.9` NPS (`+19.6%`)** ([`phase4_h2h_a2int8_vs_346m_180g_combined.json`](../eval_results/phase4_h2h_a2int8_vs_346m_180g_combined.json)).
+- **`Job B` (`12x192 Mid-2..9 QAT`, 300M positions):** Function-preserving `10x192 -> 12x192` expansion verified **`0.000e+00`** Step-0 policy drift, trained `280M` FP/BF16 + `20M` Stage-3 QAT, and reached **`1.4474`** `far_test` Policy CE (`51.18%` Top-1 / `80.49%` Top-3 / `0.05950` Val MSE / `95.74%` Decisive Sign). However, in `400 ms/move` NPU matches vs `A2_base`, the deeper `12x192` lost **`39.00%`** (`2,673.1` vs `3,803.4` NPS) in `ema_09995` FP16 and **`48.00%`** (`16W-16D-18L`, `3,324.0` vs `3,868.4` NPS) in `Mid-2..9` INT8 ([`phase4_h2h_jobB_qat_int8_vs_a2int8_50g.json`](../eval_results/phase4_h2h_jobB_qat_int8_vs_a2int8_50g.json)). We ship `neurachess-12x192-qat-int8` as an optional deeper architecture alongside the faster `10x192` flagship.
+
+### 6.2 Local Zero-Retraining Synthesis (`v1.1.0` Default: `A2_soup75`)
+Evaluating candidate improvements sequentially on Intel NPU 3720 across `5,000` `test_far_50k.bin` positions and all `1,979` clean Lichess puzzles (`eval_results/v1_1_step1_synthesis.json`):
+
+| Variant | `test_far` Top-1 / CE / MSE | Clean `1,979` `0n` | Clean `1,979` `200n` | Raw `B=16` (`pos/s`) | Verdict |
+| --- | --- | ---: | ---: | ---: | --- |
+| `A2_base` (S3 export) | `51.40%` / `1.4879` / `0.05697` | `68.17%` (`1,349`) | `82.67%` (`1,636`) | `2,890.2` | Baseline (`+56.5` Elo vs `346M`) |
+| `A2_recalib` (`v2` NNCF calib) | `51.30%` / **`1.4874`** / **`0.05691`** | `68.62%` (`1,358`) | `82.77%` (`1,638`) | **`3,000.8`** | Clean `gpu_unpack` calib gain |
+| `A2_detrunc` (`val_hl_z * 1.038`) | `51.30%` / `1.4874` / `0.05766` | `68.62%` (`1,358`) | `82.67%` (`1,636`) | `3,000.4` | Rejected (MSE & `200n` regressed) |
+| **`A2_soup75` (`0.75*A2 + 0.25*346M`)** | `50.78%` / `1.4911` / `0.05725` | **`68.72%`** (`1,360`) | **`83.07%`** (`1,644`) | `2,989.8` | **Promoted (`v1.1.0` Flagship)** |
+| `A2_pol_graft` (`346M` `pol_73`) | `50.88%` / `1.4900` / **`0.05691`** | `68.17%` (`1,349`) | `83.02%` (`1,643`) | `2,980.2` | Highest `2100+` `200n` (`66.75%`) |
+
+- **Head-to-Head Verification (`50` games, `openings_320[75:100]`, `400 ms/move`, static `B=16`, Syzygy):** `A2_soup75` beat `A2_base` **`54.00%`** (`16W-22D-12L`, Wilson 95% CI `[40.40%, 67.03%]`, pentanomial `[0, 6, 11, 6, 2]`, `0` double-losses) ([`v1_1_h2h_soup75_vs_a2base_50g.json`](../eval_results/v1_1_h2h_soup75_vs_a2base_50g.json)).
+
+### 6.3 `v1.1.0` Official Stockfish 19 Ladder, Fixed-Node Crossover & Clean Puzzles (`A2_soup75`)
+*(Provenance Note: Archived [`phase4_sf3000_openings320_apples_50g.json`](../eval_results/phase4_sf3000_openings320_apples_50g.json) scoring `33.0%` was `Hybrid_Mid27 PTQ (no QAT)`, not `v1.0.2 Pure FP16`.)*
+
+- **Clean `1,979` Lichess Puzzles ([`v1_1_puzzles_clean1979.json`](../eval_results/v1_1_puzzles_clean1979.json)):** `0n`: **`68.72%`** (`1,360/1,979`), `50n`: **`78.27%`** (`1,549`, `3,064.2` NPS), `200n`: **`83.07%`** (`1,644`, `3,133.5` NPS), `800n`: **`95.65%`** (`1,893/1,979`, `3,387.1` NPS; `2100+`: `86.55%`).
+- **Stockfish 19 Calibration Ladder (`openings_320[0:75]`, `400 ms/move`, `--ponder`, `fpu_reduction=0.20`, `--max-plies 150 --adjudicate-material`, Syzygy — [`v1_1_stockfish_ladder_150g.json`](../eval_results/v1_1_stockfish_ladder_150g.json)):**
+  - `UCI_Elo 2800` (`[0:25]`, `50g`): **`74.00%`** (`29W-16D-5L`, CI `[60.45%, 84.13%]`, `3,898.9` eff NPS, implied `2981.7`) — up from `v1.0.0`'s `62.00%` (`OPENINGS_50`).
+  - `UCI_Elo 3000` (`[25:50]`, `50g`): **`42.00%`** (`6W-30D-14L`, CI `[29.37%, 55.77%]`, **`4,025.1` eff NPS**), cutting losses down to `14`.
+  - `UCI_Elo 3190` (`[50:75]`, `50g`): **`31.00%`** (`3W-25D-22L`, CI `[19.93%, 44.78%]`, **`4,039.6` eff NPS**, implied `3051.0`).
+  - **Combined `150g`:** **`49.00%`** (`38W-71D-41L`), **`3,987.9` mean effective NPS**, **`2992.2`** mean implied Elo.
+- **Fixed-Node Uncapped Stockfish 19 Crossover (`go nodes 3500`, `openings_320[165:185]`, `40g`, `400 ms/move`, `--ponder`, Syzygy — [`v1_1_sf_nodes3500_40g.json`](../eval_results/v1_1_sf_nodes3500_40g.json)):**
+  - **`83.75%`** (**`30W-7D-3L`**, Wilson 95% CI **`[69.48%, 92.11%]`**, `3,771.0` eff NPS) — surging from `v1.0.2`'s **`37.50%`** (`9W-12D-19L`).

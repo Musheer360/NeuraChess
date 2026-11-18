@@ -8,10 +8,13 @@ Instead of relying on traditional alpha-beta hand-crafted heuristics, NeuraChess
 
 ## Key Highlights
 
-- **Hardware-Matched Backbone (`10x192` & `10x128` FP16):** Trained on ~346M Lichess evaluation positions (`ema_09999`), achieving **1.5522** legal-masked cross-entropy (**49.92% Top-1 / 79.41% Top-3 / 96.03% decisive value sign agreement**) on the 50k held-out split (`heldout_400m`), and **95.96%** solve rate at 800 search nodes on 1,979 clean tactical puzzles.
-- **C++23 `fast_tree` Search (`src/neurachess/engine/fast_tree`):** Zero-allocation cache-aligned SoA bitboard node arena with AVX2/BMI2 legal move generation (CPW Perft & 2,000-position differential fuzzer verified), Polyglot legal-EP 64-bit Zobrist canonical transposition neural cache (`64 MB`), safe subtree reuse across moves (with path-dependent draw invalidation), and exact minimax mate-distance propagation.
-- **Sustained NPU Throughput:** **~3,275 effective NPS** (`10x192`, `400 ms/move` with internal pondering enabled) and **~4,810 effective NPS** (`10x128`, Ponder OFF) under OpenVINO `V0_FP16 [LATENCY]` compilation.
-- **Empirical Rigor:** Every architectural choice (Conv73 vs dense policy, CNN vs transformer attention latency on NPU 3720, `B=16` vs `B=32`/`64`, FP16 vs PTQ/QAT W8A8, and Stockfish 19 calibration) is documented with confidence intervals and ablation data in [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
+- **Flagship `v1.1.0` `10x192 Mid-2..7 QAT INT8` (`A2_soup75`) & Deep `12x192` Architecture:** Combines sensitivity-guided middle-block `W8A8` QAT, an `HL-Gauss-64` distributional value head, `MLH` auxiliary training, and a `0.75 * A2 + 0.25 * 346M` trunk/policy weight soup recalibrated on clean `gpu_unpack` boards (`neurachess-10x192-qat-int8`), plus an optional 12-block `300M`-token `12x192` INT8 bundle (`neurachess-12x192-qat-int8`).
+- **Verified Playing-Strength Gain (`+56.5` Elo vs `v1.0.2` Pure FP16 & `+46.25%` at SF `3,500` Nodes):**
+  - `A2_base` (`Mid-2..7 QAT INT8`) beat `v1.0.2 Pure FP16` (`neurachess-10x192-fp16`) by **`+56.5` Elo** across `180` head-to-head games (**`58.06%`**, `77W-55D-48L`, SPRT `ACCEPT_H1` **`LLR = +3.8313`**, `3,890.7` vs `3,253.9` NPS), and `A2_soup75` beat `A2_base` **`54.00%`** (`16W-22D-12L`) over `50` paired games.
+  - Against **Stockfish 19 (`go nodes 3500`, uncapped, `40` games)** at `400 ms/move` with Syzygy, `A2_soup75` jumped from `v1.0.2`'s **`37.50%`** (`9W-12D-19L`) to **`83.75%`** (**`30W-7D-3L`**, Wilson 95% CI `[69.48%, 92.11%]`).
+  - On **Stockfish 19 `UCI_Elo`** (`400 ms/move`, `--ponder`, Syzygy, `openings_320[0:75]`), `A2_soup75` jumped `2800` from `62.00%` to **`74.00%`** (`29W-16D-5L`), cut `3000` losses down to `14` (**`42.00%`**, `6W-30D-14L` at **`4,025.1` eff NPS**), and averaged **`3,987.9` eff NPS** across `150` games (`49.00%`, `38W-71D-41L`).
+- **C++23 `fast_tree` Search (`src/neurachess/engine/fast_tree`):** Zero-allocation cache-aligned SoA bitboard node arena with AVX2/BMI2 legal move generation (CPW Perft & 2,000-position differential fuzzer verified), 5-piece Syzygy tablebase probing, Polyglot legal-EP 64-bit Zobrist canonical transposition neural cache (`64 MB`), safe subtree reuse across moves (with path-dependent draw invalidation), and exact minimax mate-distance propagation.
+- **Empirical Rigor:** Every architectural choice (`Conv73` vs dense policy, CNN vs transformer attention latency on NPU 3720, `B=16` vs `B=32`/`64`, FP16 vs PTQ/QAT W8A8, Phase 4 Job A/B scaling, and Stockfish 19 calibration) is documented with confidence intervals and ablation data in [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
 
 ---
 
@@ -68,21 +71,28 @@ pip install -r requirements.txt
 Model weights are tracked via GitHub Releases (not committed to Git) and verified via SHA-256 checksums:
 
 ```bash
-# Download default 10x192 FP16 OpenVINO IR + folded NumPy weights
+# Download v1.1.0 default 10x192 Mid-2..7 QAT INT8 OpenVINO IR + folded NumPy weights
 python -m neurachess.scripts.download_weights --model 10x192
 
-# Or download both 10x192 and high-speed 10x128
+# Optional: deep 12x192 INT8, v1.0.2 10x192 FP16, compact 10x128 FP16, or all bundles
+python -m neurachess.scripts.download_weights --model 12x192
 python -m neurachess.scripts.download_weights --model all
 ```
 
 | Model Asset | Purpose | Size (Bytes) | SHA-256 |
 | --- | --- | ---: | --- |
-| `neurachess-10x192-fp16.xml` | Default 10x192 OpenVINO FP16 graph | 156,496 | `f70fbd9923c678af0436f2272d4ad962e66b543ee844d620813846c5f7c3b698` |
-| `neurachess-10x192-fp16.bin` | Default 10x192 OpenVINO FP16 weights | 14,006,754 | `1ef15c58aedddbe2562a59373c37c5933a02b9371530f0c725b023b17dc7f02e` |
-| `neurachess-10x192-fp16.npz` | Folded 10x192 weights (`ema_09999`) | 25,912,231 | `52805a44b0670aae020bee26c0bc05e9ee6cb9835b374759ff1cd5f0ddb8f049` |
-| `neurachess-10x128-fp16.xml` | Compact 10x128 OpenVINO FP16 graph | 156,453 | `2075a2dbaf51147d48c68190658a277368388d17766d601196f91a40846d60b5` |
-| `neurachess-10x128-fp16.bin` | Compact 10x128 OpenVINO FP16 weights | 6,394,338 | `a5a5b302b091acb7cc67ff81d03e074ff4d11ec0143942547bd8a30a22119c66` |
-| `neurachess-10x128-fp16.npz` | Folded 10x128 weights (`ema_09999`) | 11,801,621 | `2f993da939572cc02c7962e6b69761706229b2331434d44e887369804cf65137` |
+| `neurachess-10x192-qat-int8.xml` | Default `v1.1.0` 10x192 Mid-`2..7` INT8 IR | 162,064 | `86fce43ef5a89580f548cf56fa79079b055afdf1da8eb0903ff6537874df5bcb` |
+| `neurachess-10x192-qat-int8.bin` | Default `v1.1.0` 10x192 INT8+FP16 weights (`A2_soup75`) | 16,669,672 | `9db3c4d6e1f45a07a4cc0cd6cfc5898edc1c3ffdc8171137a754de0b7f3db260` |
+| `neurachess-10x192-qat-int8.npz` | Folded `A2_soup75` `10x192` + `HL-Gauss-64` weights | 28,762,840 | `99d2689b76cec74927f425d121cddc6a9e2b6360704a721ba0b0f67cc30c5df2` |
+| `neurachess-12x192-qat-int8.xml` | Deep `v1.1.0` 12x192 Mid-`2..9` INT8 IR (`Job B`) | 189,780 | `975589f19b1fb721b4c5eca966eec997c589df2685bbcd3f17e6ac809fc1e52b` |
+| `neurachess-12x192-qat-int8.bin` | Deep `v1.1.0` 12x192 INT8+FP16 weights | 18,150,392 | `eceadf14d505efeb81d94d0bfa99cefbc6aa702ac2b16839993ab07ff0bdf1fb` |
+| `neurachess-12x192-qat-int8.npz` | Folded `Job B` `12x192` + `HL-Gauss-64` weights | 31,626,990 | `149f17785aac782e697e8c5744372765e62c559af2f7d9ec485bff323ef82d3a` |
+| `neurachess-10x192-fp16.xml` | `v1.0.x` 10x192 OpenVINO FP16 graph | 156,496 | `f70fbd9923c678af0436f2272d4ad962e66b543ee844d620813846c5f7c3b698` |
+| `neurachess-10x192-fp16.bin` | `v1.0.x` 10x192 OpenVINO FP16 weights | 14,006,754 | `1ef15c58aedddbe2562a59373c37c5933a02b9371530f0c725b023b17dc7f02e` |
+| `neurachess-10x192-fp16.npz` | Folded `10x192` FP16 weights (`346M ema_09999`) | 25,912,231 | `52805a44b0670aae020bee26c0bc05e9ee6cb9835b374759ff1cd5f0ddb8f049` |
+| `neurachess-10x128-fp16.xml` | Compact `10x128` OpenVINO FP16 graph | 156,453 | `2075a2dbaf51147d48c68190658a277368388d17766d601196f91a40846d60b5` |
+| `neurachess-10x128-fp16.bin` | Compact `10x128` OpenVINO FP16 weights | 6,394,338 | `a5a5b302b091acb7cc67ff81d03e074ff4d11ec0143942547bd8a30a22119c66` |
+| `neurachess-10x128-fp16.npz` | Folded `10x128` FP16 weights (`ema_09999`) | 11,801,621 | `2f993da939572cc02c7962e6b69761706229b2331434d44e887369804cf65137` |
 
 *(If no NPU device is detected at runtime, `NPUModel` automatically falls back to `CPU` execution.)*
 
@@ -137,33 +147,46 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 ---
 
-## Benchmark Summary (`10x192` FP16 Default)
+## Benchmark Summary
 
-### Offline 150k Unified Evaluation & Clean Tactical Puzzles
+### `v1.1.0` Flagship (`A2_soup75` `10x192 Mid-2..7 QAT INT8`) vs `v1.0.2` (`346M 10x192 FP16`)
+
+- **Head-to-Head (`400 ms/move`, static `B=16`, Syzygy):**
+  - `A2_base` (`Mid-2..7 QAT INT8`) beat `v1.0.2 Pure FP16` (`neurachess-10x192-fp16`) by **`+56.5` Elo** across **`180` paired games** (`openings_320[75:165]`): **`58.06%`** (`77W - 55D - 48L`, Wilson 95% CI `[50.75%, 65.02%]`, pentanomial `[2, 6, 49, 27, 6]`, SPRT `(0, 20)` **`ACCEPT_H1` `LLR = +3.8313 > 2.9444`**), NPS **`3,890.7` vs `3,253.9` (`+19.6%`)**.
+  - `A2_soup75` (`neurachess-10x192-qat-int8`, `0.75*A2 + 0.25*346M` trunk+`Conv73` + `HL-Gauss-64` + recalibrated `Mid-2..7` INT8) beat `A2_base` **`54.00%`** (`16W - 22D - 12L`, `50` games, `openings_320[75:100]`, pentanomial `[0, 6, 11, 6, 2]`).
+  - `A2_soup75` Clean `1,979` Lichess Puzzles (`21` contaminated IDs excluded): `0n` (Policy Top-1): **`68.72%`** (`1,360`), `50n`: **`78.27%`** (`1,549`, `3,064.2` NPS), `200n`: **`83.07%`** (`1,644`, `3,133.5` NPS), `800n`: **`95.65%`** (`1,893`, `3,387.1` NPS; `2100+`: `86.55%`).
+
+### Stockfish 19 Calibration (`400 ms/move`, `Ponder=True`, `fast_tree`)
+
+| Engine / Opponent Configuration | Opening Slice | Games | Score (W-D-L) | Score % | 95% Wilson CI | Eff NPS |
+| --- | --- | ---: | --- | ---: | --- | ---: |
+| **`v1.1.0` (`A2_soup75`)** vs Stockfish 19 `UCI_Elo 2800` | `openings_320[0:25]` | 50 | `29W - 16D - 5L` | **74.00%** | `[60.45%, 84.13%]` | 3,898.9 |
+| **`v1.1.0` (`A2_soup75`)** vs Stockfish 19 `UCI_Elo 3000` | `openings_320[25:50]` | 50 | `6W - 30D - 14L` | **42.00%** | `[29.37%, 55.77%]` | **4,025.1** |
+| **`v1.1.0` (`A2_soup75`)** vs Stockfish 19 `UCI_Elo 3190` | `openings_320[50:75]` | 50 | `3W - 25D - 22L` | **31.00%** | `[19.93%, 44.78%]` | **4,039.6** |
+| **`v1.1.0` Cumulative (`UCI_Elo` 2800–3190)** | `openings_320[0:75]` | **150** | **`38W - 71D - 41L`** | **49.00%** | — | **3,987.9** |
+| **`v1.1.0` (`A2_soup75`)** vs Stockfish 19 **Fixed `3,500` nodes** | `openings_320[165:185]` | **40** | **`30W - 7D - 3L`** | **83.75%** | `[69.48%, 92.11%]` | 3,771.0 |
+| `v1.0.0` (`346M FP16`) vs Stockfish 19 `UCI_Elo 2800` | `OPENINGS_50` | 50 | `20W - 22D - 8L` | 62.00% | `[48.15%, 74.14%]` | 3,247.7 |
+| `v1.0.0` (`346M FP16`) vs Stockfish 19 `UCI_Elo 3000` | `OPENINGS_50` | 50 | `16W - 17D - 17L` | 49.00% | `[35.72%, 62.42%]` | 3,276.4 |
+| `v1.0.0` (`346M FP16`) vs Stockfish 19 `UCI_Elo 3190` | `OPENINGS_50` | 50 | `8W - 23D - 19L` | 39.00% | `[26.73%, 52.84%]` | 3,301.0 |
+| `v1.0.0` Cumulative (`UCI_Elo` 2800–3190) | `OPENINGS_50` | 150 | `44W - 62D - 44L` | 50.00% | `[42.10%, 57.90%]` | 3,275.0 |
+| `v1.0.0` (`346M FP16`) vs Stockfish 19 Fixed `1,000` nodes | `OPENINGS_50` | 40 | `23W - 15D - 2L` | 76.25% | `[61.14%, 86.75%]` | 3,217.7 |
+| `v1.0.0` (`346M FP16`) vs Stockfish 19 Fixed `3,500` nodes | `OPENINGS_50` | 40 | `9W - 12D - 19L` | 37.50% | `[24.22%, 52.97%]` | 3,264.6 |
+| `v1.0.0` (`346M FP16`) vs Stockfish 19 Fixed `10,000` nodes | `OPENINGS_50` | 40 | `1W - 12D - 27L` | 17.50% | `[8.75%, 31.95%]` | 3,260.2 |
+| `v1.0.0` (`346M FP16`) vs Stockfish 19 Fixed `100,000` nodes | `OPENINGS_50` | 40 | `0W - 6D - 34L` | 7.50% | `[2.58%, 19.86%]` | 3,215.6 |
+
+### Offline 150k Unified Evaluation & Clean Tactical Puzzles (`10x192` & `10x128` History)
 
 | Model | Params | `far_test` CE (Top-1) | `in_region_v2` CE (Top-1) | `heldout_400m` CE (Top-1) | Held-Out Val MSE (Sign%) | Puzzles 1n / 50n / 200n / 800n (n=1,979) |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `1M Pilot (6x128)` | 11.55M | 2.2476 (33.15%) | — | — | — | 43.15% / 56.44% / 68.22% / 82.16% |
 | `S5a (6x128, 70M)` | 1.99M | 1.7971 (45.47%) | 1.8337 (43.78%) | — | — | 57.10% / 70.54% / 78.73% / 91.81% |
 | `Cont 346M (10x128)` | 3.20M | 1.6163 (49.72%) | 1.6466 (48.48%) | 1.6057 (48.29%) | 0.0457 (95.49%) | 67.61% / 77.36% / 82.82% / 94.34%* |
-| **`Full 346M (10x192)`** | **7.01M** | **1.5655 (51.43%)** | **1.5887 (50.16%)** | **1.5522 (49.92%)** | **0.0402 (96.03%)** | **71.45% / 79.38% / 84.03% / 95.96%** |
+| `Full 346M (10x192 FP16)` | 7.01M | 1.5655 (51.43%) | 1.5887 (50.16%) | 1.5522 (49.92%) | 0.0402 (96.03%) | 71.45% / 79.38% / 84.03% / 95.96% |
+| **`v1.1.0` (`A2_soup75` QAT INT8)** | **7.15M** | **1.4911** (50.78%, 5k) | — | — | **95.12% dec. sign** (5k) | **68.72% / 78.27% / 83.07% / 95.65%** |
 
-*(All dataset splits contain 50,000 positions except `test_in_region_v2` with 49,998. Cross-entropy masks illegal move logits to `-10000.0`. In the puzzle column, `1n` denotes raw policy top-1 accuracy without tree search. `Cont 346M (10x128)` `50n`/`200n` reflect sequential production defaults `use_async_overlap=False, nireq=1, fpu_reduction=0.20`; `*` `800n` (`94.34%`) is from the archived `nireq=2` run, see [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md). Notice the equal-time `400 ms/move` match without pondering over `n=100` paired games scored **54.50%** (`38W-33D-29L`, 95% Wilson CI `[44.75%, 63.91%]`) for `10x192` vs `10x128` (`3,290` vs `4,810` eff NPS); because the CI spans `50.0%`, that match does **not** establish a statistically significant playing-strength advantage over `10x128`, and `10x192` is selected on consistent offline CE improvements (`-0.0508 / -0.0579 / -0.0535` across splits, mean `-0.0541` CE) and clean puzzle solve rate (`95.96%` vs `94.34%*` at `800n`).)*
+*(All `v1.1.0` Stockfish 19 matches ran at `400 ms/move`, static `B=16`, `--ponder`, `--fpu-reduction 0.20`, `--max-plies 150 --adjudicate-material`, and 5-piece Syzygy tablebases on `openings_320`; note archived [`phase4_sf3000_openings320_apples_50g.json`](eval_results/phase4_sf3000_openings320_apples_50g.json) scoring `33.0%` was `Hybrid_Mid27 PTQ (no QAT)`, not `v1.0.2 Pure FP16`. All dataset splits contain 50,000 positions except `test_in_region_v2` with 49,998 and the 5,000-position `test_far_50k` NPU INT8 eval. Cross-entropy masks illegal move logits to `-10000.0`.)*
 
-### Stockfish 19 Calibration (`400 ms/move`, `Ponder=True`, `fast_tree`)
-
-| Opponent Configuration | Games | Score (W-D-L) | Score % | 95% Wilson CI | Eff NPS |
-| --- | ---: | --- | ---: | --- | ---: |
-| Stockfish 19 `UCI_Elo 2800` | 50 | `20W - 22D - 8L` | **62.00%** | `[48.15%, 74.14%]` | 3,247.7 |
-| Stockfish 19 `UCI_Elo 3000` | 50 | `16W - 17D - 17L` | **49.00%** | `[35.72%, 62.42%]` | 3,276.4 |
-| Stockfish 19 `UCI_Elo 3190` | 50 | `8W - 23D - 19L` | **39.00%** | `[26.73%, 52.84%]` | 3,301.0 |
-| **Cumulative (`UCI_Elo` 2800–3190)** | **150** | **`44W - 62D - 44L`** | **50.00%** | **`[42.10%, 57.90%]`** | **3,275.0** |
-| Stockfish 19 Fixed `1,000` nodes (uncapped) | 40 | `23W - 15D - 2L` | **76.25%** | `[61.14%, 86.75%]` | 3,217.7 |
-| Stockfish 19 Fixed `3,500` nodes (uncapped) | 40 | `9W - 12D - 19L` | **37.50%** | `[24.22%, 52.97%]` | 3,264.6 |
-| Stockfish 19 Fixed `10,000` nodes (uncapped) | 40 | `1W - 12D - 27L` | **17.50%** | `[8.75%, 31.95%]` | 3,260.2 |
-| Stockfish 19 Fixed `100,000` nodes (uncapped) | 40 | `0W - 6D - 34L` | **7.50%** | `[2.58%, 19.86%]` | 3,215.6 |
-
-**Scope & Caveat:** Stockfish `UCI_Elo` reflects Stockfish's internal calibrated node/time limiter rather than human tournament ratings or external CCRL pools, and individual 50-game rungs carry wide 95% Wilson intervals (`~±95 Elo` binomial half-width, ~190 Elo CI width at `n=50`). Under fixed-node uncapped Stockfish 19 (`Threads=1, Hash=16`), 400 ms NeuraChess sits between the 1,000-node and 3,500-node Stockfish strength bands (~1,300 effective NPU tree visits per move). All Stockfish 19 matches above reflect the `v1.0.0` baseline without an opening book (`OwnBook=False`) under fixed `400 ms/move` (`movetime`, without `v1.0.2` cold-start `wtime`/`btime` buffering).
+**Scope & Caveat:** Stockfish `UCI_Elo` reflects Stockfish's internal calibrated node/time limiter rather than human tournament ratings or external CCRL pools, and individual 50-game rungs carry wide 95% Wilson intervals (`~±95 Elo` binomial half-width, ~190 Elo CI width at `n=50`). All `v1.0.0` Stockfish 19 matches above reflect `OwnBook=False` under fixed `400 ms/move` without Syzygy or `v1.0.2` cold-start `wtime`/`btime` buffering.
 
 ---
 
