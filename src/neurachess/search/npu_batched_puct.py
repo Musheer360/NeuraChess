@@ -1026,6 +1026,7 @@ class NPUBatchedPUCTSearch:
                 board.pop()
                 act = uci_to_action(m.uci(), canonical_flip=is_black)
                 self.last_root_visits = {act: 1}
+                self.last_profile = {"mate_moves": 1, "total_s": time.perf_counter() - t_start}
                 return act, m.uci(), 1.0, len(root_legals), [m.uci()], 1
             board.pop()
 
@@ -1456,6 +1457,14 @@ class NPUBatchedPUCTSearch:
 
         best_child = root.children[best_act]
         best_eval = -best_child.q_value  # From root view
+        mate_moves = None
+        if self.use_exact_solver and best_child.is_solved:
+            if best_child.solved_value <= -1.0:
+                mate_moves = (int(best_child.mate_plies) // 2) + 1
+            elif best_child.solved_value >= 1.0:
+                mate_moves = -((int(best_child.mate_plies) + 1) // 2)
+        prof["mate_moves"] = mate_moves
+        self.last_profile = prof
         if best_child.move_from_parent is not None:
             best_uci = best_child.move_from_parent.uci()
         else:

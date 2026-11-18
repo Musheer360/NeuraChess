@@ -8,8 +8,11 @@ Supports pondering (`Ponder`, `bestmove X ponder Y`, `go ponder`, `ponderhit`, `
 
 import json
 import logging
+import math
 import random
 import sys
+import threading
+import time
 from pathlib import Path
 
 from neurachess._paths import find_repo_root
@@ -21,10 +24,15 @@ DEFAULT_OPENING_BOOK_PATH = ROOT_DIR / "assets" / "opening_book.json"
 import chess
 
 from neurachess.core.board_tensor import board_to_tensor
-from neurachess.core.constants import value_to_centipawns
 from neurachess.models.npu_compiler import DEFAULT_CACHE_DIR, NPUModel, resolve_default_model_paths
 from neurachess.search.npu_batched_puct import NPUBatchedPUCTSearch
 from neurachess.search.ponder_manager import PonderManager
+
+
+def value_to_lichess_cp(v: float) -> int:
+    """Convert side-to-move value v in [-1, 1] to centipawns via 400*log10((1+v)/(1-v))."""
+    v_clamped = max(-0.9999, min(0.9999, float(v)))
+    return int(round(400.0 * math.log10((1.0 + v_clamped) / (1.0 - v_clamped))))
 
 
 class UCIEngine:
@@ -34,18 +42,36 @@ class UCIEngine:
         own_book: bool = True,
         book_path: Path | str | None = None,
         book_seed: int | None = None,
+        use_ponder: bool = True,
+        syzygy_path: str = "auto",
+        move_overhead_ms: int = 150,
+        threads: int = 1,
+        batch_size: int = 16,
+        hash_mb: int = 64,
     ):
         self.board = chess.Board()
         self.history: list[chess.Board] = []
         self.encoder_layout = encoder_layout
-        self.use_ponder = False
+        self.use_ponder = bool(use_ponder)
         self.own_book = bool(own_book)
+        self.syzygy_path = str(syzygy_path)
+        self.move_overhead_ms = max(0, min(2000, int(move_overhead_ms)))
+        self.threads = max(1, min(16, int(threads)))
+        self.batch_size = max(1, min(32, int(batch_size)))
+        self.hash_mb = max(1, min(1024, int(hash_mb)))
         self.book_path = Path(book_path) if book_path is not None else DEFAULT_OPENING_BOOK_PATH
         self._book_rng = random.Random(book_seed)
         self._opening_book: dict[str, list] | None = None
         self.search_engine: NPUBatchedPUCTSearch | None = None
         self.ponder_manager: PonderManager | None = None
         self._pending_ponder_telemetry: dict | None = None
+        self._stdout_lock = threading.Lock()
+
+    def _emit_lines(self, lines: list[str]) -> None:
+        with self._stdout_lock:
+            for ln in lines:
+                print(ln)
+            sys.stdout.flush()
 
     def _load_opening_book(self) -> dict[str, list]:
         if self._opening_book is not None:
@@ -113,7 +139,7 @@ class UCIEngine:
                     verbose=False,
                 )
                 batch_m = NPUModel(
-                    batch_size=16,
+                    batch_size=self.batch_size,
                     cache_dir=DEFAULT_CACHE_DIR,
                     device="NPU",
                     use_turbo=True,
@@ -123,12 +149,12 @@ class UCIEngine:
                 )
             else:
                 root_m = NPUModel(batch_size=1, verbose=False)
-                batch_m = NPUModel(batch_size=16, verbose=False)
+                batch_m = NPUModel(batch_size=self.batch_size, verbose=False)
 
             self.search_engine = NPUBatchedPUCTSearch(
                 root_model=root_m,
                 batch_model=batch_m,
-                batch_size=16,
+                batch_size=self.batch_size,
                 c_puct=1.5,
                 use_fpu_reduction=True,
                 fpu_reduction=0.20,
@@ -137,27 +163,122 @@ class UCIEngine:
                 use_exact_solver=True,
                 use_tree_reuse=True,
                 use_nn_cache=True,
+                nn_cache_max_bytes=self.hash_mb * 1024 * 1024,
                 use_fast_tree=True,
                 use_ponder=self.use_ponder,
                 encoder_layout=self.encoder_layout,
-                syzygy_path="auto",
+                syzygy_path=self.syzygy_path,
             )
             self.ponder_manager = PonderManager(self.search_engine, use_ponder=self.use_ponder)
 
-    def _on_uci_ponder_finished(self, best_uci: str, ponder_uci: str | None, nodes: int, score: float):
-        cp_score = value_to_centipawns(score)
-        print(f"info score cp {cp_score} nodes {nodes}")
-        if ponder_uci:
-            print(f"bestmove {best_uci} ponder {ponder_uci}")
+    @staticmethod
+    def _format_info_line(
+        depth: int,
+        seldepth: int,
+        score: float,
+        nodes: int,
+        elapsed_ms: int,
+        pv: list[str] | None,
+        fallback_uci: str,
+        mate_moves: int | None = None,
+    ) -> str:
+        nodes_i = max(0, int(nodes))
+        dt_ms = max(1, int(elapsed_ms))
+        nps = int(round(nodes_i * 1000.0 / dt_ms))
+        d_i = max(1, int(depth)) if fallback_uci != "0000" else 0
+        sd_i = max(d_i, int(seldepth)) if fallback_uci != "0000" else 0
+        if mate_moves is not None and int(mate_moves) != 0:
+            score_tok = f"mate {int(mate_moves)}"
         else:
-            print(f"bestmove {best_uci}")
-        sys.stdout.flush()
+            score_tok = f"cp {value_to_lichess_cp(score)}"
+        pv_str = " ".join(pv) if pv else fallback_uci
+        return f"info depth {d_i} seldepth {sd_i} score {score_tok} nodes {nodes_i} nps {nps} time {dt_ms} pv {pv_str}"
+
+    def _on_uci_ponder_finished(self, best_uci: str, ponder_uci: str | None, nodes: int, score: float):
+        meta = getattr(self.ponder_manager, "last_uci_meta", {}) if self.ponder_manager else {}
+        info_line = self._format_info_line(
+            depth=int(meta.get("depth", 1)),
+            seldepth=int(meta.get("seldepth", 1)),
+            score=score,
+            nodes=int(meta.get("ponder_nodes", nodes)),
+            elapsed_ms=int(meta.get("elapsed_ms", 1)),
+            pv=meta.get("pv"),
+            fallback_uci=best_uci,
+            mate_moves=meta.get("mate_moves"),
+        )
+        bm_line = f"bestmove {best_uci} ponder {ponder_uci}" if (ponder_uci and best_uci != "0000") else f"bestmove {best_uci}"
+        self._emit_lines([info_line, bm_line])
+
+    @staticmethod
+    def _parse_setoption(line: str) -> tuple[str, str]:
+        lower = line.lower()
+        name_idx = lower.find(" name ")
+        if name_idx == -1:
+            return "", ""
+        rest = line[name_idx + 6 :]
+        val_idx = rest.lower().find(" value ")
+        if val_idx == -1:
+            return rest.strip(), ""
+        return rest[:val_idx].strip(), rest[val_idx + 7 :].strip()
+
+    def _apply_setoption(self, line: str) -> None:
+        name, val = self._parse_setoption(line)
+        key = name.lower()
+        if not key:
+            return
+        if key == "ponder":
+            self.use_ponder = val.lower() == "true"
+            if self.ponder_manager:
+                self.ponder_manager.use_ponder = self.use_ponder
+            if self.search_engine:
+                self.search_engine.set_ponder_mode(self.use_ponder)
+        elif key == "ownbook":
+            self.own_book = val.lower() == "true"
+        elif key == "syzygypath":
+            self.syzygy_path = val if val else "auto"
+            if self.search_engine:
+                self.search_engine.reconfigure(syzygy_path=self.syzygy_path)
+        elif key == "move overhead":
+            try:
+                self.move_overhead_ms = max(0, min(2000, int(val)))
+            except ValueError:
+                pass
+        elif key == "threads":
+            try:
+                self.threads = max(1, min(16, int(val)))
+            except ValueError:
+                pass
+        elif key == "batchsize":
+            try:
+                new_bs = max(1, min(32, int(val)))
+            except ValueError:
+                return
+            if new_bs != self.batch_size:
+                self.batch_size = new_bs
+                if self.ponder_manager:
+                    self.ponder_manager.stop(emit_on_stop=False)
+                self.search_engine = None
+                self.ponder_manager = None
+        elif key == "hash":
+            try:
+                self.hash_mb = max(1, min(1024, int(val)))
+            except ValueError:
+                return
+            if self.search_engine is not None and hasattr(self.search_engine, "nn_cache"):
+                self.search_engine.nn_cache.max_bytes = self.hash_mb * 1024 * 1024
+        elif key == "encoderlayout":
+            if val in ("gpu_unpack", "legacy_flip"):
+                self.encoder_layout = val
+                if self.search_engine:
+                    self.search_engine.encoder_layout = val
 
     def run(self):
         while True:
             try:
                 line = sys.stdin.readline()
                 if not line:
+                    if self.ponder_manager:
+                        self.ponder_manager.stop(emit_on_stop=False)
                     break
                 line = line.strip()
                 if not line:
@@ -167,41 +288,32 @@ class UCIEngine:
                 cmd = tokens[0]
 
                 if cmd == "uci":
-                    print("id name NeuraChess 1.0 (OpenVINO NPU)")
-                    print("id author Musheer Alam")
-                    print("option name Hash type spin default 64 min 1 max 1024")
-                    print("option name Ponder type check default false")
-                    print("option name OwnBook type check default true")
-                    print("option name EncoderLayout type combo default gpu_unpack var gpu_unpack var legacy_flip")
-                    print("uciok")
-                    sys.stdout.flush()
+                    self._emit_lines(
+                        [
+                            "id name NeuraChess 1.1.0 (OpenVINO Intel NPU)",
+                            "id author Musheer Alam",
+                            "option name Hash type spin default 64 min 1 max 1024",
+                            "option name Ponder type check default true",
+                            "option name OwnBook type check default true",
+                            "option name SyzygyPath type string default auto",
+                            "option name Move Overhead type spin default 150 min 0 max 2000",
+                            "option name Threads type spin default 1 min 1 max 16",
+                            "option name BatchSize type spin default 16 min 1 max 32",
+                            "option name EncoderLayout type combo default gpu_unpack var gpu_unpack var legacy_flip",
+                            "uciok",
+                        ]
+                    )
 
                 elif cmd == "setoption":
-                    if "Ponder" in line:
-                        val = tokens[-1].strip().lower()
-                        self.use_ponder = (val == "true")
-                        if self.ponder_manager:
-                            self.ponder_manager.use_ponder = self.use_ponder
-                        if self.search_engine:
-                            self.search_engine.set_ponder_mode(self.use_ponder)
-                    elif "OwnBook" in line:
-                        val = tokens[-1].strip().lower()
-                        self.own_book = (val == "true")
-                    elif "EncoderLayout" in line:
-                        layout_val = tokens[-1].strip()
-                        if layout_val in ("gpu_unpack", "legacy_flip"):
-                            self.encoder_layout = layout_val
-                            if self.search_engine:
-                                self.search_engine.encoder_layout = layout_val
+                    self._apply_setoption(line)
 
                 elif cmd == "isready":
                     self.ensure_engine()
-                    print("readyok")
-                    sys.stdout.flush()
+                    self._emit_lines(["readyok"])
 
                 elif cmd == "ucinewgame":
                     if self.ponder_manager:
-                        self.ponder_manager.stop()
+                        self.ponder_manager.stop(emit_on_stop=False)
                     if self.search_engine:
                         self.search_engine.clear_state()
                     self._pending_ponder_telemetry = None
@@ -220,17 +332,18 @@ class UCIEngine:
 
                 elif cmd == "stop":
                     if self.ponder_manager:
-                        self.ponder_manager.stop()
+                        self.ponder_manager.stop(emit_on_stop=True)
 
                 elif cmd == "quit":
                     if self.ponder_manager:
-                        self.ponder_manager.stop()
+                        self.ponder_manager.stop(emit_on_stop=False)
                     break
 
             except Exception as e:
                 logger.debug("UCI command handling exception", exc_info=True)
                 print(f"info string error: {e}", file=sys.stderr, flush=True)
-                sys.stdout.flush()
+                with self._stdout_lock:
+                    sys.stdout.flush()
 
     def handle_position(self, args: list[str]):
         if not args:
@@ -264,7 +377,7 @@ class UCIEngine:
             self._pending_ponder_telemetry = self.ponder_manager.on_opponent_move(last_move)
         else:
             if self.ponder_manager:
-                self.ponder_manager.stop()
+                self.ponder_manager.stop(emit_on_stop=False)
             self._pending_ponder_telemetry = None
 
     @staticmethod
@@ -316,9 +429,12 @@ class UCIEngine:
                 time_for_move *= 0.75
             elif retained_visits < 100:
                 time_for_move = min(time_for_move * 1.30, safety_ceiling)
-            if remaining <= 30:
+            overhead = max(0, int(self.move_overhead_ms))
+            if remaining <= 25:
                 return max(1, min(int(round(time_for_move)), remaining))
-            return max(10, min(int(round(time_for_move)), remaining - 20))
+            adjusted = time_for_move - overhead
+            max_safe = max(25, remaining - overhead)
+            return max(25, min(int(round(adjusted)), max_safe))
 
         return 600
 
@@ -327,18 +443,20 @@ class UCIEngine:
             book_uci, book_ponder = self.lookup_book_move(self.board)
             if book_uci is not None:
                 self.compute_move_time_ms(args, consume_ponder=True)
-                print("info string book move")
-                if book_ponder:
-                    print(f"bestmove {book_uci} ponder {book_ponder}")
-                else:
-                    print(f"bestmove {book_uci}")
-                sys.stdout.flush()
-                if self.use_ponder:
-                    self.ensure_engine()
+                bm_line = f"bestmove {book_uci} ponder {book_ponder}" if book_ponder else f"bestmove {book_uci}"
+                self._emit_lines(
+                    [
+                        f"info depth 1 seldepth 1 score cp 0 nodes 0 nps 0 time 1 pv {book_uci}",
+                        "info string book move",
+                        bm_line,
+                    ]
+                )
+                if self.use_ponder and self.ponder_manager is not None:
                     board_after = self.board.copy()
                     board_after.push_uci(book_uci)
-                    expected = chess.Move.from_uci(book_ponder) if book_ponder else None
-                    self.ponder_manager.start_internal_ponder(board_after, expected_reply=expected)
+                    if not board_after.is_game_over():
+                        expected = chess.Move.from_uci(book_ponder) if book_ponder else None
+                        self.ponder_manager.start_internal_ponder(board_after, expected_reply=expected)
                 return
 
         self.ensure_engine()
@@ -353,28 +471,43 @@ class UCIEngine:
             )
             return
 
+        t0 = time.perf_counter()
         tensor = board_to_tensor(self.board, layout=self.encoder_layout)
         _, best_uci, score, nodes, pv, depth = self.search_engine.search(
             self.board, tensor, movetime_ms=movetime_ms
         )
+        elapsed_ms = max(1, int(round((time.perf_counter() - t0) * 1000.0)))
 
-        cp_score = value_to_centipawns(score)
-        pv_str = " ".join(pv) if pv else best_uci
-
-        print(f"info depth {depth} score cp {cp_score} nodes {nodes} pv {pv_str}")
-
-        ponder_uci = pv[1] if (pv and len(pv) >= 2) else None
-        if ponder_uci:
-            print(f"bestmove {best_uci} ponder {ponder_uci}")
+        prof = getattr(self.search_engine, "last_profile", {}) or {}
+        if best_uci != "0000":
+            seldepth = max(1, int(depth or 1), int(prof.get("max_leaf_ply", 0) or 0))
+            d_avg = int(round(float(prof.get("avg_leaf_ply", 0) or 0)))
+            info_depth = max(1, min(seldepth, d_avg if d_avg > 0 else int(depth or 1)))
         else:
-            print(f"bestmove {best_uci}")
-        sys.stdout.flush()
+            seldepth = 0
+            info_depth = 0
 
-        if self.use_ponder and best_uci != "0000":
+        info_line = self._format_info_line(
+            depth=info_depth,
+            seldepth=seldepth,
+            score=score,
+            nodes=nodes,
+            elapsed_ms=elapsed_ms,
+            pv=pv,
+            fallback_uci=best_uci,
+            mate_moves=prof.get("mate_moves"),
+        )
+
+        ponder_uci = pv[1] if (best_uci != "0000" and pv and len(pv) >= 2) else None
+        bm_line = f"bestmove {best_uci} ponder {ponder_uci}" if ponder_uci else f"bestmove {best_uci}"
+        self._emit_lines([info_line, bm_line])
+
+        if self.use_ponder and best_uci != "0000" and self.ponder_manager is not None:
             board_after = self.board.copy()
             board_after.push_uci(best_uci)
-            expected = chess.Move.from_uci(ponder_uci) if ponder_uci else None
-            self.ponder_manager.start_internal_ponder(board_after, expected_reply=expected)
+            if not board_after.is_game_over():
+                expected = chess.Move.from_uci(ponder_uci) if ponder_uci else None
+                self.ponder_manager.start_internal_ponder(board_after, expected_reply=expected)
 
 
 def main():

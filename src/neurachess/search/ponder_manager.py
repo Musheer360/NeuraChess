@@ -42,11 +42,13 @@ class PonderManager:
             search_engine.set_ponder_mode(bool(use_ponder))
 
         self._lock = threading.Lock()
+        self._emit_lock = threading.Lock()
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._ponderhit_event = threading.Event()
         self._is_pondering = False
         self._is_active_search = False
+        self._emit_on_stop = True
 
         self._ponder_board: chess.Board | None = None
         self._expected_move: chess.Move | None = None
@@ -54,6 +56,7 @@ class PonderManager:
         self._ponder_nodes = 0
         self._last_result: tuple | None = None
         self._uci_output_callback = None
+        self.last_uci_meta: dict = {}
 
         self.last_telemetry: dict = {
             "ponder_duration_ms": 0.0,
@@ -97,17 +100,19 @@ class PonderManager:
         uci_callback=None
     ):
         """Handles standard UCI 'go ponder' command."""
-        self.stop()
+        self.stop(emit_on_stop=False)
 
         with self._lock:
             self._stop_event.clear()
             self._ponderhit_event.clear()
             self._is_pondering = True
             self._is_active_search = False
+            self._emit_on_stop = True
             self._ponder_board = board.copy()
             self._ponder_start_time = time.perf_counter()
             self._ponder_nodes = 0
             self._uci_output_callback = uci_callback
+            self.last_uci_meta = {}
 
             self._worker_thread = threading.Thread(
                 target=self._ponder_worker_loop,
@@ -126,16 +131,18 @@ class PonderManager:
             self._is_active_search = True
             self._ponderhit_event.set()
 
-    def stop(self) -> float:
+    def stop(self, emit_on_stop: bool = True) -> float:
         """
         Signals stop and awaits completion of the in-flight batch.
         Returns the stop latency in milliseconds.
         """
         t0 = time.perf_counter()
+        self._emit_on_stop = bool(emit_on_stop)
         self._stop_event.set()
 
-        if self._worker_thread is not None and self._worker_thread.is_alive():
-            self._worker_thread.join(timeout=5.0)
+        worker = self._worker_thread
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=5.0)
 
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -153,7 +160,7 @@ class PonderManager:
         Returns P2 telemetry.
         """
         duration_ms = (time.perf_counter() - self._ponder_start_time) * 1000.0 if self._ponder_start_time > 0 else 0.0
-        self.stop()
+        self.stop(emit_on_stop=False)
 
         ponder_hit = False
         ponder_top3 = False
@@ -207,6 +214,38 @@ class PonderManager:
         }
         return self.last_telemetry
 
+    def _emit_uci_result_once(
+        self,
+        board: chess.Board,
+        best_uci: str | None,
+        ponder_uci: str | None,
+        nodes: int,
+        best_eval: float,
+        meta: dict,
+    ) -> None:
+        with self._emit_lock:
+            cb = self._uci_output_callback
+            should_emit = cb is not None and (
+                self._ponderhit_event.is_set() or (self._stop_event.is_set() and self._emit_on_stop)
+            )
+            if not should_emit:
+                return
+            self._uci_output_callback = None
+            out_best = best_uci
+            if not out_best:
+                legals = list(board.legal_moves)
+                out_best = legals[0].uci() if legals else "0000"
+            elapsed_ms = max(1, int(round((time.perf_counter() - self._ponder_start_time) * 1000.0)))
+            self.last_uci_meta = {
+                "pv": meta.get("pv") or ([out_best] if out_best != "0000" else []),
+                "depth": int(meta.get("depth") or 1),
+                "seldepth": int(meta.get("seldepth") or meta.get("depth") or 1),
+                "mate_moves": meta.get("mate_moves"),
+                "elapsed_ms": elapsed_ms,
+                "ponder_nodes": int(meta.get("ponder_nodes", nodes)),
+            }
+            cb(out_best, ponder_uci, int(nodes), float(best_eval))
+
     def _ponder_worker_loop(self, board: chess.Board, default_movetime_ms: int | None, max_nodes: int = 0):
         """Worker thread executing batched PUCT search while checking stop/ponderhit events."""
         fb = getattr(self.search_engine, "_fast_backend", None)
@@ -221,13 +260,14 @@ class PonderManager:
                 max_depth=14,
             )
             self._ponder_nodes = int(res["ponder_nodes"])
-            if self._ponderhit_event.is_set() and self._uci_output_callback is not None and res["best_uci"] is not None:
-                self._uci_output_callback(
-                    res["best_uci"],
-                    res["ponder_uci"],
-                    int(res["root_visits"]),
-                    float(res["best_eval"]),
-                )
+            self._emit_uci_result_once(
+                board,
+                res.get("best_uci"),
+                res.get("ponder_uci"),
+                int(res.get("root_visits") or max(1, self._ponder_nodes)),
+                float(res.get("best_eval", 0.0)),
+                res,
+            )
             return
 
         tensor = board_to_tensor(board, layout=self.search_engine.encoder_layout)
@@ -246,6 +286,10 @@ class PonderManager:
 
         root_legals = list(board.legal_moves)
         if len(root_legals) == 0:
+            if default_movetime_ms is not None:
+                while not self._stop_event.is_set() and not self._ponderhit_event.is_set():
+                    self._stop_event.wait(0.01)
+                self._emit_uci_result_once(board, None, None, 0, 0.0, {})
             return
 
         # Ensure root expanded
@@ -300,18 +344,40 @@ class PonderManager:
         clear_vl(root)
         self.search_engine._saved_root = root
 
-        # If ponderhit triggered and search completed, output bestmove via callback
-        if self._ponderhit_event.is_set() and self._uci_output_callback is not None:
-            # Extract PV
+        if default_movetime_ms is not None and not self._stop_event.is_set() and not self._ponderhit_event.is_set():
+            while not self._stop_event.is_set() and not self._ponderhit_event.is_set():
+                self._stop_event.wait(0.01)
+
+        # If ponderhit or external stop triggered, emit bestmove cleanly via callback
+        if self._uci_output_callback is not None and root.children:
             best_act = max(root.children.keys(), key=lambda a: root.children[a].visits)
             best_child = root.children[best_act]
-            best_uci = best_child.move_from_parent.uci() if best_child.move_from_parent else action_to_uci(best_act, canonical_flip=is_black)
-            
-            # Predict opponent's reply (ponder move)
+            best_uci = (
+                best_child.move_from_parent.uci()
+                if best_child.move_from_parent
+                else action_to_uci(best_act, canonical_flip=is_black)
+            )
+            pv = [best_uci]
             ponder_uci = None
             if best_child.is_expanded and len(best_child.children) > 0:
                 p_act = max(best_child.children.keys(), key=lambda a: best_child.children[a].visits)
                 p_child = best_child.children[p_act]
                 ponder_uci = p_child.move_from_parent.uci() if p_child.move_from_parent else None
+                if ponder_uci:
+                    pv.append(ponder_uci)
 
-            self._uci_output_callback(best_uci, ponder_uci, root.visits, -best_child.q_value)
+            mate_moves = None
+            if getattr(self.search_engine, "use_exact_solver", True) and best_child.is_solved:
+                if best_child.solved_value <= -1.0:
+                    mate_moves = (int(best_child.mate_plies) // 2) + 1
+                elif best_child.solved_value >= 1.0:
+                    mate_moves = -((int(best_child.mate_plies) + 1) // 2)
+
+            self._emit_uci_result_once(
+                board,
+                best_uci,
+                ponder_uci,
+                root.visits,
+                -best_child.q_value,
+                {"pv": pv, "depth": 1, "seldepth": 1, "mate_moves": mate_moves, "ponder_nodes": self._ponder_nodes},
+            )

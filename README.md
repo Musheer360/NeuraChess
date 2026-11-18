@@ -98,12 +98,14 @@ python -m neurachess.scripts.download_weights --model all
 
 ### 3. Play or Connect via UCI
 
-- **UCI Protocol (Arena, Cutechess, BanksiaGUI):**
+- **UCI Protocol (`lichess-bot`, `python-chess`, Arena, Cutechess, BanksiaGUI):**
   ```bash
   neurachess-uci
   # or: python -m neurachess.uci
+  # or Windows unbuffered UCI wrapper (recommended for lichess-bot with concurrency=1):
+  scripts\run_neurachess_uci.bat
   ```
-  Supported UCI options: `Hash` (default `64` MB), `Ponder` (`false`/`true`), `EncoderLayout` (`gpu_unpack`/`legacy_flip`), `OwnBook` (`true`/`false`, default `true`). `OwnBook` uses [`assets/opening_book.json`](assets/opening_book.json) (`1,877` EPDs built cleanly via `python -m neurachess.scripts.build_opening_book` from **CC0-1.0** [`lichess-org/chess-openings`](https://github.com/lichess-org/chess-openings), `a.tsv`–`e.tsv`), and dynamic `wtime`/`btime` search applies a `1.30x` cold-start buffer when `retained_visits < 100`.
+  Supported UCI options: `Hash` (default `64` MB), `Ponder` (`true`/`false`, default `true`), `OwnBook` (`true`/`false`, default `true`), `SyzygyPath` (`auto` or tablebase directory path), `Move Overhead` (default `150` ms, min `0`, max `2000`; clock allocation subtracts `Move Overhead` with a `25` ms floor), `Threads` (default `1`, `1..16`), `BatchSize` (default `16`, `1..32`), and `EncoderLayout` (`gpu_unpack`/`legacy_flip`). Emits full `info depth ... seldepth ... score cp|mate ... nodes ... nps ... time ... pv ...` telemetry and `OwnBook` moves via [`assets/opening_book.json`](assets/opening_book.json) (`1,877` EPDs from **CC0-1.0** [`lichess-org/chess-openings`](https://github.com/lichess-org/chess-openings)), with a `1.30x` cold-start clock buffer when `retained_visits < 100`.
 - **Interactive Terminal:**
   ```bash
   python play_terminal.py

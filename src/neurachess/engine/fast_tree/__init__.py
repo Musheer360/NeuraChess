@@ -1651,6 +1651,7 @@ class FastTreeSearchBackend:
         apply_opening_guard: bool = False,
     ) -> tuple[int, str, float, list[str], str | None]:
         self.last_root_visits = {ch["act"]: ch["visits"] for ch in root_ch}
+        self._last_mate_moves: int | None = None
         best_child = None
 
         if self.use_exact_solver:
@@ -1666,6 +1667,8 @@ class FastTreeSearchBackend:
                         best_mate_plies = ch["mate_plies"]
                         best_mate_prior = ch["prior"]
                         best_child = ch
+            if best_mate_plies is not None:
+                self._last_mate_moves = (int(best_mate_plies) // 2) + 1
 
         if best_child is None and self.use_gumbel_root and len(root_ch) > 0:
             max_v = max(c["visits"] for c in root_ch)
@@ -1716,6 +1719,12 @@ class FastTreeSearchBackend:
         if best_child is None:
             best_child = root_ch[0]
 
+        if self._last_mate_moves is None and self.use_exact_solver and best_child["is_solved"]:
+            if best_child["solved_val"] >= 1.0:
+                self._last_mate_moves = -((int(best_child["mate_plies"]) + 1) // 2)
+            elif best_child["solved_val"] <= -1.0:
+                self._last_mate_moves = (int(best_child["mate_plies"]) // 2) + 1
+
         best_act = best_child["act"]
         best_eval = -best_child["q"]
         best_uci = unpack_move(best_child["mp"]).uci()
@@ -1755,7 +1764,20 @@ class FastTreeSearchBackend:
 
         root_legals = list(board.legal_moves)
         if len(root_legals) == 0:
-            return {"ponder_nodes": 0, "best_uci": None, "ponder_uci": None, "root_visits": 0, "best_eval": 0.0}
+            if default_movetime_ms is not None:
+                while not stop_event.is_set() and not ponderhit_event.is_set():
+                    stop_event.wait(0.01)
+            return {
+                "ponder_nodes": 0,
+                "best_uci": None,
+                "ponder_uci": None,
+                "root_visits": 0,
+                "best_eval": 0.0,
+                "pv": [],
+                "depth": 0,
+                "seldepth": 0,
+                "mate_moves": None,
+            }
 
         self.lib.ft_tree_reset_stats(self._tree_ptr)
         prof = {"novel_npu_evals": 0, "wasted_dup_key_evals": 0}
@@ -1953,6 +1975,10 @@ class FastTreeSearchBackend:
                     self.backup_batch_native(hs, p_logits_batch, val_batch, max_depth, prof)
 
         self.lib.ft_clear_all_vl(self._tree_ptr)
+        if default_movetime_ms is not None and not stop_event.is_set() and not ponderhit_event.is_set():
+            while not stop_event.is_set() and not ponderhit_event.is_set():
+                stop_event.wait(0.01)
+
         self.lib.ft_get_stats(
             self._tree_ptr,
             ctypes.byref(self._st_i64[0]),
@@ -1966,6 +1992,18 @@ class FastTreeSearchBackend:
         )
         ponder_nodes += int(self._st_i64[4].value)  # include cache-expanded nodes
         final_root_visits = int(self._st_i32[1].value)
+        self.lib.ft_get_depth_stats(
+            self._tree_ptr,
+            ctypes.byref(self._c_depth_sum),
+            ctypes.byref(self._c_depth_cnt),
+            ctypes.byref(self._c_depth_max),
+        )
+        d_cnt = int(self._c_depth_cnt.value)
+        d_sum = int(self._c_depth_sum.value)
+        d_max = int(self._c_depth_max.value)
+        seldepth_i = max(1, d_max, int(self._st_i32[0].value))
+        d_avg = int(round(d_sum / d_cnt)) if d_cnt > 0 else 1
+        depth_i = max(1, min(seldepth_i, d_avg if d_avg > 0 else 1))
 
         self._has_saved_tree = True
         self._saved_move_stack = list(board.move_stack)
@@ -1974,9 +2012,11 @@ class FastTreeSearchBackend:
         best_uci = None
         ponder_uci = None
         best_eval = 0.0
+        pv: list[str] = []
+        self._last_mate_moves = None
         if root_ch:
             apply_guard = bool(self.use_opening_root_guard and board.fullmove_number <= 12)
-            _, best_uci, best_eval, _, ponder_uci = self._select_best_move_from_root_snapshot(
+            _, best_uci, best_eval, pv, ponder_uci = self._select_best_move_from_root_snapshot(
                 root_ch,
                 apply_opening_guard=apply_guard,
             )
@@ -1987,6 +2027,10 @@ class FastTreeSearchBackend:
             "ponder_uci": ponder_uci,
             "root_visits": final_root_visits,
             "best_eval": best_eval,
+            "pv": pv,
+            "depth": depth_i,
+            "seldepth": seldepth_i,
+            "mate_moves": self._last_mate_moves,
         }
 
     def search(
@@ -2025,7 +2069,7 @@ class FastTreeSearchBackend:
                 board.pop()
                 act = uci_to_action(m.uci(), canonical_flip=is_black)
                 self.last_root_visits = {act: 1}
-                return act, m.uci(), 1.0, len(root_legals), [m.uci()], 1, {}
+                return act, m.uci(), 1.0, len(root_legals), [m.uci()], 1, {"mate_moves": 1}
             board.pop()
 
         if self._syzygy is not None:
@@ -2855,4 +2899,5 @@ class FastTreeSearchBackend:
             root_ch,
             apply_opening_guard=apply_guard,
         )
+        prof["mate_moves"] = self._last_mate_moves
         return best_act, best_uci, best_eval, nodes_evaluated, pv, max_depth_reached, prof
