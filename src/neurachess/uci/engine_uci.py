@@ -138,7 +138,9 @@ class UCIEngine:
                 use_tree_reuse=True,
                 use_nn_cache=True,
                 use_fast_tree=True,
+                use_ponder=self.use_ponder,
                 encoder_layout=self.encoder_layout,
+                syzygy_path="auto",
             )
             self.ponder_manager = PonderManager(self.search_engine, use_ponder=self.use_ponder)
 
@@ -180,6 +182,8 @@ class UCIEngine:
                         self.use_ponder = (val == "true")
                         if self.ponder_manager:
                             self.ponder_manager.use_ponder = self.use_ponder
+                        if self.search_engine:
+                            self.search_engine.set_ponder_mode(self.use_ponder)
                     elif "OwnBook" in line:
                         val = tokens[-1].strip().lower()
                         self.own_book = (val == "true")

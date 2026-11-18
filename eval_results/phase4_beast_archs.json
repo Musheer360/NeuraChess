@@ -1,0 +1,340 @@
+{
+  "timestamp_utc": "2026-11-16T11:10:01Z",
+  "baseline_10x192_fp16_nps": 3314.4,
+  "baseline_10x192_fp16_12ply_cold_nps": 3121.9,
+  "baseline_10x192_fp16_b16_ms": 6.262,
+  "baseline_10x192_hybrid_gear_shift_v3_nps": 4092.4,
+  "nps_gate_threshold": 3250.0,
+  "architectures": [
+    {
+      "name": "12x192_mid2_9_hl64",
+      "num_blocks": 12,
+      "channels": 192,
+      "int8_blocks": "2..9",
+      "fp16_blocks": [
+        0,
+        1,
+        10,
+        11
+      ],
+      "param_count": 8515737,
+      "param_millions": 8.52,
+      "bin_size_mb": 17.29,
+      "quant_time_s": 9.82,
+      "coresident_rss_delta_mb": 185.17,
+      "coresident_blob_mb": 50.51,
+      "execution_devices": {
+        "B=1": [
+          "NPU"
+        ],
+        "B=4": [
+          "NPU"
+        ],
+        "B=8": [
+          "NPU"
+        ],
+        "B=16": [
+          "NPU"
+        ]
+      },
+      "shape_latencies": {
+        "B=1": {
+          "batch_size": 1,
+          "compile_time_s": 1.651,
+          "turnaround_median_ms": 0.886,
+          "turnaround_mean_ms": 0.906,
+          "turnaround_p90_ms": 1.011,
+          "raw_pos_per_sec": 1128.5
+        },
+        "B=4": {
+          "batch_size": 4,
+          "compile_time_s": 2.282,
+          "turnaround_median_ms": 1.91,
+          "turnaround_mean_ms": 1.93,
+          "turnaround_p90_ms": 2.026,
+          "raw_pos_per_sec": 2094.3
+        },
+        "B=8": {
+          "batch_size": 8,
+          "compile_time_s": 3.335,
+          "turnaround_median_ms": 3.415,
+          "turnaround_mean_ms": 3.476,
+          "turnaround_p90_ms": 3.697,
+          "raw_pos_per_sec": 2342.7
+        },
+        "B=16": {
+          "batch_size": 16,
+          "compile_time_s": 5.373,
+          "turnaround_median_ms": 6.54,
+          "turnaround_mean_ms": 6.695,
+          "turnaround_p90_ms": 7.129,
+          "raw_pos_per_sec": 2446.3
+        }
+      },
+      "b1_ms": 0.886,
+      "b4_ms": 1.91,
+      "b8_ms": 3.415,
+      "b16_ms": 6.54,
+      "b16_raw_pos_s": 2446.3,
+      "projected_gear_shift_v3_nps": 3386.1,
+      "projected_fp16_calibrated_nps": 3173.1,
+      "projected_cold_nps": 2964.0,
+      "measured_in_engine_gear_shift_v3_nps": 2798.7,
+      "measured_added_visits_nps": 2607.0,
+      "measured_gears": {
+        "4": 35,
+        "16": 763,
+        "8": 28
+      },
+      "meets_3250_nps_gate": false
+    },
+    {
+      "name": "14x192_mid2_11_hl64",
+      "num_blocks": 14,
+      "channels": 192,
+      "int8_blocks": "2..11",
+      "fp16_blocks": [
+        0,
+        1,
+        12,
+        13
+      ],
+      "param_count": 9880473,
+      "param_millions": 9.88,
+      "bin_size_mb": 18.7,
+      "quant_time_s": 12.39,
+      "coresident_rss_delta_mb": 187.18,
+      "coresident_blob_mb": 56.36,
+      "execution_devices": {
+        "B=1": [
+          "NPU"
+        ],
+        "B=4": [
+          "NPU"
+        ],
+        "B=8": [
+          "NPU"
+        ],
+        "B=16": [
+          "NPU"
+        ]
+      },
+      "shape_latencies": {
+        "B=1": {
+          "batch_size": 1,
+          "compile_time_s": 1.898,
+          "turnaround_median_ms": 0.948,
+          "turnaround_mean_ms": 0.957,
+          "turnaround_p90_ms": 1.0,
+          "raw_pos_per_sec": 1054.9
+        },
+        "B=4": {
+          "batch_size": 4,
+          "compile_time_s": 2.666,
+          "turnaround_median_ms": 2.114,
+          "turnaround_mean_ms": 2.13,
+          "turnaround_p90_ms": 2.22,
+          "raw_pos_per_sec": 1892.3
+        },
+        "B=8": {
+          "batch_size": 8,
+          "compile_time_s": 3.874,
+          "turnaround_median_ms": 3.872,
+          "turnaround_mean_ms": 3.934,
+          "turnaround_p90_ms": 4.051,
+          "raw_pos_per_sec": 2066.3
+        },
+        "B=16": {
+          "batch_size": 16,
+          "compile_time_s": 6.073,
+          "turnaround_median_ms": 7.189,
+          "turnaround_mean_ms": 7.212,
+          "turnaround_p90_ms": 7.383,
+          "raw_pos_per_sec": 2225.7
+        }
+      },
+      "b1_ms": 0.948,
+      "b4_ms": 2.114,
+      "b8_ms": 3.872,
+      "b16_ms": 7.189,
+      "b16_raw_pos_s": 2225.7,
+      "projected_gear_shift_v3_nps": 3080.7,
+      "projected_fp16_calibrated_nps": 2887.0,
+      "projected_cold_nps": 2691.2,
+      "measured_in_engine_gear_shift_v3_nps": 2533.0,
+      "measured_added_visits_nps": 2324.1,
+      "measured_gears": {
+        "4": 32,
+        "16": 701,
+        "8": 12
+      },
+      "meets_3250_nps_gate": false
+    },
+    {
+      "name": "10x224_mid2_7_hl64",
+      "num_blocks": 10,
+      "channels": 224,
+      "int8_blocks": "2..7",
+      "fp16_blocks": [
+        0,
+        1,
+        8,
+        9
+      ],
+      "param_count": 9622425,
+      "param_millions": 9.62,
+      "bin_size_mb": 21.2,
+      "quant_time_s": 9.65,
+      "coresident_rss_delta_mb": 204.3,
+      "coresident_blob_mb": 58.6,
+      "execution_devices": {
+        "B=1": [
+          "NPU"
+        ],
+        "B=4": [
+          "NPU"
+        ],
+        "B=8": [
+          "NPU"
+        ],
+        "B=16": [
+          "NPU"
+        ]
+      },
+      "shape_latencies": {
+        "B=1": {
+          "batch_size": 1,
+          "compile_time_s": 1.436,
+          "turnaround_median_ms": 0.925,
+          "turnaround_mean_ms": 0.955,
+          "turnaround_p90_ms": 1.086,
+          "raw_pos_per_sec": 1081.4
+        },
+        "B=4": {
+          "batch_size": 4,
+          "compile_time_s": 2.111,
+          "turnaround_median_ms": 1.966,
+          "turnaround_mean_ms": 1.99,
+          "turnaround_p90_ms": 2.1,
+          "raw_pos_per_sec": 2035.0
+        },
+        "B=8": {
+          "batch_size": 8,
+          "compile_time_s": 3.088,
+          "turnaround_median_ms": 3.526,
+          "turnaround_mean_ms": 3.574,
+          "turnaround_p90_ms": 3.793,
+          "raw_pos_per_sec": 2268.8
+        },
+        "B=16": {
+          "batch_size": 16,
+          "compile_time_s": 4.903,
+          "turnaround_median_ms": 6.609,
+          "turnaround_mean_ms": 6.653,
+          "turnaround_p90_ms": 6.944,
+          "raw_pos_per_sec": 2420.9
+        }
+      },
+      "b1_ms": 0.925,
+      "b4_ms": 1.966,
+      "b8_ms": 3.526,
+      "b16_ms": 6.609,
+      "b16_raw_pos_s": 2420.9,
+      "projected_gear_shift_v3_nps": 3350.9,
+      "projected_fp16_calibrated_nps": 3140.2,
+      "projected_cold_nps": 2923.7,
+      "measured_in_engine_gear_shift_v3_nps": 2670.5,
+      "measured_added_visits_nps": 2498.2,
+      "measured_gears": {
+        "4": 30,
+        "16": 749,
+        "8": 15
+      },
+      "meets_3250_nps_gate": false
+    },
+    {
+      "name": "12x224_mid2_9_hl64",
+      "num_blocks": 12,
+      "channels": 224,
+      "int8_blocks": "2..9",
+      "fp16_blocks": [
+        0,
+        1,
+        10,
+        11
+      ],
+      "param_count": 11479833,
+      "param_millions": 11.48,
+      "bin_size_mb": 23.11,
+      "quant_time_s": 11.99,
+      "coresident_rss_delta_mb": 203.36,
+      "coresident_blob_mb": 66.44,
+      "execution_devices": {
+        "B=1": [
+          "NPU"
+        ],
+        "B=4": [
+          "NPU"
+        ],
+        "B=8": [
+          "NPU"
+        ],
+        "B=16": [
+          "NPU"
+        ]
+      },
+      "shape_latencies": {
+        "B=1": {
+          "batch_size": 1,
+          "compile_time_s": 1.707,
+          "turnaround_median_ms": 1.01,
+          "turnaround_mean_ms": 1.027,
+          "turnaround_p90_ms": 1.1,
+          "raw_pos_per_sec": 990.1
+        },
+        "B=4": {
+          "batch_size": 4,
+          "compile_time_s": 2.579,
+          "turnaround_median_ms": 2.308,
+          "turnaround_mean_ms": 2.348,
+          "turnaround_p90_ms": 2.469,
+          "raw_pos_per_sec": 1733.1
+        },
+        "B=8": {
+          "batch_size": 8,
+          "compile_time_s": 3.68,
+          "turnaround_median_ms": 4.164,
+          "turnaround_mean_ms": 4.256,
+          "turnaround_p90_ms": 4.595,
+          "raw_pos_per_sec": 1921.1
+        },
+        "B=16": {
+          "batch_size": 16,
+          "compile_time_s": 5.914,
+          "turnaround_median_ms": 7.813,
+          "turnaround_mean_ms": 7.885,
+          "turnaround_p90_ms": 8.206,
+          "raw_pos_per_sec": 2047.9
+        }
+      },
+      "b1_ms": 1.01,
+      "b4_ms": 2.308,
+      "b8_ms": 4.164,
+      "b16_ms": 7.813,
+      "b16_raw_pos_s": 2047.9,
+      "projected_gear_shift_v3_nps": 2834.6,
+      "projected_fp16_calibrated_nps": 2656.4,
+      "projected_cold_nps": 2475.6,
+      "measured_in_engine_gear_shift_v3_nps": 2362.3,
+      "measured_added_visits_nps": 2185.2,
+      "measured_gears": {
+        "4": 31,
+        "16": 657,
+        "8": 12
+      },
+      "meets_3250_nps_gate": false
+    }
+  ],
+  "selected_largest_passing": null,
+  "selected_summary": null
+}

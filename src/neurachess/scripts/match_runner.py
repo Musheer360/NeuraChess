@@ -167,11 +167,96 @@ def _resolve_sf(explicit_path: str | None) -> str:
     raise FileNotFoundError("Stockfish binary not found; pass --stockfish-path or set STOCKFISH_PATH.")
 
 
-def _build_engine(xml_path: str | None, batch_size: int = 16, device: str = "NPU", use_fast_tree: bool = True, encoder_layout: str = "gpu_unpack") -> NPUBatchedPUCTSearch:
+def load_openings_file(path: Path | None) -> list[list[str]]:
+    if path is None:
+        return OPENINGS_50
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    items = raw.get("openings", raw) if isinstance(raw, dict) else raw
+    return [it["moves"] if isinstance(it, dict) else list(it) for it in items]
+
+
+def adjudicate_unfinished(board: chess.Board) -> str:
+    """Adjudicate unfinished games by v1.0.2 material difference (>200 cp threshold)."""
+    outcome = board.outcome(claim_draw=True)
+    if outcome is not None:
+        return outcome.result()
+    val_map = {chess.PAWN: 100, chess.KNIGHT: 305, chess.BISHOP: 333, chess.ROOK: 563, chess.QUEEN: 950}
+    w_mat = sum(len(board.pieces(pt, chess.WHITE)) * val_map[pt] for pt in val_map)
+    b_mat = sum(len(board.pieces(pt, chess.BLACK)) * val_map[pt] for pt in val_map)
+    mat_diff = w_mat - b_mat
+    if mat_diff > 200:
+        return "1-0"
+    if mat_diff < -200:
+        return "0-1"
+    return "1/2-1/2"
+
+
+def _build_engine(
+    xml_path: str | None,
+    batch_size: int = 16,
+    device: str = "NPU",
+    use_fast_tree: bool = True,
+    encoder_layout: str = "gpu_unpack",
+    use_dynamic_batch_shift: bool = False,
+    use_ponder: bool = False,
+    movetime_ms: int = 400,
+    cache_dir: str | None = None,
+    fpu_reduction: float | None = None,
+    syzygy_path: str | None = None,
+) -> NPUBatchedPUCTSearch:
     resolved_xml = xml_path or resolve_default_model_paths()[0]
-    root_m = NPUModel(batch_size=1, cache_dir=DEFAULT_CACHE_DIR, device=device, use_turbo=True, performance_hint="LATENCY", ov_ir_xml_path=resolved_xml, verbose=False)
-    batch_m = NPUModel(batch_size=batch_size, cache_dir=DEFAULT_CACHE_DIR, device=device, use_turbo=True, performance_hint="LATENCY", ov_ir_xml_path=resolved_xml, verbose=False)
-    return NPUBatchedPUCTSearch(root_model=root_m, batch_model=batch_m, batch_size=batch_size, use_fast_tree=use_fast_tree, encoder_layout=encoder_layout)
+    eff_cache = cache_dir or DEFAULT_CACHE_DIR
+    root_m = NPUModel(
+        batch_size=1,
+        cache_dir=eff_cache,
+        device=device,
+        use_turbo=True,
+        performance_hint="LATENCY",
+        ov_ir_xml_path=resolved_xml,
+        verbose=False,
+    )
+    batch_m = NPUModel(
+        batch_size=batch_size,
+        cache_dir=eff_cache,
+        device=device,
+        use_turbo=True,
+        performance_hint="LATENCY",
+        ov_ir_xml_path=resolved_xml,
+        verbose=False,
+    )
+    need_gear_shapes = bool(use_dynamic_batch_shift) and ((not use_ponder) or int(movetime_ms) <= 150)
+    batch_models = None
+    if need_gear_shapes:
+        batch_models = {
+            b: (
+                batch_m
+                if b == batch_size
+                else NPUModel(
+                    batch_size=b,
+                    cache_dir=eff_cache,
+                    device=device,
+                    use_turbo=True,
+                    performance_hint="LATENCY",
+                    ov_ir_xml_path=resolved_xml,
+                    verbose=False,
+                )
+            )
+            for b in (4, 8, 16)
+        }
+    kw: dict = {
+        "root_model": root_m,
+        "batch_model": batch_m,
+        "batch_size": batch_size,
+        "use_fast_tree": use_fast_tree,
+        "encoder_layout": encoder_layout,
+        "use_dynamic_batch_shift": bool(use_dynamic_batch_shift),
+        "use_ponder": bool(use_ponder),
+        "batch_models": batch_models,
+        "syzygy_path": syzygy_path,
+    }
+    if fpu_reduction is not None:
+        kw["fpu_reduction"] = float(fpu_reduction)
+    return NPUBatchedPUCTSearch(**kw)
 
 
 def _select_engine_move(
@@ -197,7 +282,21 @@ def _select_engine_move(
 
 def run_stockfish_match(args: argparse.Namespace) -> dict:
     sf_bin = _resolve_sf(args.stockfish_path)
-    searcher = _build_engine(str(args.xml) if args.xml else None, batch_size=args.batch_size, device=args.device, use_fast_tree=not args.python_tree)
+    openings = load_openings_file(getattr(args, "openings_file", None))
+    start_pair = int(getattr(args, "start_pair", 0) or 0)
+    adjudicate_mat = bool(getattr(args, "adjudicate_material", False))
+    searcher = _build_engine(
+        str(args.xml) if args.xml else None,
+        batch_size=args.batch_size,
+        device=args.device,
+        use_fast_tree=not args.python_tree,
+        use_dynamic_batch_shift=getattr(args, "dynamic_gear", False),
+        use_ponder=bool(args.ponder),
+        movetime_ms=int(args.movetime_ms),
+        cache_dir=getattr(args, "cache_dir", None),
+        fpu_reduction=getattr(args, "fpu_reduction", None),
+        syzygy_path=getattr(args, "syzygy_path", None),
+    )
     ponder = PonderManager(searcher, use_ponder=args.ponder)
     book_driver = UCIEngine(own_book=True, book_seed=42) if getattr(args, "own_book", False) else None
 
@@ -212,13 +311,18 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
     sf_engine.configure(sf_opts)
 
     wins = draws = losses = 0
+    adjudicated_wins = adjudicated_draws = adjudicated_losses = 0
+    late_endgame_losses = 0
     total_nodes = 0
     total_search_s = 0.0
     games_log = []
 
     try:
-        for pair_idx in range(args.pairs):
-            opening = OPENINGS_50[pair_idx % len(OPENINGS_50)]
+        searcher.search(chess.Board(), board_to_tensor(chess.Board(), layout=searcher.encoder_layout), movetime_ms=50, max_nodes=32)
+        searcher.clear_state()
+        for pair_offset in range(args.pairs):
+            pair_idx = start_pair + pair_offset
+            opening = openings[pair_idx % len(openings)]
             for nc_color in (chess.WHITE, chess.BLACK):
                 ponder.stop()
                 searcher.clear_state()
@@ -233,7 +337,7 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
                         total_nodes += nodes
                         mv = chess.Move.from_uci(best_uci)
                         board.push(mv)
-                        if args.ponder and not board.is_game_over(claim_draw=True):
+                        if args.ponder and not board.is_game_over(claim_draw=True) and board.ply() < args.max_plies:
                             exp = chess.Move.from_uci(pv[1]) if len(pv) >= 2 else None
                             ponder.start_internal_ponder(board.copy(), expected_reply=exp)
                     else:
@@ -246,18 +350,78 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
 
                 ponder.stop()
                 outcome = board.outcome(claim_draw=True)
-                if outcome is None or outcome.winner is None:
-                    draws += 1
-                    score = 0.5
-                elif outcome.winner == nc_color:
-                    wins += 1
-                    score = 1.0
+                adj = False
+                if outcome is not None:
+                    res_str = outcome.result()
+                elif adjudicate_mat:
+                    res_str = adjudicate_unfinished(board)
+                    adj = True
                 else:
+                    res_str = "1/2-1/2"
+                    adj = True
+
+                if res_str == "1-0":
+                    score = 1.0 if nc_color == chess.WHITE else 0.0
+                elif res_str == "0-1":
+                    score = 0.0 if nc_color == chess.WHITE else 1.0
+                else:
+                    score = 0.5
+
+                if score == 1.0:
+                    wins += 1
+                    if adj:
+                        adjudicated_wins += 1
+                elif score == 0.0:
                     losses += 1
-                    score = 0.0
-                games_log.append({"pair": pair_idx, "nc_color": "white" if nc_color == chess.WHITE else "black", "nc_score": score, "plies": board.ply()})
+                    if adj:
+                        adjudicated_losses += 1
+                    if board.ply() > 120 or chess.popcount(board.occupied) <= 7:
+                        late_endgame_losses += 1
+                else:
+                    draws += 1
+                    if adj:
+                        adjudicated_draws += 1
+
+                games_log.append(
+                    {
+                        "pair": pair_idx,
+                        "nc_color": "white" if nc_color == chess.WHITE else "black",
+                        "result": res_str,
+                        "adjudicated": adj,
+                        "end_pieces": int(chess.popcount(board.occupied)),
+                        "nc_score": score,
+                        "plies": board.ply(),
+                    }
+                )
                 played = wins + draws + losses
-                print(f"[Game {played}/{args.pairs * 2}] W={wins} D={draws} L={losses} ({100.0*(wins+0.5*draws)/played:.1f}%)", flush=True)
+                print(
+                    f"[Game {played}/{args.pairs * 2} | pair={pair_idx} plies={board.ply()} res={res_str}{' (adj)' if adj else ''}] "
+                    f"W={wins} D={draws} L={losses} ({100.0*(wins+0.5*draws)/played:.1f}%)",
+                    flush=True,
+                )
+                if args.output:
+                    pts_now = wins + 0.5 * draws
+                    lo_now, hi_now = wilson_interval(pts_now, played)
+                    args.output.parent.mkdir(parents=True, exist_ok=True)
+                    args.output.write_text(
+                        json.dumps(
+                            {
+                                "total_games": played,
+                                "wins": wins,
+                                "draws": draws,
+                                "losses": losses,
+                                "points": pts_now,
+                                "score_pct": round(100.0 * pts_now / max(1, played), 2),
+                                "wilson_95_ci_pct": [round(lo_now * 100.0, 2), round(hi_now * 100.0, 2)],
+                                "effective_nps": round(total_nodes / max(1e-6, total_search_s), 1),
+                                "adjudicated": {"wins": adjudicated_wins, "draws": adjudicated_draws, "losses": adjudicated_losses},
+                                "late_endgame_losses": late_endgame_losses,
+                                "games": games_log,
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
     finally:
         ponder.stop()
         sf_engine.quit()
@@ -274,6 +438,8 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
         "score_pct": round(100.0 * pts / max(1, total_g), 2),
         "wilson_95_ci_pct": [round(lo * 100.0, 2), round(hi * 100.0, 2)],
         "effective_nps": round(total_nodes / max(1e-6, total_search_s), 1),
+        "adjudicated": {"wins": adjudicated_wins, "draws": adjudicated_draws, "losses": adjudicated_losses},
+        "late_endgame_losses": late_endgame_losses,
         "games": games_log,
     }
     if args.output:
@@ -283,15 +449,66 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
 
 
 def run_h2h_match(args: argparse.Namespace) -> dict:
-    eng_a = _build_engine(str(args.xml_a), batch_size=args.batch_size, device=args.device)
-    eng_b = _build_engine(str(args.xml_b), batch_size=args.batch_size, device=args.device)
+    openings = load_openings_file(getattr(args, "openings_file", None))
+    start_pair = int(getattr(args, "start_pair", 0) or 0)
+    adjudicate_mat = bool(getattr(args, "adjudicate_material", False))
+    fpu_red = getattr(args, "fpu_reduction", None)
+    syz_path = getattr(args, "syzygy_path", None)
+    eng_a = _build_engine(
+        str(args.xml_a),
+        batch_size=args.batch_size,
+        device=args.device,
+        use_dynamic_batch_shift=getattr(args, "dynamic_gear_a", False),
+        movetime_ms=int(args.movetime_ms),
+        cache_dir=getattr(args, "cache_dir_a", None),
+        fpu_reduction=fpu_red,
+        syzygy_path=syz_path,
+    )
+    eng_b = _build_engine(
+        str(args.xml_b),
+        batch_size=args.batch_size,
+        device=args.device,
+        use_dynamic_batch_shift=getattr(args, "dynamic_gear_b", False),
+        movetime_ms=int(args.movetime_ms),
+        cache_dir=getattr(args, "cache_dir_b", None),
+        fpu_reduction=fpu_red,
+        syzygy_path=syz_path,
+    )
     book_driver = UCIEngine(own_book=True, book_seed=42) if getattr(args, "own_book", False) else None
+    warm_t = board_to_tensor(chess.Board(), layout=eng_a.encoder_layout)
+    eng_a.search(chess.Board(), warm_t, movetime_ms=50, max_nodes=32)
+    eng_b.search(chess.Board(), warm_t, movetime_ms=50, max_nodes=32)
+    eng_a.clear_state()
+    eng_b.clear_state()
 
     wins_a = draws = losses_a = 0
     pent = [0, 0, 0, 0, 0]
+    nodes_a = nodes_b = 0
+    time_a = time_b = 0.0
+    games_log = []
 
-    for pair_idx in range(args.pairs):
-        opening = OPENINGS_50[pair_idx % len(OPENINGS_50)]
+    def _summarize_h2h() -> dict:
+        total_g = wins_a + draws + losses_a
+        pts = wins_a + 0.5 * draws
+        lo, hi = wilson_interval(pts, total_g)
+        return {
+            "total_games": total_g,
+            "wins": wins_a,
+            "draws": draws,
+            "losses": losses_a,
+            "points": pts,
+            "score_pct": round(100.0 * pts / max(1, total_g), 2),
+            "wilson_95_ci_pct": [round(lo * 100.0, 2), round(hi * 100.0, 2)],
+            "pentanomial": list(pent),
+            "sprt": compute_pentanomial_sprt_llr(pent),
+            "nps_a": round(nodes_a / max(1e-6, time_a), 1),
+            "nps_b": round(nodes_b / max(1e-6, time_b), 1),
+            "games": games_log,
+        }
+
+    for pair_offset in range(args.pairs):
+        pair_idx = start_pair + pair_offset
+        opening = openings[pair_idx % len(openings)]
         pair_score = 0.0
         for a_color in (chess.WHITE, chess.BLACK):
             eng_a.clear_state()
@@ -301,38 +518,67 @@ def run_h2h_match(args: argparse.Namespace) -> dict:
                 board.push_uci(uci)
 
             while not board.is_game_over(claim_draw=True) and board.ply() < args.max_plies:
-                active = eng_a if board.turn == a_color else eng_b
-                best_uci, _, _, _ = _select_engine_move(board, active, args.movetime_ms, book_driver)
+                is_a = board.turn == a_color
+                active = eng_a if is_a else eng_b
+                best_uci, mv_nodes, _, mv_dt = _select_engine_move(board, active, args.movetime_ms, book_driver)
+                if is_a:
+                    nodes_a += mv_nodes
+                    time_a += mv_dt
+                else:
+                    nodes_b += mv_nodes
+                    time_b += mv_dt
                 board.push_uci(best_uci)
 
             outcome = board.outcome(claim_draw=True)
-            if outcome is None or outcome.winner is None:
-                draws += 1
-                g_score = 0.5
-            elif outcome.winner == a_color:
-                wins_a += 1
-                g_score = 1.0
+            adj = False
+            if outcome is not None:
+                res_str = outcome.result()
+            elif adjudicate_mat:
+                res_str = adjudicate_unfinished(board)
+                adj = True
             else:
+                res_str = "1/2-1/2"
+                adj = True
+
+            if res_str == "1-0":
+                g_score = 1.0 if a_color == chess.WHITE else 0.0
+            elif res_str == "0-1":
+                g_score = 0.0 if a_color == chess.WHITE else 1.0
+            else:
+                g_score = 0.5
+
+            if g_score == 1.0:
+                wins_a += 1
+            elif g_score == 0.0:
                 losses_a += 1
-                g_score = 0.0
+            else:
+                draws += 1
             pair_score += g_score
+            games_log.append(
+                {
+                    "pair": pair_idx,
+                    "a_color": "white" if a_color == chess.WHITE else "black",
+                    "result": res_str,
+                    "adjudicated": adj,
+                    "a_score": g_score,
+                    "plies": board.ply(),
+                }
+            )
 
         pent[int(round(pair_score * 2))] += 1
         sprt = compute_pentanomial_sprt_llr(pent)
-        print(f"[Pair {pair_idx+1}/{args.pairs}] W={wins_a} D={draws} L={losses_a} | Pent={pent} | SPRT={sprt['status']}", flush=True)
+        pts_now = wins_a + 0.5 * draws
+        g_now = wins_a + draws + losses_a
+        print(
+            f"[Pair {pair_offset+1}/{args.pairs} (idx={pair_idx})] W={wins_a} D={draws} L={losses_a} "
+            f"({100.0 * pts_now / max(1, g_now):.1f}%) | Pent={pent} | SPRT={sprt['status']} ({sprt['llr']})",
+            flush=True,
+        )
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(json.dumps(_summarize_h2h(), indent=2), encoding="utf-8")
 
-    total_g = wins_a + draws + losses_a
-    pts = wins_a + 0.5 * draws
-    lo, hi = wilson_interval(pts, total_g)
-    summary = {
-        "total_games": total_g,
-        "wins": wins_a,
-        "draws": draws,
-        "losses": losses_a,
-        "score_pct": round(100.0 * pts / max(1, total_g), 2),
-        "wilson_95_ci_pct": [round(lo * 100.0, 2), round(hi * 100.0, 2)],
-        "pentanomial": pent,
-    }
+    summary = _summarize_h2h()
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -354,6 +600,13 @@ def main() -> None:
     p_sf.add_argument("--max-plies", type=int, default=220)
     p_sf.add_argument("--device", type=str, default="NPU")
     p_sf.add_argument("--ponder", action="store_true")
+    p_sf.add_argument("--dynamic-gear", action="store_true", help="Enable co-resident B=4/8/16 dynamic gear-shifting")
+    p_sf.add_argument("--cache-dir", type=str, default=None)
+    p_sf.add_argument("--openings-file", type=Path, default=None, help="Optional JSON openings file (e.g., openings_320.json)")
+    p_sf.add_argument("--start-pair", type=int, default=0, help="Starting pair index into openings list")
+    p_sf.add_argument("--adjudicate-material", action="store_true", help="Adjudicate max_plies unfinished games by v1.0.2 material difference (>200cp)")
+    p_sf.add_argument("--fpu-reduction", type=float, default=None, help="Override PUCT fpu_reduction (e.g., 0.25 for v1.0.2 ladder parity)")
+    p_sf.add_argument("--syzygy-path", type=str, default=None, help="Syzygy tablebase directory or 'auto'/'none' (default: disabled unless NEURACHESS_SYZYGY_PATH set)")
     p_sf.add_argument("--own-book", action="store_true", help="Use bundled CC0 Lichess opening book up to ply 15")
     p_sf.add_argument("--python-tree", action="store_true")
     p_sf.add_argument("--output", type=Path, default=None)
@@ -366,6 +619,15 @@ def main() -> None:
     p_h2h.add_argument("--batch-size", type=int, default=16)
     p_h2h.add_argument("--max-plies", type=int, default=220)
     p_h2h.add_argument("--device", type=str, default="NPU")
+    p_h2h.add_argument("--dynamic-gear-a", action="store_true", help="Enable B=4/8/16 dynamic gear-shifting on Engine A")
+    p_h2h.add_argument("--dynamic-gear-b", action="store_true", help="Enable B=4/8/16 dynamic gear-shifting on Engine B")
+    p_h2h.add_argument("--cache-dir-a", type=str, default=None)
+    p_h2h.add_argument("--cache-dir-b", type=str, default=None)
+    p_h2h.add_argument("--openings-file", type=Path, default=None, help="Optional JSON openings file (e.g., openings_320.json)")
+    p_h2h.add_argument("--start-pair", type=int, default=0, help="Starting pair index into openings list")
+    p_h2h.add_argument("--adjudicate-material", action="store_true", help="Adjudicate max_plies unfinished games by v1.0.2 material difference (>200cp)")
+    p_h2h.add_argument("--fpu-reduction", type=float, default=None, help="Override PUCT fpu_reduction")
+    p_h2h.add_argument("--syzygy-path", type=str, default=None, help="Syzygy tablebase directory")
     p_h2h.add_argument("--own-book", action="store_true", help="Use bundled CC0 Lichess opening book up to ply 15")
     p_h2h.add_argument("--output", type=Path, default=None)
 

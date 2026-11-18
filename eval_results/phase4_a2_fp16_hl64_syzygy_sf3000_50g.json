@@ -1,0 +1,471 @@
+{
+  "total_games": 50,
+  "wins": 9,
+  "draws": 21,
+  "losses": 20,
+  "points": 19.5,
+  "score_pct": 39.0,
+  "wilson_95_ci_pct": [
+    26.73,
+    52.84
+  ],
+  "effective_nps": 3335.3,
+  "adjudicated": {
+    "wins": 4,
+    "draws": 7,
+    "losses": 4
+  },
+  "late_endgame_losses": 7,
+  "games": [
+    {
+      "pair": 75,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": true,
+      "end_pieces": 10,
+      "nc_score": 0.5,
+      "plies": 150
+    },
+    {
+      "pair": 75,
+      "nc_color": "black",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 13,
+      "nc_score": 0.5,
+      "plies": 82
+    },
+    {
+      "pair": 76,
+      "nc_color": "white",
+      "result": "0-1",
+      "adjudicated": false,
+      "end_pieces": 7,
+      "nc_score": 0.0,
+      "plies": 116
+    },
+    {
+      "pair": 76,
+      "nc_color": "black",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 6,
+      "nc_score": 0.5,
+      "plies": 98
+    },
+    {
+      "pair": 77,
+      "nc_color": "white",
+      "result": "1-0",
+      "adjudicated": true,
+      "end_pieces": 5,
+      "nc_score": 1.0,
+      "plies": 150
+    },
+    {
+      "pair": 77,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 15,
+      "nc_score": 0.0,
+      "plies": 59
+    },
+    {
+      "pair": 78,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 3,
+      "nc_score": 0.5,
+      "plies": 131
+    },
+    {
+      "pair": 78,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 11,
+      "nc_score": 0.0,
+      "plies": 77
+    },
+    {
+      "pair": 79,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 3,
+      "nc_score": 0.5,
+      "plies": 141
+    },
+    {
+      "pair": 79,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 8,
+      "nc_score": 0.0,
+      "plies": 97
+    },
+    {
+      "pair": 80,
+      "nc_color": "white",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 14,
+      "nc_score": 1.0,
+      "plies": 69
+    },
+    {
+      "pair": 80,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 10,
+      "nc_score": 0.0,
+      "plies": 89
+    },
+    {
+      "pair": 81,
+      "nc_color": "white",
+      "result": "0-1",
+      "adjudicated": false,
+      "end_pieces": 14,
+      "nc_score": 0.0,
+      "plies": 70
+    },
+    {
+      "pair": 81,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": true,
+      "end_pieces": 5,
+      "nc_score": 0.0,
+      "plies": 150
+    },
+    {
+      "pair": 82,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 3,
+      "nc_score": 0.5,
+      "plies": 144
+    },
+    {
+      "pair": 82,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": true,
+      "end_pieces": 6,
+      "nc_score": 0.0,
+      "plies": 150
+    },
+    {
+      "pair": 83,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": true,
+      "end_pieces": 10,
+      "nc_score": 0.5,
+      "plies": 150
+    },
+    {
+      "pair": 83,
+      "nc_color": "black",
+      "result": "1/2-1/2",
+      "adjudicated": true,
+      "end_pieces": 7,
+      "nc_score": 0.5,
+      "plies": 150
+    },
+    {
+      "pair": 84,
+      "nc_color": "white",
+      "result": "0-1",
+      "adjudicated": true,
+      "end_pieces": 6,
+      "nc_score": 0.0,
+      "plies": 150
+    },
+    {
+      "pair": 84,
+      "nc_color": "black",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 11,
+      "nc_score": 0.5,
+      "plies": 114
+    },
+    {
+      "pair": 85,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": true,
+      "end_pieces": 10,
+      "nc_score": 0.5,
+      "plies": 150
+    },
+    {
+      "pair": 85,
+      "nc_color": "black",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 16,
+      "nc_score": 0.5,
+      "plies": 68
+    },
+    {
+      "pair": 86,
+      "nc_color": "white",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 9,
+      "nc_score": 1.0,
+      "plies": 123
+    },
+    {
+      "pair": 86,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 6,
+      "nc_score": 0.0,
+      "plies": 133
+    },
+    {
+      "pair": 87,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 8,
+      "nc_score": 0.5,
+      "plies": 129
+    },
+    {
+      "pair": 87,
+      "nc_color": "black",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 11,
+      "nc_score": 0.5,
+      "plies": 92
+    },
+    {
+      "pair": 88,
+      "nc_color": "white",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 9,
+      "nc_score": 1.0,
+      "plies": 81
+    },
+    {
+      "pair": 88,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 8,
+      "nc_score": 0.0,
+      "plies": 75
+    },
+    {
+      "pair": 89,
+      "nc_color": "white",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 7,
+      "nc_score": 1.0,
+      "plies": 139
+    },
+    {
+      "pair": 89,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 10,
+      "nc_score": 0.0,
+      "plies": 109
+    },
+    {
+      "pair": 90,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 12,
+      "nc_score": 0.5,
+      "plies": 107
+    },
+    {
+      "pair": 90,
+      "nc_color": "black",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 14,
+      "nc_score": 0.5,
+      "plies": 72
+    },
+    {
+      "pair": 91,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 13,
+      "nc_score": 0.5,
+      "plies": 97
+    },
+    {
+      "pair": 91,
+      "nc_color": "black",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 13,
+      "nc_score": 0.5,
+      "plies": 64
+    },
+    {
+      "pair": 92,
+      "nc_color": "white",
+      "result": "0-1",
+      "adjudicated": true,
+      "end_pieces": 6,
+      "nc_score": 0.0,
+      "plies": 150
+    },
+    {
+      "pair": 92,
+      "nc_color": "black",
+      "result": "1/2-1/2",
+      "adjudicated": true,
+      "end_pieces": 3,
+      "nc_score": 0.5,
+      "plies": 150
+    },
+    {
+      "pair": 93,
+      "nc_color": "white",
+      "result": "1-0",
+      "adjudicated": true,
+      "end_pieces": 4,
+      "nc_score": 1.0,
+      "plies": 150
+    },
+    {
+      "pair": 93,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 10,
+      "nc_score": 0.0,
+      "plies": 107
+    },
+    {
+      "pair": 94,
+      "nc_color": "white",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 13,
+      "nc_score": 1.0,
+      "plies": 69
+    },
+    {
+      "pair": 94,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 10,
+      "nc_score": 0.0,
+      "plies": 115
+    },
+    {
+      "pair": 95,
+      "nc_color": "white",
+      "result": "1-0",
+      "adjudicated": true,
+      "end_pieces": 3,
+      "nc_score": 1.0,
+      "plies": 150
+    },
+    {
+      "pair": 95,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 9,
+      "nc_score": 0.0,
+      "plies": 115
+    },
+    {
+      "pair": 96,
+      "nc_color": "white",
+      "result": "1-0",
+      "adjudicated": true,
+      "end_pieces": 4,
+      "nc_score": 1.0,
+      "plies": 150
+    },
+    {
+      "pair": 96,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 18,
+      "nc_score": 0.0,
+      "plies": 73
+    },
+    {
+      "pair": 97,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": true,
+      "end_pieces": 12,
+      "nc_score": 0.5,
+      "plies": 150
+    },
+    {
+      "pair": 97,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 5,
+      "nc_score": 0.0,
+      "plies": 131
+    },
+    {
+      "pair": 98,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": true,
+      "end_pieces": 13,
+      "nc_score": 0.5,
+      "plies": 150
+    },
+    {
+      "pair": 98,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 10,
+      "nc_score": 0.0,
+      "plies": 103
+    },
+    {
+      "pair": 99,
+      "nc_color": "white",
+      "result": "1/2-1/2",
+      "adjudicated": false,
+      "end_pieces": 2,
+      "nc_score": 0.5,
+      "plies": 130
+    },
+    {
+      "pair": 99,
+      "nc_color": "black",
+      "result": "1-0",
+      "adjudicated": false,
+      "end_pieces": 15,
+      "nc_score": 0.0,
+      "plies": 89
+    }
+  ]
+}

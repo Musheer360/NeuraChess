@@ -26,9 +26,24 @@ import chess
 
 logger = logging.getLogger(__name__)
 
+from pathlib import Path
 from neurachess.core.constants import TOTAL_ACTIONS, NUM_PLANES, uci_to_action, action_to_uci, move_to_action
 from neurachess.core.board_tensor import board_to_tensor, ENCODER_LAYOUT_GPU_UNPACK
 from neurachess.search.candidate_selector import PIECE_VALUES, select_opening_guarded_root_act
+from neurachess.search.syzygy_tb import SyzygyProber, resolve_syzygy_path
+
+SYZYGY_LEAF_CB_TYPE = ctypes.CFUNCTYPE(
+    ctypes.c_int32,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_uint64),
+    ctypes.POINTER(ctypes.c_uint64),
+    ctypes.c_int32,
+    ctypes.c_int32,
+    ctypes.c_int32,
+    ctypes.POINTER(ctypes.c_double),
+    ctypes.POINTER(ctypes.c_int32),
+    ctypes.POINTER(ctypes.c_int32),
+)
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _CPP_PATH = os.path.join(_THIS_DIR, "fast_tree.cpp")
@@ -406,6 +421,26 @@ def get_lib() -> ctypes.CDLL:
     ]
     lib.ft_select_and_pack_native.restype = ctypes.c_void_p
 
+    lib.ft_select_dynamic_native.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    lib.ft_select_dynamic_native.restype = ctypes.c_void_p
+
+    lib.ft_pack_inflight_batch_native.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_float),
+    ]
+    lib.ft_pack_inflight_batch_native.restype = None
+
     lib.ft_backup_batch_native.argtypes = [
         ctypes.c_void_p,
         ctypes.c_void_p,
@@ -458,6 +493,51 @@ def get_lib() -> ctypes.CDLL:
 
     lib.ft_test_math_guards_active.argtypes = [ctypes.c_double, ctypes.c_float]
     lib.ft_test_math_guards_active.restype = ctypes.c_int32
+
+    lib.ft_tree_set_see_prior_shaping.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.ft_tree_set_see_prior_shaping.restype = None
+
+    lib.ft_tree_set_syzygy_cb.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32]
+    lib.ft_tree_set_syzygy_cb.restype = None
+
+    lib.ft_get_syzygy_leaf_hits.argtypes = [ctypes.c_void_p]
+    lib.ft_get_syzygy_leaf_hits.restype = ctypes.c_int64
+
+    lib.ft_get_depth_stats.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_int64),
+        ctypes.POINTER(ctypes.c_int64),
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    lib.ft_get_depth_stats.restype = None
+
+    lib.ft_recommend_batch_size.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    lib.ft_recommend_batch_size.restype = ctypes.c_int32
+
+    lib.ft_eval_see_native.argtypes = [
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.c_uint64,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_uint16,
+    ]
+    lib.ft_eval_see_native.restype = ctypes.c_int32
+
+    lib.ft_bench_see_native.argtypes = [
+        ctypes.POINTER(ctypes.c_uint64),
+        ctypes.c_uint64,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_uint16,
+        ctypes.c_int32,
+    ]
+    lib.ft_bench_see_native.restype = ctypes.c_int64
 
     # Populate 2 x 64 x 64 x 6 action lookup table once on DLL load
     act_arr = np.zeros((2, 64, 64, 6), dtype=np.uint16)
@@ -540,6 +620,51 @@ def c_perft(board_fen: str | chess.Board, depth: int) -> int:
     ep_sq = -1 if board.ep_square is None else int(board.ep_square)
     turn_w = 1 if board.turn == chess.WHITE else 0
     return int(lib.ft_perft_native(bbs, ctypes.c_uint64(board.castling_rights), ep_sq, turn_w, int(depth)))
+
+
+def c_see(board_fen: str | chess.Board, move_uci: str | chess.Move) -> int:
+    """Runs native C++23 bitboard Static Exchange Evaluation (centipawns from mover view)."""
+    board = board_fen if isinstance(board_fen, chess.Board) else chess.Board(board_fen)
+    mv = move_uci if isinstance(move_uci, chess.Move) else board.parse_uci(move_uci)
+    lib = get_lib()
+    bbs = (ctypes.c_uint64 * 8)(
+        board.pawns,
+        board.knights,
+        board.bishops,
+        board.rooks,
+        board.queens,
+        board.kings,
+        board.occupied_co[chess.WHITE],
+        board.occupied_co[chess.BLACK],
+    )
+    ep_sq = -1 if board.ep_square is None else int(board.ep_square)
+    turn_w = 1 if board.turn == chess.WHITE else 0
+    return int(lib.ft_eval_see_native(bbs, ctypes.c_uint64(board.castling_rights), ep_sq, turn_w, pack_move(mv)))
+
+
+def bench_see_ns(board_fen: str | chess.Board, move_uci: str | chess.Move, iters: int = 100000) -> float:
+    """Measures C++23 `see()` call latency in nanoseconds per evaluation."""
+    board = board_fen if isinstance(board_fen, chess.Board) else chess.Board(board_fen)
+    mv = move_uci if isinstance(move_uci, chess.Move) else board.parse_uci(move_uci)
+    lib = get_lib()
+    bbs = (ctypes.c_uint64 * 8)(
+        board.pawns,
+        board.knights,
+        board.bishops,
+        board.rooks,
+        board.queens,
+        board.kings,
+        board.occupied_co[chess.WHITE],
+        board.occupied_co[chess.BLACK],
+    )
+    ep_sq = -1 if board.ep_square is None else int(board.ep_square)
+    turn_w = 1 if board.turn == chess.WHITE else 0
+    mp = pack_move(mv)
+    lib.ft_bench_see_native(bbs, ctypes.c_uint64(board.castling_rights), ep_sq, turn_w, mp, 1000)
+    t0 = time.perf_counter_ns()
+    _ = lib.ft_bench_see_native(bbs, ctypes.c_uint64(board.castling_rights), ep_sq, turn_w, mp, int(iters))
+    dt_ns = time.perf_counter_ns() - t0
+    return dt_ns / max(1, int(iters))
 
 
 def compute_zobrist_pair(board: chess.Board) -> tuple[int, int, tuple]:
@@ -663,6 +788,11 @@ class FastTreeSearchBackend:
         encoder_layout: str = ENCODER_LAYOUT_GPU_UNPACK,
         t_root: float = 1.0,
         use_opening_root_guard: bool = False,
+        use_see_prior_shaping: bool = False,
+        use_dynamic_batch_shift: bool = False,
+        use_ponder: bool = False,
+        batch_models: dict[int, object] | None = None,
+        syzygy_path: str | Path | None = None,
     ):
         self.lib = get_lib()
         pin_current_thread_to_pcores()
@@ -671,6 +801,13 @@ class FastTreeSearchBackend:
         self.c_puct = c_puct
         self.t_root = float(t_root)
         self.use_opening_root_guard = bool(use_opening_root_guard)
+        self.use_see_prior_shaping = bool(use_see_prior_shaping)
+        self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
+        self.use_ponder = bool(use_ponder)
+        self._batch_models = dict(batch_models) if batch_models else {}
+        self._syzygy: SyzygyProber | None = None
+        self._syzygy_cb_ref = None
+        self.configure_syzygy(syzygy_path)
         self.use_fpu_reduction = use_fpu_reduction
         self.fpu_reduction = fpu_reduction
         self.root_fpu_reduction = root_fpu_reduction
@@ -691,6 +828,11 @@ class FastTreeSearchBackend:
             ctypes.c_double(root_fpu_reduction),
             ctypes.c_int32(1 if use_exact_solver else 0),
         )
+        self.lib.ft_tree_set_see_prior_shaping(
+            self._tree_ptr,
+            ctypes.c_int32(1 if self.use_see_prior_shaping else 0),
+        )
+        self._attach_syzygy_to_tree()
 
         self._boards: dict[int, chess.Board] = {}
         self._keys: dict[int, tuple[int, int, tuple]] = {}
@@ -726,8 +868,16 @@ class FastTreeSearchBackend:
         self._c_i32_c = ctypes.c_int32(0)
         self._saved_move_stack: list[chess.Move] | None = None
         self._bt_ring = [np.zeros((self.batch_size, NUM_PLANES, 8, 8), dtype=np.float32) for _ in range(8)]
+        self._bt_ring_by_b: dict[int, np.ndarray] = {}
         self._bt_ring_idx = 0
         self.last_root_visits: dict[int, int] = {}
+        self._c_depth_sum = ctypes.c_int64(0)
+        self._c_depth_cnt = ctypes.c_int64(0)
+        self._c_depth_max = ctypes.c_int32(0)
+        self._c_reason = ctypes.c_int32(0)
+        self._c_chosen_b = ctypes.c_int32(0)
+        self._c_entropy = ctypes.c_double(0.0)
+        self._c_in_check = ctypes.c_int32(0)
 
         self._ch_idx_buf = (ctypes.c_int32 * self.MAX_MOVES)()
         self._ch_act_buf = (ctypes.c_int32 * self.MAX_MOVES)()
@@ -758,6 +908,10 @@ class FastTreeSearchBackend:
         root_fpu_reduction: float | None = None,
         t_root: float | None = None,
         use_opening_root_guard: bool | None = None,
+        use_see_prior_shaping: bool | None = None,
+        use_dynamic_batch_shift: bool | None = None,
+        use_ponder: bool | None = None,
+        syzygy_path: str | Path | None = None,
     ):
         if c_puct is not None:
             self.c_puct = float(c_puct)
@@ -771,6 +925,14 @@ class FastTreeSearchBackend:
             self.t_root = float(t_root)
         if use_opening_root_guard is not None:
             self.use_opening_root_guard = bool(use_opening_root_guard)
+        if use_see_prior_shaping is not None:
+            self.use_see_prior_shaping = bool(use_see_prior_shaping)
+        if use_dynamic_batch_shift is not None:
+            self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
+        if use_ponder is not None:
+            self.use_ponder = bool(use_ponder)
+        if syzygy_path is not None:
+            self.configure_syzygy(syzygy_path)
 
         if getattr(self, "_tree_ptr", None):
             try:
@@ -787,7 +949,61 @@ class FastTreeSearchBackend:
             ctypes.c_double(self.root_fpu_reduction),
             ctypes.c_int32(1 if self.use_exact_solver else 0),
         )
+        self.lib.ft_tree_set_see_prior_shaping(
+            self._tree_ptr,
+            ctypes.c_int32(1 if self.use_see_prior_shaping else 0),
+        )
+        self._attach_syzygy_to_tree()
         self.clear_state()
+
+    def set_syzygy_prober(self, prober: SyzygyProber | None) -> None:
+        """Attach an existing `SyzygyProber` (or `None` to disable) and wire the C leaf callback."""
+        if getattr(self, "_syzygy", None) is not None and self._syzygy is not prober:
+            self._syzygy.close()
+        self._syzygy = prober
+        self._syzygy_cb_ref = None
+        if prober is not None:
+            def _syz_cb(_ctx, w_ptr, b_ptr, turn_w, ep_sq, halfmove, out_val, out_solv, out_mp):
+                res = prober.probe_leaf_wdl_bitboards(
+                    (w_ptr[0], w_ptr[1], w_ptr[2], w_ptr[3], w_ptr[4], w_ptr[5]),
+                    (b_ptr[0], b_ptr[1], b_ptr[2], b_ptr[3], b_ptr[4], b_ptr[5]),
+                    bool(turn_w),
+                    int(ep_sq),
+                    int(halfmove),
+                )
+                if res is None:
+                    return 0
+                out_val[0] = float(res[0])
+                out_solv[0] = int(res[1])
+                out_mp[0] = int(res[2])
+                return 1
+
+            self._syzygy_cb_ref = SYZYGY_LEAF_CB_TYPE(_syz_cb)
+        if getattr(self, "_tree_ptr", None):
+            self._attach_syzygy_to_tree()
+
+    def configure_syzygy(self, syzygy_path: str | Path | None = None) -> None:
+        """Open (or close) Syzygy tablebases according to `syzygy_path` and build the C leaf callback."""
+        resolved = resolve_syzygy_path(syzygy_path, auto_discover=False)
+        self.set_syzygy_prober(SyzygyProber(resolved, max_pieces=5) if resolved is not None else None)
+
+    def _attach_syzygy_to_tree(self) -> None:
+        if getattr(self, "_tree_ptr", None):
+            cb_ptr = self._syzygy_cb_ref if self._syzygy_cb_ref is not None else None
+            max_p = self._syzygy.max_pieces if self._syzygy is not None else 5
+            self.lib.ft_tree_set_syzygy_cb(self._tree_ptr, cb_ptr, None, ctypes.c_int32(max_p))
+
+    def close(self) -> None:
+        """Release native C++ tree and optional Syzygy tablebase handles."""
+        if getattr(self, "_syzygy", None) is not None:
+            self._syzygy.close()
+            self._syzygy = None
+        self._syzygy_cb_ref = None
+        if getattr(self, "_tree_ptr", None):
+            try:
+                self.lib.ft_tree_set_syzygy_cb(self._tree_ptr, None, None, 5)
+            except (OSError, ctypes.ArgumentError, AttributeError):
+                pass
 
     def clear_state(self):
         self._boards.clear()
@@ -893,18 +1109,26 @@ class FastTreeSearchBackend:
         max_depth: int,
         use_pending: bool = False,
         target_in_ptr=None,
+        batch_size_override: int | None = None,
     ) -> tuple[ctypes.c_void_p, np.ndarray | None, int, int]:
+        eff_b = int(batch_size_override) if batch_size_override is not None else self.batch_size
         if target_in_ptr is not None:
             bt = None
             dst_ptr = target_in_ptr
-        else:
+        elif eff_b == self.batch_size:
             bt = self._bt_ring[self._bt_ring_idx]
             self._bt_ring_idx = (self._bt_ring_idx + 1) & 7
+            dst_ptr = bt.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        else:
+            bt = self._bt_ring_by_b.get(eff_b)
+            if bt is None:
+                bt = np.zeros((eff_b, NUM_PLANES, 8, 8), dtype=np.float32)
+                self._bt_ring_by_b[eff_b] = bt
             dst_ptr = bt.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
         handle = self.lib.ft_select_and_pack_native(
             self._tree_ptr,
-            self.batch_size,
+            eff_b,
             max_depth,
             1 if self.use_nn_cache else 0,
             1 if use_pending else 0,
@@ -913,6 +1137,52 @@ class FastTreeSearchBackend:
             ctypes.byref(self._c_max_ply),
         )
         return handle, bt, int(self._c_n_eval.value), int(self._c_max_ply.value)
+
+    def select_dynamic_native(
+        self,
+        max_depth: int,
+        use_pending: bool = False,
+    ) -> tuple[ctypes.c_void_p, int, int, int, int]:
+        handle = self.lib.ft_select_dynamic_native(
+            self._tree_ptr,
+            max_depth,
+            1 if self.use_nn_cache else 0,
+            1 if use_pending else 0,
+            ctypes.byref(self._c_chosen_b),
+            ctypes.byref(self._c_reason),
+            ctypes.byref(self._c_n_eval),
+            ctypes.byref(self._c_max_ply),
+        )
+        return (
+            handle,
+            int(self._c_chosen_b.value),
+            int(self._c_reason.value),
+            int(self._c_n_eval.value),
+            int(self._c_max_ply.value),
+        )
+
+    def pack_inflight_batch_native(
+        self,
+        handle: ctypes.c_void_p,
+        batch_size: int,
+        target_in_ptr=None,
+    ) -> np.ndarray | None:
+        if target_in_ptr is not None:
+            bt = None
+            dst_ptr = target_in_ptr
+        else:
+            bt = self._bt_ring_by_b.get(batch_size)
+            if bt is None:
+                bt = np.zeros((batch_size, NUM_PLANES, 8, 8), dtype=np.float32)
+                self._bt_ring_by_b[batch_size] = bt
+            dst_ptr = bt.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        self.lib.ft_pack_inflight_batch_native(
+            self._tree_ptr,
+            handle,
+            int(batch_size),
+            dst_ptr,
+        )
+        return bt
 
     def backup_batch_native_ptrs(
         self,
@@ -1245,6 +1515,12 @@ class FastTreeSearchBackend:
             self._boards[ni] = b
 
             iterm, tval, isolv, sval, pdep = evaluate_terminal_flags_fast(b)
+            if not iterm and not isolv and self._syzygy is not None:
+                sz = self._syzygy.probe_leaf_wdl(b)
+                if sz is not None:
+                    tval, isolv, _mp = sz
+                    iterm = 1
+                    sval = tval if isolv else 0.0
             if not iterm:
                 khi, klo, tkey = compute_zobrist_pair(b)
                 self._keys[ni] = (khi, klo, tkey)
@@ -1752,6 +2028,19 @@ class FastTreeSearchBackend:
                 return act, m.uci(), 1.0, len(root_legals), [m.uci()], 1, {}
             board.pop()
 
+        if self._syzygy is not None:
+            tb_res = self._syzygy.probe_root_dtz_move(board)
+            if tb_res is not None:
+                tb_mv, tb_val, tb_tag = tb_res
+                act = uci_to_action(tb_mv.uci(), canonical_flip=is_black)
+                self.last_root_visits = {act: 1}
+                return act, tb_mv.uci(), tb_val, 1, [tb_mv.uci()], 1, {
+                    "syzygy_root_hit": True,
+                    "syzygy_tag": tb_tag,
+                    "syzygy_leaf_hits": 0,
+                    "total_s": time.perf_counter() - t_start,
+                }
+
         use_native = (not board.chess960) and (self.encoder_layout == ENCODER_LAYOUT_GPU_UNPACK)
         if not use_native and board_tensor is None:
             board_tensor = self._encode_board_fast(board)
@@ -1789,6 +2078,10 @@ class FastTreeSearchBackend:
             else (1 if has_async else 0),
             "fast_tree": True,
             "zero_copy_staging": False,
+            "batch_gear_counts": {},
+            "gear_reasons": {},
+            "syzygy_root_hit": False,
+            "syzygy_leaf_hits": 0,
         }
 
         self.lib.ft_tree_reset_stats(self._tree_ptr)
@@ -1929,9 +2222,204 @@ class FastTreeSearchBackend:
                 self.lib.ft_tree_set_root_fpu_visit(self._tree_ptr, ctypes.c_double(root_v))
 
         t_loop0 = _pc()
+        prev_cache_exp = 0
+        prev_term_bkp = 0
+        empty_term_waves = 0
+
+        def _should_retry_empty_wave() -> bool:
+            nonlocal prev_cache_exp, prev_term_bkp, empty_term_waves
+            self.lib.ft_get_stats(
+                self._tree_ptr,
+                ctypes.byref(self._st_i64[0]),
+                ctypes.byref(self._st_i64[1]),
+                ctypes.byref(self._st_i64[2]),
+                ctypes.byref(self._st_i64[3]),
+                ctypes.byref(self._st_i64[4]),
+                ctypes.byref(self._st_i64[5]),
+                ctypes.byref(self._st_i32[0]),
+                ctypes.byref(self._st_i32[1]),
+            )
+            cur_tb = int(self._st_i64[0].value)
+            cur_ce = int(self._st_i64[4].value)
+            cur_rv = int(self._st_i32[1].value)
+            if (_pc() >= t_deadline) or (max_nodes is not None and (nodes_evaluated + cur_ce) >= max_nodes):
+                return False
+            if cur_ce > prev_cache_exp:
+                prev_cache_exp = cur_ce
+                return True
+            if cur_tb > prev_term_bkp and empty_term_waves < 4 and (max_nodes is None or cur_rv < max_nodes):
+                prev_term_bkp = cur_tb
+                empty_term_waves += 1
+                return True
+            return False
 
         if use_native:
-            if has_async and self.use_async_overlap:
+            # Lock static B=16 (nireq=2) when pondering with movetime > 150ms; allow gear_shift_v3 when not pondering or <= 150ms
+            allow_gear_shift = (not self.use_ponder) or (int(movetime_ms) <= 150)
+            if self.use_dynamic_batch_shift and allow_gear_shift:
+                avail_models = dict(self._batch_models)
+                if batch_model is not None and self.batch_size not in avail_models:
+                    avail_models[self.batch_size] = batch_model
+                sorted_shapes = sorted(avail_models.keys()) if avail_models else [self.batch_size]
+                zc_by_b = {
+                    b: self._bind_zero_copy_req(getattr(avail_models[b], "infer_request", None))
+                    for b in sorted_shapes
+                }
+                m16 = avail_models.get(16, batch_model if self.batch_size == 16 else None)
+                b16_has_async = (
+                    (m16 is not None)
+                    and hasattr(m16, "infer_request_async")
+                    and hasattr(getattr(m16, "infer_request", None), "start_async")
+                )
+                b16_reqs = [m16.infer_request, m16.infer_request_async] if b16_has_async else []
+                b16_zcs = [self._bind_zero_copy_req(r) for r in b16_reqs] if b16_has_async else []
+                prof["zero_copy_staging"] = all(z is not None for z in zc_by_b.values()) and (
+                    all(z is not None for z in b16_zcs) if b16_has_async else True
+                )
+                prof["mode"] = "dynamic_gear_shift"
+                prof["dynamic_async_b16"] = b16_has_async
+                prev_cache_exp = 0
+                b16_buf_idx = 0
+                inflight_16 = None
+
+                def _record_gear_wave(cb: int, rc: int, nev_v: int, mply_v: int) -> None:
+                    nonlocal max_depth_reached, nodes_evaluated
+                    if mply_v > max_depth_reached:
+                        max_depth_reached = mply_v
+                    nodes_evaluated += cb
+                    prof["batches"] += 1
+                    prof["slots"] += cb
+                    prof["unique_leaves"] += nev_v
+                    bk = str(cb)
+                    prof["batch_gear_counts"][bk] = prof["batch_gear_counts"].get(bk, 0) + 1
+                    rk = str(rc)
+                    prof["gear_reasons"][rk] = prof["gear_reasons"].get(rk, 0) + 1
+
+                def _exec_sync_wave(hs_s, bt_s, cb: int, rc: int, nev_s: int, mply_s: int, zc_s, cm_s) -> None:
+                    t_inf0 = _pc()
+                    if zc_s is not None:
+                        zc_s[0].infer()
+                        t_bk = _pc()
+                        prof["wait_s"] += t_bk - t_inf0
+                        _record_gear_wave(cb, rc, nev_s, mply_s)
+                        self.backup_batch_native_ptrs(hs_s, zc_s[2], zc_s[3], zc_s[4], max_depth, prof)
+                    else:
+                        pl_s, vb_s = cm_s.infer(bt_s)
+                        t_bk = _pc()
+                        prof["wait_s"] += t_bk - t_inf0
+                        _record_gear_wave(cb, rc, nev_s, mply_s)
+                        self.backup_batch_native(hs_s, pl_s, vb_s, max_depth, prof)
+                    prof["backup_s"] += _pc() - t_bk
+
+                def _finish_async_16(inf_t) -> None:
+                    slot_i, hs_i, _bt_i, nev_i, mply_i, rc_i = inf_t
+                    tw0 = _pc()
+                    b16_reqs[slot_i].wait()
+                    tw1 = _pc()
+                    prof["wait_s"] += tw1 - tw0
+                    _record_gear_wave(16, rc_i, nev_i, mply_i)
+                    zcc = b16_zcs[slot_i]
+                    if zcc is not None:
+                        self.backup_batch_native_ptrs(hs_i, zcc[2], zcc[3], zcc[4], max_depth, prof)
+                    else:
+                        outs = list(b16_reqs[slot_i].results.values())
+                        self.backup_batch_native(hs_i, outs[0], outs[1], max_depth, prof)
+                    prof["backup_s"] += _pc() - tw1
+
+                def _launch_async_16(hs_a, nev_a: int, mply_a: int, rc_a: int, t_sel_start: float):
+                    nonlocal b16_buf_idx
+                    slot_a = b16_buf_idx
+                    zca = b16_zcs[slot_a]
+                    bta = self.pack_inflight_batch_native(
+                        hs_a,
+                        16,
+                        target_in_ptr=zca[1] if zca is not None else None,
+                    )
+                    t_disp = _pc()
+                    prof["select_s"] += t_disp - t_sel_start
+                    if zca is not None:
+                        b16_reqs[slot_a].start_async()
+                    else:
+                        b16_reqs[slot_a].start_async({"board_state": bta})
+                    prof["dispatch_s"] += _pc() - t_disp
+                    b16_buf_idx = 1 - slot_a
+                    return (slot_a, hs_a, bta, nev_a, mply_a, rc_a)
+
+                while True:
+                    if inflight_16 is None:
+                        if _pc() >= t_deadline or (max_nodes is not None and nodes_evaluated >= max_nodes):
+                            break
+                        t0 = _pc()
+                        hs, rec_b, reason_code, nev_s, mply_s = self.select_dynamic_native(
+                            max_depth=max_depth,
+                            use_pending=False,
+                        )
+                        if nev_s == 0:
+                            prof["select_s"] += _pc() - t0
+                            self.lib.ft_destroy_inflight_batch(hs)
+                            if _should_retry_empty_wave():
+                                continue
+                            break
+
+                        chosen_b = next((b for b in sorted_shapes if b >= rec_b), sorted_shapes[-1])
+                        if chosen_b == 16 and b16_has_async:
+                            inflight_16 = _launch_async_16(hs, nev_s, mply_s, reason_code, t0)
+                            continue
+
+                        zc_cur = zc_by_b.get(chosen_b)
+                        cur_m = avail_models.get(chosen_b, batch_model)
+                        bt = self.pack_inflight_batch_native(
+                            hs,
+                            chosen_b,
+                            target_in_ptr=zc_cur[1] if zc_cur is not None else None,
+                        )
+                        prof["select_s"] += _pc() - t0
+                        _exec_sync_wave(hs, bt, chosen_b, reason_code, nev_s, mply_s, zc_cur, cur_m)
+                    else:
+                        # Async nireq=2 overlap: select + pack next wave while inflight_16 executes on NPU
+                        next_inflight = None
+                        next_sync = None
+                        time_up_next = (_pc() >= t_deadline) or (
+                            max_nodes is not None and (nodes_evaluated + 16) >= max_nodes
+                        )
+                        if not time_up_next:
+                            t0 = _pc()
+                            hn, rec_bn, r_bn, nev_n, mply_n = self.select_dynamic_native(
+                                max_depth=max_depth,
+                                use_pending=False,
+                            )
+                            if nev_n == 0:
+                                prof["select_s"] += _pc() - t0
+                                self.lib.ft_destroy_inflight_batch(hn)
+                            else:
+                                chosen_bn = next((b for b in sorted_shapes if b >= rec_bn), sorted_shapes[-1])
+                                if chosen_bn == 16 and b16_has_async:
+                                    next_inflight = _launch_async_16(hn, nev_n, mply_n, r_bn, t0)
+                                else:
+                                    zc_n = zc_by_b.get(chosen_bn)
+                                    cm_n = avail_models.get(chosen_bn, batch_model)
+                                    btn = self.pack_inflight_batch_native(
+                                        hn,
+                                        chosen_bn,
+                                        target_in_ptr=zc_n[1] if zc_n is not None else None,
+                                    )
+                                    prof["select_s"] += _pc() - t0
+                                    next_sync = (hn, btn, chosen_bn, r_bn, nev_n, mply_n, zc_n, cm_n)
+
+                        _finish_async_16(inflight_16)
+                        inflight_16 = next_inflight
+
+                        if next_sync is not None:
+                            hsn, btn, cbn, rbn, nevn, mplyn, zcn, cmn = next_sync
+                            if (_pc() >= t_deadline) or (max_nodes is not None and nodes_evaluated >= max_nodes):
+                                self.lib.ft_revert_batch_vl_and_clear_pending(self._tree_ptr, hsn)
+                                self.lib.ft_destroy_inflight_batch(hsn)
+                            else:
+                                _exec_sync_wave(hsn, btn, cbn, rbn, nevn, mplyn, zcn, cmn)
+                        elif inflight_16 is None and time_up_next:
+                            break
+
+            elif has_async and self.use_async_overlap:
                 from collections import deque
 
                 depth = self.async_inflight + 1
@@ -2018,23 +2506,7 @@ class FastTreeSearchBackend:
                         in_flight_n[0] = (h0, nev_0, mply_0)
                         break
                     self.lib.ft_destroy_inflight_batch(h0)
-                    self.lib.ft_get_stats(
-                        self._tree_ptr,
-                        ctypes.byref(self._st_i64[0]),
-                        ctypes.byref(self._st_i64[1]),
-                        ctypes.byref(self._st_i64[2]),
-                        ctypes.byref(self._st_i64[3]),
-                        ctypes.byref(self._st_i64[4]),
-                        ctypes.byref(self._st_i64[5]),
-                        ctypes.byref(self._st_i32[0]),
-                        ctypes.byref(self._st_i32[1]),
-                    )
-                    cur_cache_exp = int(self._st_i64[4].value)
-                    if (
-                        (_pc() >= t_deadline)
-                        or (max_nodes is not None and (nodes_evaluated + cur_cache_exp) >= max_nodes)
-                        or cur_cache_exp == 0
-                    ):
+                    if not _should_retry_empty_wave():
                         break
 
                 buf_idx = 0
@@ -2299,6 +2771,8 @@ class FastTreeSearchBackend:
                 prof["select_s"] += t1 - t0
                 if len(leaves_s) == 0:
                     self.lib.ft_destroy_inflight_batch(hs)
+                    if _should_retry_empty_wave():
+                        continue
                     break
                 if mply_s > max_depth_reached:
                     max_depth_reached = mply_s
@@ -2333,6 +2807,7 @@ class FastTreeSearchBackend:
         prof["cache_expanded_nodes"] = int(self._st_i64[4].value)
         prof["dedup_avoided"] = int(self._st_i64[5].value)
         prof["max_depth_cache"] = int(self._st_i32[0].value)
+        prof["syzygy_leaf_hits"] = int(self.lib.ft_get_syzygy_leaf_hits(self._tree_ptr))
         final_root_visits = int(self._st_i32[1].value)
 
         if prof["max_depth_cache"] > max_depth_reached:
@@ -2351,6 +2826,21 @@ class FastTreeSearchBackend:
         c_entries, c_bytes, _, _, _ = self.cache.stats()
         prof["nn_cache_used_bytes"] = c_bytes
         prof["nn_cache_entries"] = c_entries
+
+        self.lib.ft_get_depth_stats(
+            self._tree_ptr,
+            ctypes.byref(self._c_depth_sum),
+            ctypes.byref(self._c_depth_cnt),
+            ctypes.byref(self._c_depth_max),
+        )
+        d_cnt = int(self._c_depth_cnt.value)
+        d_sum = int(self._c_depth_sum.value)
+        d_max = int(self._c_depth_max.value)
+        prof["total_leaf_count"] = d_cnt
+        prof["max_leaf_ply"] = max(max_depth_reached, d_max)
+        prof["avg_leaf_ply"] = round(d_sum / d_cnt, 4) if d_cnt > 0 else 0.0
+        if d_max > max_depth_reached:
+            max_depth_reached = d_max
 
         self._has_saved_tree = bool(self.use_tree_reuse)
         self._saved_move_stack = list(board.move_stack) if self.use_tree_reuse else None

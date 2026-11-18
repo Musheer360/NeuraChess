@@ -1,0 +1,95 @@
+{
+  "model": "neurachess-10x192-qat-int8 (A2_soup75)",
+  "xml": "C:\\Users\\MusheerAlam\\NeuraChess\\weights\\phase4_synth\\A2_soup75_hybrid_int8.xml",
+  "openings_file": "C:\\Users\\MusheerAlam\\NeuraChess-Private\\eval_results\\openings_320.json",
+  "opening_ranges": {
+    "2800": "[0:25]",
+    "3000": "[25:50]",
+    "3190": "[50:75]"
+  },
+  "config": {
+    "movetime_ms": 400,
+    "batch_size": 16,
+    "ponder": true,
+    "fpu_reduction": 0.2,
+    "max_plies": 150,
+    "adjudicate_material": true,
+    "syzygy": true
+  },
+  "total_games": 150,
+  "wins": 38,
+  "draws": 71,
+  "losses": 41,
+  "points": 73.5,
+  "overall_score_pct": 49.0,
+  "mean_effective_nps": 3987.9,
+  "mean_implied_elo": 2992.2,
+  "tiers": {
+    "2800": {
+      "total_games": 50,
+      "wins": 29,
+      "draws": 16,
+      "losses": 5,
+      "points": 37.0,
+      "score_pct": 74.0,
+      "wilson_95_ci_pct": [
+        60.45,
+        84.13
+      ],
+      "effective_nps": 3898.9,
+      "elo_diff_vs_tier": 181.7,
+      "implied_elo": 2981.7,
+      "adjudicated": {
+        "wins": 13,
+        "draws": 11,
+        "losses": 3
+      },
+      "late_endgame_losses": 4,
+      "slice_file": "C:\\Users\\MusheerAlam\\NeuraChess\\eval_results\\v1_1_sf_2800_50g.json"
+    },
+    "3000": {
+      "total_games": 50,
+      "wins": 6,
+      "draws": 30,
+      "losses": 14,
+      "points": 21.0,
+      "score_pct": 42.0,
+      "wilson_95_ci_pct": [
+        29.37,
+        55.77
+      ],
+      "effective_nps": 4025.1,
+      "elo_diff_vs_tier": -56.1,
+      "implied_elo": 2943.9,
+      "adjudicated": {
+        "wins": 6,
+        "draws": 16,
+        "losses": 6
+      },
+      "late_endgame_losses": 11,
+      "slice_file": "C:\\Users\\MusheerAlam\\NeuraChess\\eval_results\\v1_1_sf_3000_50g.json"
+    },
+    "3190": {
+      "total_games": 50,
+      "wins": 3,
+      "draws": 25,
+      "losses": 22,
+      "points": 15.5,
+      "score_pct": 31.0,
+      "wilson_95_ci_pct": [
+        19.93,
+        44.78
+      ],
+      "effective_nps": 4039.6,
+      "elo_diff_vs_tier": -139.0,
+      "implied_elo": 3051.0,
+      "adjudicated": {
+        "wins": 2,
+        "draws": 14,
+        "losses": 4
+      },
+      "late_endgame_losses": 11,
+      "slice_file": "C:\\Users\\MusheerAlam\\NeuraChess\\eval_results\\v1_1_sf_3190_50g.json"
+    }
+  }
+}

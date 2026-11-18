@@ -15,6 +15,7 @@ import logging
 import time
 import math
 from collections import OrderedDict
+from pathlib import Path
 import numpy as np
 import chess
 
@@ -25,6 +26,7 @@ from neurachess.core.board_tensor import board_to_tensor
 from neurachess.core.tensor_transitions import apply_tensor_transition
 from neurachess.models.npu_compiler import NPUModel
 from neurachess.search.candidate_selector import select_top_candidates, select_opening_guarded_root_act, PIECE_VALUES
+from neurachess.search.syzygy_tb import SyzygyProber, resolve_syzygy_path
 
 
 class CanonicalNNCache:
@@ -314,12 +316,21 @@ class NPUBatchedPUCTSearch:
         use_fast_tree: bool = True,
         t_root: float = 1.0,
         use_opening_root_guard: bool = False,
+        use_see_prior_shaping: bool = False,
+        use_dynamic_batch_shift: bool = False,
+        use_ponder: bool = False,
+        batch_models: dict[int, NPUModel] | None = None,
+        syzygy_path: str | Path | None = None,
     ):
         self.encoder_layout = encoder_layout
         self.batch_size = batch_size
         self.c_puct = c_puct
         self.t_root = float(t_root)
         self.use_opening_root_guard = bool(use_opening_root_guard)
+        self.use_see_prior_shaping = bool(use_see_prior_shaping)
+        self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
+        self.use_ponder = bool(use_ponder)
+        self.batch_models = dict(batch_models) if batch_models else None
         self.contempt = contempt
         self.use_fpu_reduction = use_fpu_reduction
         self.fpu_reduction = fpu_reduction
@@ -361,9 +372,17 @@ class NPUBatchedPUCTSearch:
                 encoder_layout=self.encoder_layout,
                 t_root=self.t_root,
                 use_opening_root_guard=self.use_opening_root_guard,
+                use_see_prior_shaping=self.use_see_prior_shaping,
+                use_dynamic_batch_shift=self.use_dynamic_batch_shift,
+                use_ponder=self.use_ponder,
+                batch_models=self.batch_models,
+                syzygy_path=syzygy_path,
             )
+            self._syzygy = self._fast_backend._syzygy
         else:
             self._fast_backend = None
+            resolved_syz = resolve_syzygy_path(syzygy_path, auto_discover=False)
+            self._syzygy = SyzygyProber(resolved_syz, max_pieces=5) if resolved_syz is not None else None
 
         # Root model for batch 1 (initial expansion)
         self.root_model = root_model if root_model is not None else NPUModel(batch_size=1)
@@ -384,6 +403,12 @@ class NPUBatchedPUCTSearch:
         if self._fast_backend is not None:
             self._fast_backend.clear_state()
 
+    def set_ponder_mode(self, use_ponder: bool) -> None:
+        """Update ponder mode without clearing search tree or NN cache."""
+        self.use_ponder = bool(use_ponder)
+        if self._fast_backend is not None:
+            self._fast_backend.use_ponder = self.use_ponder
+
     def reconfigure(
         self,
         c_puct: float | None = None,
@@ -392,6 +417,10 @@ class NPUBatchedPUCTSearch:
         root_fpu_reduction: float | None = None,
         t_root: float | None = None,
         use_opening_root_guard: bool | None = None,
+        use_see_prior_shaping: bool | None = None,
+        use_dynamic_batch_shift: bool | None = None,
+        use_ponder: bool | None = None,
+        syzygy_path: str | Path | None = None,
     ):
         if c_puct is not None:
             self.c_puct = float(c_puct)
@@ -405,6 +434,12 @@ class NPUBatchedPUCTSearch:
             self.t_root = float(t_root)
         if use_opening_root_guard is not None:
             self.use_opening_root_guard = bool(use_opening_root_guard)
+        if use_see_prior_shaping is not None:
+            self.use_see_prior_shaping = bool(use_see_prior_shaping)
+        if use_dynamic_batch_shift is not None:
+            self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
+        if use_ponder is not None:
+            self.use_ponder = bool(use_ponder)
         if self._fast_backend is not None:
             self._fast_backend.reconfigure(
                 c_puct=c_puct,
@@ -413,8 +448,27 @@ class NPUBatchedPUCTSearch:
                 root_fpu_reduction=root_fpu_reduction,
                 t_root=t_root,
                 use_opening_root_guard=use_opening_root_guard,
+                use_see_prior_shaping=use_see_prior_shaping,
+                use_dynamic_batch_shift=use_dynamic_batch_shift,
+                use_ponder=use_ponder,
+                syzygy_path=syzygy_path,
             )
+            self._syzygy = self._fast_backend._syzygy
+        elif syzygy_path is not None:
+            if self._syzygy is not None:
+                self._syzygy.close()
+                self._syzygy = None
+            resolved_syz = resolve_syzygy_path(syzygy_path, auto_discover=False)
+            self._syzygy = SyzygyProber(resolved_syz, max_pieces=5) if resolved_syz is not None else None
         self.clear_state()
+
+    def close(self) -> None:
+        if self._fast_backend is not None:
+            self._fast_backend.close()
+            self._syzygy = None
+        elif self._syzygy is not None:
+            self._syzygy.close()
+            self._syzygy = None
 
     @staticmethod
     def _branching_k_for_ply(ply: int, n_legal: int | None = None) -> int:
@@ -724,6 +778,18 @@ class NPUBatchedPUCTSearch:
             # Lazy instantiation if selected for the first time
             if not curr.is_instantiated:
                 curr.instantiate()
+                if self._syzygy is not None and not curr.is_terminal and not curr.is_solved and curr.board is not None:
+                    sz = self._syzygy.probe_leaf_wdl(curr.board)
+                    if sz is not None:
+                        tval, isolv, mp = sz
+                        curr.is_terminal = True
+                        curr.terminal_value = tval
+                        if isolv:
+                            curr.is_solved = True
+                            curr.solved_value = tval
+                            curr.mate_plies = mp
+                        if stats is not None:
+                            stats["syzygy_leaf_hits"] = stats.get("syzygy_leaf_hits", 0) + 1
 
             if curr.is_terminal or (self.use_exact_solver and curr.is_solved):
                 # Terminal or solved leaf: backpropagate immediately
@@ -963,6 +1029,20 @@ class NPUBatchedPUCTSearch:
                 return act, m.uci(), 1.0, len(root_legals), [m.uci()], 1
             board.pop()
 
+        if self._syzygy is not None:
+            tb_res = self._syzygy.probe_root_dtz_move(board)
+            if tb_res is not None:
+                tb_mv, tb_val, tb_tag = tb_res
+                act = uci_to_action(tb_mv.uci(), canonical_flip=is_black)
+                self.last_root_visits = {act: 1}
+                self.last_profile = {
+                    "syzygy_root_hit": True,
+                    "syzygy_tag": tb_tag,
+                    "syzygy_leaf_hits": 0,
+                    "total_s": time.perf_counter() - t_start,
+                }
+                return act, tb_mv.uci(), tb_val, 1, [tb_mv.uci()], 1
+
         if board_tensor is None:
             board_tensor = board_to_tensor(board, layout=self.encoder_layout)
 
@@ -993,6 +1073,8 @@ class NPUBatchedPUCTSearch:
             "reused_subtree_nodes": 0,
             "invalidated_path_dep_nodes": 0,
             "max_depth_cache": 0,
+            "syzygy_root_hit": False,
+            "syzygy_leaf_hits": 0,
             "mode": "async_overlap" if (has_async and self.use_async_overlap) else ("double_buffer" if has_async else "sync"),
             "inflight_during_cpu_work": self.async_inflight if (has_async and self.use_async_overlap) else (1 if has_async else 0),
         }

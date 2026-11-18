@@ -1,0 +1,77 @@
+{
+  "mode": "job_a",
+  "a1_eval_150k": {
+    "far_test_50k": {
+      "samples": 50000,
+      "policy_ce": 1.5659,
+      "top1_pct": 51.51,
+      "top3_pct": 80.15,
+      "hl_gauss_ce": 2.5723,
+      "val_mse": 0.06117,
+      "decisive_sign_pct": 95.5,
+      "max_policy_logit_drift_vs_346m": 0.0
+    },
+    "in_region_50k": {
+      "samples": 50000,
+      "policy_ce": 153.2424,
+      "top1_pct": 50.16,
+      "top3_pct": 79.13,
+      "hl_gauss_ce": 2.7644,
+      "val_mse": 0.05459,
+      "decisive_sign_pct": 95.24,
+      "max_policy_logit_drift_vs_346m": 0.0
+    },
+    "heldout_400m_50k": {
+      "samples": 50000,
+      "policy_ce": 1.5525,
+      "top1_pct": 49.87,
+      "top3_pct": 79.36,
+      "hl_gauss_ce": 2.5128,
+      "val_mse": 0.04585,
+      "decisive_sign_pct": 96.1,
+      "max_policy_logit_drift_vs_346m": 0.0
+    }
+  },
+  "a2_eval_150k": {
+    "far_test_50k": {
+      "samples": 50000,
+      "policy_ce": 1.4589,
+      "top1_pct": 51.58,
+      "top3_pct": 80.74,
+      "hl_gauss_ce": 2.5658,
+      "val_mse": 0.0617,
+      "decisive_sign_pct": 95.54,
+      "max_policy_logit_drift_vs_346m": 17.5625
+    },
+    "in_region_50k": {
+      "samples": 50000,
+      "policy_ce": 153.4006,
+      "top1_pct": 49.3,
+      "top3_pct": 78.18,
+      "hl_gauss_ce": 2.7683,
+      "val_mse": 0.05539,
+      "decisive_sign_pct": 95.41,
+      "max_policy_logit_drift_vs_346m": 17.40625
+    },
+    "heldout_400m_50k": {
+      "samples": 50000,
+      "policy_ce": 1.5219,
+      "top1_pct": 49.42,
+      "top3_pct": 78.94,
+      "hl_gauss_ce": 2.5231,
+      "val_mse": 0.04819,
+      "decisive_sign_pct": 96.1,
+      "max_policy_logit_drift_vs_346m": 16.1875
+    }
+  },
+  "a1_export": {
+    "resumed_from_s3": "checkpoints/phase4_job_a/A1/ckpt_A1_frozen_trunk.pt"
+  },
+  "a2_export": {
+    "folded_npz": "/opt/ml/model/A2/ckpt_A2_joint_middle_qat_folded.npz",
+    "fp16_xml": "/opt/ml/model/A2/ckpt_A2_joint_middle_qat_fp16.xml",
+    "fp16_bin": "/opt/ml/model/A2/ckpt_A2_joint_middle_qat_fp16.bin",
+    "hybrid_int8_xml": "/opt/ml/model/A2/ckpt_A2_joint_middle_qat_hybrid_int8.xml",
+    "hybrid_int8_bin": "/opt/ml/model/A2/ckpt_A2_joint_middle_qat_hybrid_int8.bin"
+  }
+}

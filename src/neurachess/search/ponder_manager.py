@@ -38,6 +38,8 @@ class PonderManager:
     def __init__(self, search_engine: NPUBatchedPUCTSearch, use_ponder: bool = False):
         self.search_engine = search_engine
         self.use_ponder = use_ponder
+        if hasattr(search_engine, "set_ponder_mode"):
+            search_engine.set_ponder_mode(bool(use_ponder))
 
         self._lock = threading.Lock()
         self._worker_thread: threading.Thread | None = None

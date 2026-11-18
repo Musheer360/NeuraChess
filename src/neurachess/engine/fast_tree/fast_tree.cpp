@@ -131,6 +131,7 @@ struct alignas(64) ChildSoAArena {
     AlignedSlab<int32_t> virtual_loss{32768};
     AlignedSlab<float>   slv_q{32768};
     AlignedSlab<float>   slv_mask{32768}; // -1.0f (sign bit=1) => use slv_q; +1.0f (sign bit=0) => use normal Q
+    AlignedSlab<float>   fpu_bias{32768}; // per-child SEE / action-value FPU shift (0.0f by default)
     int32_t used = 0;
 
     void clear() noexcept { used = 0; }
@@ -148,6 +149,7 @@ struct alignas(64) ChildSoAArena {
         virtual_loss.reserve(needed);
         slv_q.reserve(needed);
         slv_mask.reserve(needed);
+        fpu_bias.reserve(needed);
 
         for (int32_t i = nc; i < padded; ++i) {
             int32_t s = off + i;
@@ -157,6 +159,7 @@ struct alignas(64) ChildSoAArena {
             virtual_loss[(size_t)s] = 0;
             slv_q[(size_t)s] = -1.0e30f;
             slv_mask[(size_t)s] = -1.0f; // sign bit 1 => always selects -1e30f
+            fpu_bias[(size_t)s] = 0.0f;
         }
         used += padded;
         return off;
@@ -184,6 +187,7 @@ struct Node {
     int32_t self_visits;        // Direct evaluations at this node
     int32_t num_legal_moves;    // Legal move count (-1 if unknown)
     int32_t board_idx;          // Index into FastTreeArena::boards (-1 if uninstantiated)
+    float fpu_bias;             // Per-child FPU bias (SEE / lookahead shaping, 0.0f by default)
     uint16_t move_packed;       // from_sq | (to_sq << 6) | (promo << 12)
     uint8_t is_expanded;
     uint8_t is_instantiated;
@@ -336,12 +340,16 @@ private:
 
 struct BatchStats {
     int64_t terminal_backups = 0;
+    int64_t syzygy_leaf_hits = 0;
     int64_t collisions = 0;
     int64_t nn_cache_hits = 0;
     int64_t nn_cache_misses = 0;
     int64_t cache_expanded_nodes = 0;
     int64_t dedup_avoided = 0;
+    int64_t sum_leaf_ply = 0;
+    int64_t total_leaf_count = 0;
     int32_t max_depth_cache = 0;
+    int32_t max_leaf_ply = 0;
 };
 
 struct KeyPairHash {
@@ -404,6 +412,33 @@ public:
     double fpu_reduction;
     double root_fpu_reduction;
     int use_exact_solver;
+    int use_see_prior_shaping = 0;
+
+    using SyzygyLeafFn = int32_t (*)(
+        void* user_ctx,
+        const uint64_t* w_bbs6,
+        const uint64_t* b_bbs6,
+        int32_t turn_is_white,
+        int32_t ep_sq,
+        int32_t halfmove,
+        double* out_val,
+        int32_t* out_solved,
+        int32_t* out_mate_plies
+    );
+    SyzygyLeafFn syzygy_cb = nullptr;
+    void* syzygy_ctx = nullptr;
+    int32_t syzygy_max_pieces = 5;
+
+    struct SyzCacheEntry {
+        uint64_t hi;
+        uint64_t lo;
+        int32_t eff_hm;
+        int32_t hit;
+        double val;
+        int32_t solved;
+        int32_t mate_plies;
+    };
+    std::unordered_map<std::pair<uint64_t, uint64_t>, SyzCacheEntry, KeyPairHash> syzygy_cache;
 
     // Active batch collection state
     int32_t cur_batch_target = 0;
@@ -411,6 +446,10 @@ public:
     int32_t cur_max_depth = 14;
     int cur_use_nn_cache = 0;
     int cur_use_pending = 0;
+    int cur_enable_collision_flush = 0;
+    int32_t cur_non_leaf_hits = 0;
+    int32_t cur_hits_after_leaf = 0;
+    int32_t cur_collision_flush_b = 0;
     std::vector<int32_t> cur_path;
 
     std::vector<int32_t> leaves_to_eval;
@@ -464,6 +503,7 @@ public:
         soa.value_sum[(size_t)s] = (float)n.value_sum;
         soa.visit_count[(size_t)s] = n.visit_count;
         soa.virtual_loss[(size_t)s] = n.virtual_loss;
+        soa.fpu_bias[(size_t)s] = n.fpu_bias;
         if (n.is_solved && n.solved_value <= -1.0) {
             soa.slv_q[(size_t)s] = 1000.0f - (float)n.mate_plies;
             soa.slv_mask[(size_t)s] = -1.0f;
@@ -537,7 +577,72 @@ public:
 
         int32_t iterm, isolv, pdep;
         double tval, sval;
-        boards[(size_t)new_bidx].evaluate_terminal(iterm, tval, isolv, sval, pdep);
+        const bb::CBoard& cboard = boards[(size_t)new_bidx];
+        cboard.evaluate_terminal(iterm, tval, isolv, sval, pdep);
+        int32_t sz_mate_plies = 0;
+
+        if (!iterm && !isolv && syzygy_cb != nullptr && cboard.clean_castling_rights() == 0ULL) {
+            int pc = bb::popcnt64(cboard.occ_w | cboard.occ_b);
+            if (pc <= syzygy_max_pieces) {
+                int32_t eff_hm = (cboard.halfmove_clock > 0) ? (int32_t)cboard.halfmove_clock : 0;
+                uint64_t mix_lo = cboard.zobrist_lo ^ bb::splitmix64((uint64_t)eff_hm + 0x517CC1B727220A95ULL);
+                std::pair<uint64_t, uint64_t> ckey{cboard.zobrist_hi, mix_lo};
+                int32_t hit = 0;
+                double sz_val = 0.0;
+                int32_t sz_solved = 0;
+                int32_t sz_mp = 0;
+                auto it = syzygy_cache.find(ckey);
+                if (it != syzygy_cache.end() &&
+                    it->second.hi == cboard.zobrist_hi &&
+                    it->second.lo == cboard.zobrist_lo &&
+                    it->second.eff_hm == eff_hm) {
+                    hit = it->second.hit;
+                    sz_val = it->second.val;
+                    sz_solved = it->second.solved;
+                    sz_mp = it->second.mate_plies;
+                } else {
+                    uint64_t w_bbs[6] = {
+                        cboard.pawns & cboard.occ_w,
+                        cboard.knights & cboard.occ_w,
+                        cboard.bishops & cboard.occ_w,
+                        cboard.rooks & cboard.occ_w,
+                        cboard.queens & cboard.occ_w,
+                        cboard.kings & cboard.occ_w
+                    };
+                    uint64_t b_bbs[6] = {
+                        cboard.pawns & cboard.occ_b,
+                        cboard.knights & cboard.occ_b,
+                        cboard.bishops & cboard.occ_b,
+                        cboard.rooks & cboard.occ_b,
+                        cboard.queens & cboard.occ_b,
+                        cboard.kings & cboard.occ_b
+                    };
+                    hit = syzygy_cb(
+                        syzygy_ctx,
+                        w_bbs,
+                        b_bbs,
+                        (int32_t)cboard.turn_is_white,
+                        (int32_t)cboard.ep_square,
+                        (int32_t)cboard.halfmove_clock,
+                        &sz_val,
+                        &sz_solved,
+                        &sz_mp
+                    );
+                    if (syzygy_cache.size() >= 131072ULL) {
+                        syzygy_cache.clear();
+                    }
+                    syzygy_cache[ckey] = {cboard.zobrist_hi, cboard.zobrist_lo, eff_hm, hit, sz_val, sz_solved, sz_mp};
+                }
+                if (hit) {
+                    iterm = 1;
+                    tval = sz_val;
+                    isolv = sz_solved;
+                    sval = sz_solved ? sz_val : 0.0;
+                    sz_mate_plies = sz_solved ? sz_mp : 0;
+                    stats.syzygy_leaf_hits += 1;
+                }
+            }
+        }
 
         Node& n = nodes[(size_t)node_idx];
         n.board_idx = new_bidx;
@@ -546,9 +651,12 @@ public:
         n.terminal_value = tval;
         n.is_solved = (uint8_t)isolv;
         n.solved_value = sval;
+        if (sz_mate_plies > 0) {
+            n.mate_plies = sz_mate_plies;
+        }
         n.path_dep_draw = (uint8_t)pdep;
-        n.zobrist_hash = boards[(size_t)new_bidx].zobrist_hi;
-        n.verify_hash = boards[(size_t)new_bidx].zobrist_lo;
+        n.zobrist_hash = cboard.zobrist_hi;
+        n.verify_hash = cboard.zobrist_lo;
         n.has_cache_key = 1;
         if (isolv) {
             sync_node_to_soa(node_idx);
@@ -594,7 +702,10 @@ public:
         }
         int32_t eff_visits = ch.visit_count + ch.virtual_loss;
         if (eff_visits == 0) {
-            return fpu_value;
+            double fv = fpu_value + (double)ch.fpu_bias;
+            if (fv < -1.0) return -1.0;
+            if (fv > 1.0) return 1.0;
+            return fv;
         }
         double parent_total = -ch.value_sum - (double)ch.virtual_loss;
         return parent_total / (double)eff_visits;
@@ -626,6 +737,7 @@ public:
         const int32_t* __restrict vl_p  = soa.virtual_loss.ptr + off;
         const float*   __restrict sq_p  = soa.slv_q.ptr + off;
         const float*   __restrict sm_p  = soa.slv_mask.ptr + off;
+        const float*   __restrict fb_p  = soa.fpu_bias.ptr + off;
 
         // 1. AVX2 visited-mass reduction + _mm256_sqrt_ps for FPU and sqrt(parent_visits)
         float fpu_f = 0.0f;
@@ -664,6 +776,7 @@ public:
         const __m256 v_fpu      = _mm256_set1_ps(fpu_f);
         const __m256 v_c_sqrtn  = _mm256_set1_ps((float)c_puct * sqrt_n_f);
         const __m256 v_one      = _mm256_set1_ps(1.0f);
+        const __m256 v_neg_one  = _mm256_set1_ps(-1.0f);
         const __m256 v_zero_f   = _mm256_setzero_ps();
         const __m256i v_zero_i  = _mm256_setzero_si256();
 
@@ -686,7 +799,9 @@ public:
             __m256 v_unvis_m = _mm256_castsi256_ps(_mm256_cmpeq_epi32(v_eff_i, v_zero_i));
             __m256 v_safe_den = _mm256_blendv_ps(v_eff_f, v_one, v_unvis_m);
             __m256 v_q_vis    = _mm256_div_ps(v_ptot, v_safe_den);
-            __m256 v_q        = _mm256_blendv_ps(v_q_vis, v_fpu, v_unvis_m);
+            __m256 v_fb       = _mm256_load_ps(fb_p + i);
+            __m256 v_fpu_ch   = _mm256_max_ps(v_neg_one, _mm256_min_ps(v_one, _mm256_add_ps(v_fpu, v_fb)));
+            __m256 v_q        = _mm256_blendv_ps(v_q_vis, v_fpu_ch, v_unvis_m);
 
             __m256 v_slv_m = _mm256_load_ps(sm_p + i);
             __m256 v_slv_q = _mm256_load_ps(sq_p + i);
@@ -844,6 +959,19 @@ public:
         return (double)(ev / sum_exp);
     }
 
+    inline float compute_see_fpu_bias(const bb::CBoard* parent_cb, uint16_t mv, double prior) const noexcept {
+        if (!use_see_prior_shaping || parent_cb == nullptr) return 0.0f;
+        if (!parent_cb->is_capture_move(mv)) return 0.0f;
+        int see_cp = parent_cb->see(mv);
+        if (see_cp < -100 && prior < 0.15) {
+            return -0.15f;
+        }
+        if (see_cp >= 100) {
+            return 0.05f;
+        }
+        return 0.0f;
+    }
+
     void attach_or_update_children(
         int32_t node_idx,
         int32_t sel_len,
@@ -855,6 +983,8 @@ public:
         int32_t old_fc = nodes[(size_t)node_idx].first_child_idx;
         int32_t old_nc = nodes[(size_t)node_idx].num_children;
         int32_t child_ply = nodes[(size_t)node_idx].ply + 1;
+        int32_t parent_bidx = (use_see_prior_shaping && native_board_mode) ? nodes[(size_t)node_idx].board_idx : -1;
+        const bb::CBoard* parent_cb = (parent_bidx >= 0 && (size_t)parent_bidx < boards.size()) ? &boards[(size_t)parent_bidx] : nullptr;
         int32_t soa_off = soa.alloc_block(sel_len);
 
         if (old_nc == 0 || old_fc < 0) {
@@ -863,7 +993,9 @@ public:
             for (int32_t i = 0; i < sel_len; ++i) {
                 int32_t c_idx = new_fc + i;
                 Node ch{};
-                ch.prior = exact_prior_div(exp_logits[i], sum_exp);
+                double pr = exact_prior_div(exp_logits[i], sum_exp);
+                ch.prior = pr;
+                ch.fpu_bias = compute_see_fpu_bias(parent_cb, c_moves[i], pr);
                 ch.first_child_idx = -1;
                 ch.soa_offset = -1;
                 ch.soa_slot = soa_off + i;
@@ -886,6 +1018,7 @@ public:
             for (int32_t i = 0; i < sel_len; ++i) {
                 int32_t act = (int32_t)c_acts[i];
                 double pr = exact_prior_div(exp_logits[i], sum_exp);
+                float fb = compute_see_fpu_bias(parent_cb, c_moves[i], pr);
                 int32_t matched_old = -1;
                 for (int32_t j = 0; j < old_nc; ++j) {
                     if (nodes[(size_t)(old_fc + j)].action_from_parent == act) {
@@ -897,6 +1030,7 @@ public:
                 if (matched_old >= 0) {
                     Node copied = nodes[(size_t)matched_old];
                     copied.prior = pr;
+                    copied.fpu_bias = fb;
                     copied.ply = child_ply;
                     copied.parent_idx = node_idx;
                     copied.soa_slot = soa_off + i;
@@ -909,6 +1043,7 @@ public:
                 } else {
                     Node ch{};
                     ch.prior = pr;
+                    ch.fpu_bias = fb;
                     ch.first_child_idx = -1;
                     ch.soa_offset = -1;
                     ch.soa_slot = soa_off + i;
@@ -951,6 +1086,7 @@ public:
     }
 
     int32_t run_selection_slots(int32_t* out_node_idx, int32_t* out_parent_idx, uint16_t* out_move_packed) {
+        int32_t term_retries = 0;
         while (cur_slot < cur_batch_target) {
             if (use_exact_solver && nodes[0].is_solved && nodes[0].mate_plies <= 3) {
                 break;
@@ -980,8 +1116,19 @@ public:
                 }
             }
 
+            bool leaf_is_term = (nodes[(size_t)curr].is_terminal != 0) ||
+                                (use_exact_solver && nodes[(size_t)curr].is_solved != 0);
             process_instantiated_leaf(curr);
+            if (leaf_is_term && leaves_to_eval.empty() &&
+                !(use_exact_solver && nodes[0].is_solved) &&
+                term_retries < 16) {
+                term_retries++;
+                continue;
+            }
             cur_slot++;
+            if (should_flush_collisions()) {
+                break;
+            }
         }
 
         finalize_batch();
@@ -991,6 +1138,44 @@ public:
         return 0;
     }
 
+    inline void record_non_leaf_hit() {
+        cur_non_leaf_hits += 1;
+        if (!leaves_to_eval.empty()) {
+            cur_hits_after_leaf += 1;
+        }
+    }
+
+    inline bool should_flush_collisions() {
+        if (!cur_enable_collision_flush || cur_batch_target < 16 || cur_hits_after_leaf < 6) {
+            return false;
+        }
+        int32_t uniq = (int32_t)leaves_to_eval.size();
+        if (uniq >= 1 && uniq <= 4) {
+            cur_collision_flush_b = 4;
+            return true;
+        }
+        if (uniq >= 5 && uniq <= 8) {
+            cur_collision_flush_b = 8;
+            return true;
+        }
+        return false;
+    }
+
+    inline void pack_leaves_to_tensor(const int32_t* leaves, int32_t n_eval, int32_t batch_size, float* out_batch_tensors) {
+        if (n_eval <= 0 || out_batch_tensors == nullptr) {
+            return;
+        }
+        int32_t n_pack = std::min(n_eval, batch_size);
+        for (int32_t i = 0; i < n_pack; ++i) {
+            int32_t li = leaves[i];
+            int32_t bidx = nodes[(size_t)li].board_idx;
+            boards[(size_t)bidx].encode_gpu_unpack(out_batch_tensors + (size_t)i * 1152ULL);
+        }
+        for (int32_t i = n_pack; i < batch_size; ++i) {
+            std::memcpy(out_batch_tensors + (size_t)i * 1152ULL, out_batch_tensors, 1152ULL * sizeof(float));
+        }
+    }
+
     void process_instantiated_leaf(int32_t curr) {
         Node& leaf = nodes[(size_t)curr];
 
@@ -998,6 +1183,10 @@ public:
             double val = (use_exact_solver && leaf.is_solved) ? leaf.solved_value : leaf.terminal_value;
             backup_value(curr, cur_path, val);
             stats.terminal_backups += 1;
+            stats.sum_leaf_ply += leaf.ply;
+            stats.total_leaf_count += 1;
+            if (leaf.ply > stats.max_leaf_ply) stats.max_leaf_ply = leaf.ply;
+            record_non_leaf_hit();
             return;
         }
 
@@ -1007,6 +1196,7 @@ public:
             }
             collision_paths.push_back(cur_path);
             stats.collisions += 1;
+            record_non_leaf_hit();
             return;
         }
 
@@ -1025,12 +1215,17 @@ public:
                 if (leaf.ply > stats.max_depth_cache) {
                     stats.max_depth_cache = leaf.ply;
                 }
+                stats.sum_leaf_ply += leaf.ply;
+                stats.total_leaf_count += 1;
+                if (leaf.ply > stats.max_leaf_ply) stats.max_leaf_ply = leaf.ply;
+                record_non_leaf_hit();
                 return;
             } else {
                 stats.nn_cache_misses += 1;
                 auto kp = std::make_pair(khi, klo);
                 if (batch_keys.find(kp) != batch_keys.end()) {
                     stats.dedup_avoided += 1;
+                    record_non_leaf_hit();
                     return;
                 }
                 batch_keys.insert(kp);
@@ -1054,6 +1249,8 @@ public:
             if (cur_use_pending) {
                 pending_nodes.insert(curr);
             }
+        } else {
+            record_non_leaf_hit();
         }
     }
 
@@ -1315,6 +1512,36 @@ FT_EXPORT double ft_expand_node_with_logits(
     return leaf_val;
 }
 
+static inline int32_t select_begin_impl(
+    FastTreeArena* t,
+    int32_t batch_size,
+    int32_t max_depth,
+    int32_t use_nn_cache,
+    int32_t use_pending,
+    int enable_collision_flush,
+    int32_t* out_node_idx,
+    int32_t* out_parent_idx,
+    uint16_t* out_move_packed
+) {
+    t->cur_batch_target = batch_size;
+    t->cur_slot = 0;
+    t->cur_max_depth = max_depth;
+    t->cur_use_nn_cache = use_nn_cache;
+    t->cur_use_pending = use_pending;
+    t->cur_enable_collision_flush = enable_collision_flush;
+    t->cur_non_leaf_hits = 0;
+    t->cur_hits_after_leaf = 0;
+    t->cur_collision_flush_b = 0;
+    t->leaves_to_eval.clear();
+    t->paths_to_leaves.clear();
+    t->vl_applied_paths.clear();
+    t->collision_paths.clear();
+    t->cache_hits_to_process.clear();
+    t->batch_keys.clear();
+
+    return t->run_selection_slots(out_node_idx, out_parent_idx, out_move_packed);
+}
+
 FT_EXPORT int32_t ft_select_begin(
     void* tree_ptr,
     int32_t batch_size,
@@ -1325,20 +1552,17 @@ FT_EXPORT int32_t ft_select_begin(
     int32_t* out_parent_idx,
     uint16_t* out_move_packed
 ) {
-    auto* t = static_cast<FastTreeArena*>(tree_ptr);
-    t->cur_batch_target = batch_size;
-    t->cur_slot = 0;
-    t->cur_max_depth = max_depth;
-    t->cur_use_nn_cache = use_nn_cache;
-    t->cur_use_pending = use_pending;
-    t->leaves_to_eval.clear();
-    t->paths_to_leaves.clear();
-    t->vl_applied_paths.clear();
-    t->collision_paths.clear();
-    t->cache_hits_to_process.clear();
-    t->batch_keys.clear();
-
-    return t->run_selection_slots(out_node_idx, out_parent_idx, out_move_packed);
+    return select_begin_impl(
+        static_cast<FastTreeArena*>(tree_ptr),
+        batch_size,
+        max_depth,
+        use_nn_cache,
+        use_pending,
+        0,
+        out_node_idx,
+        out_parent_idx,
+        out_move_packed
+    );
 }
 
 FT_EXPORT int32_t ft_select_provide_instantiation(
@@ -1396,6 +1620,9 @@ FT_EXPORT void* ft_pop_inflight_batch(void* tree_ptr, int32_t* out_leaves, int32
         out_leaves[i] = li;
         int32_t p = t->nodes[(size_t)li].ply;
         if (p > max_ply) max_ply = p;
+        t->stats.sum_leaf_ply += p;
+        t->stats.total_leaf_count += 1;
+        if (p > t->stats.max_leaf_ply) t->stats.max_leaf_ply = p;
     }
     h->max_leaf_ply = max_ply;
     *out_n_eval = n_eval;
@@ -2163,19 +2390,88 @@ FT_EXPORT void* ft_select_and_pack_native(
 
     int32_t leaves_tmp[128];
     void* handle = ft_pop_inflight_batch(tree_ptr, leaves_tmp, out_n_eval, out_max_ply);
-    int32_t n_eval = *out_n_eval;
+    t->pack_leaves_to_tensor(leaves_tmp, *out_n_eval, batch_size, out_batch_tensors);
+    return handle;
+}
 
-    if (n_eval > 0 && out_batch_tensors != nullptr) {
-        for (int32_t i = 0; i < n_eval; ++i) {
-            int32_t li = leaves_tmp[i];
-            int32_t bidx = t->nodes[(size_t)li].board_idx;
-            t->boards[(size_t)bidx].encode_gpu_unpack(out_batch_tensors + (size_t)i * 1152ULL);
-        }
-        for (int32_t i = n_eval; i < batch_size; ++i) {
-            std::memcpy(out_batch_tensors + (size_t)i * 1152ULL, out_batch_tensors, 1152ULL * sizeof(float));
+FT_EXPORT void* ft_select_dynamic_native(
+    void* tree_ptr,
+    int32_t max_depth,
+    int32_t use_nn_cache,
+    int32_t use_pending,
+    int32_t* out_chosen_b,
+    int32_t* out_reason,
+    int32_t* out_n_eval,
+    int32_t* out_max_ply
+) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    int in_chk = 0;
+    int32_t nc = 0;
+    int32_t root_visits = 0;
+    if (!t->nodes.empty()) {
+        const Node& root = t->nodes[0];
+        nc = root.num_children;
+        root_visits = root.visit_count;
+        if (t->native_board_mode && root.board_idx >= 0) {
+            in_chk = t->boards[(size_t)root.board_idx].is_check() ? 1 : 0;
         }
     }
+
+    // Strict Collision & Cold-Start Gear-Shifter v3 reason codes:
+    //   0 -> B=16 (workhorse wave)
+    //   1 -> B=4  (Cold-Start Ramp: root visit_count < 16)
+    //   2 -> B=4  (Narrow Root capped at root visit_count < 32: in check or <= 5 legal moves)
+    //   3 -> B=4  (Collision-Bounded Flush: >= 6 non-leaf hits with 1..4 unique uncached leaves)
+    //   4 -> B=8  (Collision-Bounded Flush: >= 6 non-leaf hits with 5..8 unique uncached leaves)
+    int32_t target_b = 16;
+    int32_t reason = 0;
+    int enable_flush = 1;
+    if (root_visits < 32 && (in_chk || (nc > 0 && nc <= 5))) {
+        target_b = 4;
+        reason = 2;
+        enable_flush = 0;
+    } else if (root_visits < 16) {
+        target_b = 4;
+        reason = 1;
+        enable_flush = 0;
+    }
+
+    int32_t dummy_n = -1, dummy_p = -1;
+    uint16_t dummy_m = 0;
+    select_begin_impl(t, target_b, max_depth, use_nn_cache, use_pending, enable_flush, &dummy_n, &dummy_p, &dummy_m);
+
+    int32_t leaves_tmp[128];
+    void* handle = ft_pop_inflight_batch(tree_ptr, leaves_tmp, out_n_eval, out_max_ply);
+    int32_t n_eval = *out_n_eval;
+    int32_t chosen_b = target_b;
+
+    if (enable_flush && n_eval > 0) {
+        if (t->cur_collision_flush_b == 4 || (n_eval <= 4 && t->cur_non_leaf_hits >= 6)) {
+            chosen_b = 4;
+            reason = 3;
+        } else if (t->cur_collision_flush_b == 8 || (n_eval <= 8 && t->cur_non_leaf_hits >= 6)) {
+            chosen_b = 8;
+            reason = 4;
+        }
+    }
+
+    if (out_chosen_b) *out_chosen_b = chosen_b;
+    if (out_reason) *out_reason = reason;
     return handle;
+}
+
+FT_EXPORT void ft_pack_inflight_batch_native(
+    void* tree_ptr,
+    void* batch_handle,
+    int32_t target_batch_size,
+    float* out_batch_tensors
+) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    auto* h = static_cast<InflightBatchHandle*>(batch_handle);
+    if (!h || h->leaves.empty() || !out_batch_tensors) {
+        return;
+    }
+    t->pack_leaves_to_tensor(h->leaves.data(), (int32_t)h->leaves.size(), target_batch_size, out_batch_tensors);
 }
 
 FT_EXPORT void ft_backup_batch_native(
@@ -2332,4 +2628,109 @@ FT_EXPORT int32_t ft_test_math_guards_active(double d_val, float f_val) {
     if (std::isnan(f_val)) mask |= 4;
     if (std::isinf(f_val)) mask |= 8;
     return mask;
+}
+
+FT_EXPORT void ft_tree_set_see_prior_shaping(void* tree_ptr, int32_t enabled) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    t->use_see_prior_shaping = enabled ? 1 : 0;
+}
+
+FT_EXPORT void ft_tree_set_syzygy_cb(void* tree_ptr, void* cb_ptr, void* user_ctx, int32_t max_pieces) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    t->syzygy_cb = reinterpret_cast<FastTreeArena::SyzygyLeafFn>(cb_ptr);
+    t->syzygy_ctx = user_ctx;
+    t->syzygy_max_pieces = (max_pieces > 0) ? max_pieces : 5;
+}
+
+FT_EXPORT int64_t ft_get_syzygy_leaf_hits(void* tree_ptr) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    return t->stats.syzygy_leaf_hits;
+}
+
+FT_EXPORT void ft_get_depth_stats(
+    void* tree_ptr,
+    int64_t* out_sum_ply,
+    int64_t* out_leaf_count,
+    int32_t* out_max_ply
+) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    if (out_sum_ply) *out_sum_ply = t->stats.sum_leaf_ply;
+    if (out_leaf_count) *out_leaf_count = t->stats.total_leaf_count;
+    if (out_max_ply) *out_max_ply = t->stats.max_leaf_ply;
+}
+
+FT_EXPORT int32_t ft_recommend_batch_size(
+    void* tree_ptr,
+    int32_t /*prev_n_eval*/,
+    int32_t* out_reason,
+    double* out_entropy,
+    int32_t* out_in_check
+) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    int in_chk = 0;
+    if (t->native_board_mode && !t->nodes.empty() && t->nodes[0].board_idx >= 0) {
+        in_chk = t->boards[(size_t)t->nodes[0].board_idx].is_check() ? 1 : 0;
+    }
+    if (out_in_check) *out_in_check = in_chk;
+
+    double entropy = 0.0;
+    int32_t nc = 0;
+    int32_t fc = -1;
+    int32_t root_visits = 0;
+
+    if (!t->nodes.empty()) {
+        const Node& root = t->nodes[0];
+        fc = root.first_child_idx;
+        nc = root.num_children;
+        root_visits = root.visit_count;
+        for (int32_t i = 0; i < nc; ++i) {
+            double p = t->nodes[(size_t)(fc + i)].prior;
+            if (p > 1e-8) {
+                entropy -= p * std::log(p);
+            }
+        }
+    }
+    if (out_entropy) *out_entropy = entropy;
+
+    // Reason codes match `ft_select_dynamic_native`:
+    //   0 -> B=16 (workhorse wave)
+    //   1 -> B=4  (Cold-Start Ramp: root visit_count < 16)
+    //   2 -> B=4  (Narrow Root capped at root visit_count < 32: in check or <= 5 legal moves)
+    if (root_visits < 32 && (in_chk || (nc > 0 && nc <= 5))) {
+        if (out_reason) *out_reason = 2;
+        return 4;
+    }
+    if (root_visits < 16) {
+        if (out_reason) *out_reason = 1;
+        return 4;
+    }
+    if (out_reason) *out_reason = 0;
+    return 16;
+}
+
+FT_EXPORT int32_t ft_eval_see_native(
+    const uint64_t* bbs_8,
+    uint64_t castling_rights,
+    int32_t ep_square,
+    int32_t turn_is_white,
+    uint16_t move_packed
+) {
+    bb::CBoard cb = make_cboard_from_args(bbs_8, castling_rights, ep_square, turn_is_white, 0, 0, nullptr, nullptr);
+    return (int32_t)cb.see(move_packed);
+}
+
+FT_EXPORT int64_t ft_bench_see_native(
+    const uint64_t* bbs_8,
+    uint64_t castling_rights,
+    int32_t ep_square,
+    int32_t turn_is_white,
+    uint16_t move_packed,
+    int32_t iters
+) {
+    bb::CBoard cb = make_cboard_from_args(bbs_8, castling_rights, ep_square, turn_is_white, 0, 0, nullptr, nullptr);
+    int64_t acc = 0;
+    for (int32_t i = 0; i < iters; ++i) {
+        acc += cb.see(move_packed);
+    }
+    return acc;
 }

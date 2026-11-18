@@ -23,8 +23,12 @@ from neurachess._paths import find_repo_root
 ROOT_DIR = find_repo_root()
 WEIGHTS_DIR = ROOT_DIR / "weights"
 DEFAULT_CACHE_DIR = str(WEIGHTS_DIR / "cache")
-DEFAULT_MODEL_XML = str(WEIGHTS_DIR / "neurachess-10x192-fp16.xml")
-DEFAULT_WEIGHTS_NPZ = str(WEIGHTS_DIR / "neurachess-10x192-fp16.npz")
+DEFAULT_MODEL_XML = str(WEIGHTS_DIR / "neurachess-10x192-qat-int8.xml")
+DEFAULT_WEIGHTS_NPZ = str(WEIGHTS_DIR / "neurachess-10x192-qat-int8.npz")
+LEGACY_FP16_MODEL_XML = str(WEIGHTS_DIR / "neurachess-10x192-fp16.xml")
+LEGACY_FP16_WEIGHTS_NPZ = str(WEIGHTS_DIR / "neurachess-10x192-fp16.npz")
+DEEP_MODEL_XML = str(WEIGHTS_DIR / "neurachess-12x192-qat-int8.xml")
+DEEP_WEIGHTS_NPZ = str(WEIGHTS_DIR / "neurachess-12x192-qat-int8.npz")
 FALLBACK_MODEL_XML = str(WEIGHTS_DIR / "neurachess-10x128-fp16.xml")
 FALLBACK_WEIGHTS_NPZ = str(WEIGHTS_DIR / "neurachess-10x128-fp16.npz")
 
@@ -48,6 +52,8 @@ def resolve_default_model_paths() -> tuple[str | None, str | None]:
     """Return `(xml_path, npz_path)` for the highest-priority available local model."""
     for xml_p, npz_p in (
         (DEFAULT_MODEL_XML, DEFAULT_WEIGHTS_NPZ),
+        (LEGACY_FP16_MODEL_XML, LEGACY_FP16_WEIGHTS_NPZ),
+        (DEEP_MODEL_XML, DEEP_WEIGHTS_NPZ),
         (FALLBACK_MODEL_XML, FALLBACK_WEIGHTS_NPZ),
     ):
         xml_exists = Path(xml_p).exists()
@@ -62,9 +68,9 @@ class NPUModel:
     OpenVINO Model compiled to Intel AI Boost NPU (or CPU/GPU).
 
     When invoked with no explicit weights/IR/architecture arguments, resolves
-    `weights/neurachess-10x192-fp16.{xml,npz}` (falling back to
-    `weights/neurachess-10x128-fp16.{xml,npz}`) in `LATENCY` mode with
-    `NPU_TURBO` enabled.
+    `weights/neurachess-10x192-qat-int8.{xml,npz}` (falling back through
+    `10x192-fp16`, `12x192-qat-int8`, and `10x128-fp16`) in `LATENCY` mode
+    with `NPU_TURBO` enabled.
     """
 
     def __init__(

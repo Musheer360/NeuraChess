@@ -1,0 +1,135 @@
+{
+  "total_games": 20,
+  "wins": 0,
+  "draws": 11,
+  "losses": 9,
+  "points": 5.5,
+  "score_pct": 27.5,
+  "wilson_95_ci_pct": [
+    12.84,
+    49.41
+  ],
+  "effective_nps": 3340.8,
+  "games": [
+    {
+      "pair": 0,
+      "nc_color": "white",
+      "nc_score": 0.0,
+      "plies": 146
+    },
+    {
+      "pair": 0,
+      "nc_color": "black",
+      "nc_score": 0.0,
+      "plies": 103
+    },
+    {
+      "pair": 1,
+      "nc_color": "white",
+      "nc_score": 0.5,
+      "plies": 74
+    },
+    {
+      "pair": 1,
+      "nc_color": "black",
+      "nc_score": 0.0,
+      "plies": 83
+    },
+    {
+      "pair": 2,
+      "nc_color": "white",
+      "nc_score": 0.0,
+      "plies": 112
+    },
+    {
+      "pair": 2,
+      "nc_color": "black",
+      "nc_score": 0.0,
+      "plies": 97
+    },
+    {
+      "pair": 3,
+      "nc_color": "white",
+      "nc_score": 0.0,
+      "plies": 126
+    },
+    {
+      "pair": 3,
+      "nc_color": "black",
+      "nc_score": 0.5,
+      "plies": 46
+    },
+    {
+      "pair": 4,
+      "nc_color": "white",
+      "nc_score": 0.5,
+      "plies": 189
+    },
+    {
+      "pair": 4,
+      "nc_color": "black",
+      "nc_score": 0.5,
+      "plies": 94
+    },
+    {
+      "pair": 5,
+      "nc_color": "white",
+      "nc_score": 0.5,
+      "plies": 143
+    },
+    {
+      "pair": 5,
+      "nc_color": "black",
+      "nc_score": 0.0,
+      "plies": 91
+    },
+    {
+      "pair": 6,
+      "nc_color": "white",
+      "nc_score": 0.5,
+      "plies": 175
+    },
+    {
+      "pair": 6,
+      "nc_color": "black",
+      "nc_score": 0.0,
+      "plies": 77
+    },
+    {
+      "pair": 7,
+      "nc_color": "white",
+      "nc_score": 0.5,
+      "plies": 147
+    },
+    {
+      "pair": 7,
+      "nc_color": "black",
+      "nc_score": 0.0,
+      "plies": 139
+    },
+    {
+      "pair": 8,
+      "nc_color": "white",
+      "nc_score": 0.5,
+      "plies": 220
+    },
+    {
+      "pair": 8,
+      "nc_color": "black",
+      "nc_score": 0.5,
+      "plies": 220
+    },
+    {
+      "pair": 9,
+      "nc_color": "white",
+      "nc_score": 0.5,
+      "plies": 220
+    },
+    {
+      "pair": 9,
+      "nc_color": "black",
+      "nc_score": 0.5,
+      "plies": 144
+    }
+  ]
+}

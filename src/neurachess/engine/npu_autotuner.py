@@ -470,6 +470,8 @@ def main():
         type=str,
         nargs="+",
         default=[
+            os.path.join(ROOT_DIR, "weights", "neurachess-10x192-qat-int8.npz"),
+            os.path.join(ROOT_DIR, "weights", "neurachess-12x192-qat-int8.npz"),
             os.path.join(ROOT_DIR, "weights", "neurachess-10x192-fp16.npz"),
             os.path.join(ROOT_DIR, "weights", "neurachess-10x128-fp16.npz"),
         ],

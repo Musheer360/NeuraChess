@@ -1,0 +1,159 @@
+{
+  "model": "neurachess-10x192-qat-int8 (A2_soup75)",
+  "xml": "C:\\Users\\MusheerAlam\\NeuraChess\\weights\\phase4_synth\\A2_soup75_hybrid_int8.xml",
+  "clean_count": 1979,
+  "excluded_contaminated": 21,
+  "power": {
+    "power_plugged": true,
+    "battery_pct": 99.0
+  },
+  "search_config": {
+    "batch_size": 16,
+    "c_puct": 1.5,
+    "fpu_reduction": 0.2,
+    "root_fpu_reduction": 0.1,
+    "use_fast_tree": true,
+    "use_exact_solver": true,
+    "syzygy_path": null
+  },
+  "results": {
+    "policy_top1_0n": {
+      "solved": 1360,
+      "total": 1979,
+      "pct": 68.72,
+      "time_s": 2.42,
+      "by_bucket": {
+        "<1200": {
+          "solved": 349,
+          "total": 394,
+          "pct": 88.58
+        },
+        "1200-1499": {
+          "solved": 288,
+          "total": 395,
+          "pct": 72.91
+        },
+        "1500-1799": {
+          "solved": 270,
+          "total": 398,
+          "pct": 67.84
+        },
+        "1800-2099": {
+          "solved": 243,
+          "total": 398,
+          "pct": 61.06
+        },
+        "2100+": {
+          "solved": 210,
+          "total": 394,
+          "pct": 53.3
+        }
+      }
+    },
+    "50n": {
+      "solved": 1549,
+      "total": 1979,
+      "pct": 78.27,
+      "time_s": 48.32,
+      "total_nodes": 148062,
+      "nps": 3064.2,
+      "by_bucket": {
+        "<1200": {
+          "solved": 372,
+          "total": 394,
+          "pct": 94.42
+        },
+        "1200-1499": {
+          "solved": 336,
+          "total": 395,
+          "pct": 85.06
+        },
+        "1500-1799": {
+          "solved": 311,
+          "total": 398,
+          "pct": 78.14
+        },
+        "1800-2099": {
+          "solved": 289,
+          "total": 398,
+          "pct": 72.61
+        },
+        "2100+": {
+          "solved": 241,
+          "total": 394,
+          "pct": 61.17
+        }
+      }
+    },
+    "200n": {
+      "solved": 1644,
+      "total": 1979,
+      "pct": 83.07,
+      "time_s": 119.42,
+      "total_nodes": 374201,
+      "nps": 3133.5,
+      "by_bucket": {
+        "<1200": {
+          "solved": 378,
+          "total": 394,
+          "pct": 95.94
+        },
+        "1200-1499": {
+          "solved": 354,
+          "total": 395,
+          "pct": 89.62
+        },
+        "1500-1799": {
+          "solved": 335,
+          "total": 398,
+          "pct": 84.17
+        },
+        "1800-2099": {
+          "solved": 320,
+          "total": 398,
+          "pct": 80.4
+        },
+        "2100+": {
+          "solved": 257,
+          "total": 394,
+          "pct": 65.23
+        }
+      }
+    },
+    "800n": {
+      "solved": 1893,
+      "total": 1979,
+      "pct": 95.65,
+      "time_s": 402.18,
+      "total_nodes": 1362223,
+      "nps": 3387.1,
+      "by_bucket": {
+        "<1200": {
+          "solved": 388,
+          "total": 394,
+          "pct": 98.48
+        },
+        "1200-1499": {
+          "solved": 392,
+          "total": 395,
+          "pct": 99.24
+        },
+        "1500-1799": {
+          "solved": 383,
+          "total": 398,
+          "pct": 96.23
+        },
+        "1800-2099": {
+          "solved": 389,
+          "total": 398,
+          "pct": 97.74
+        },
+        "2100+": {
+          "solved": 341,
+          "total": 394,
+          "pct": 86.55
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,247 @@
+[
+  {
+    "name": "A2_base",
+    "xml": "C:\\Users\\MusheerAlam\\NeuraChess\\weights\\phase4_job_a\\A2\\ckpt_A2_joint_middle_qat_hybrid_int8.xml",
+    "power": {
+      "power_plugged": true,
+      "battery_pct": 99.0
+    },
+    "far_5000": {
+      "gt_masked_top1_pct": 51.4,
+      "gt_masked_top3_pct": 80.26,
+      "gt_masked_policy_ce": 1.4879,
+      "gt_value_mse": 0.05697,
+      "gt_decisive_sign_pct": 95.12,
+      "gt_decisive_count": 3239,
+      "gt_illegal_targets": 0,
+      "gt_wdl_mse": 0.05698,
+      "far_5000_pos_s": 2710.5
+    },
+    "throughput": {
+      "b16_raw_med_ms": 5.536,
+      "b16_raw_pos_s": 2890.2,
+      "ponder_400ms_search_nps": 3643.4,
+      "ponder_400ms_nodes": 17825
+    },
+    "puzzles": {
+      "clean_count": 1979,
+      "puzzles_0n_solved": 1349,
+      "puzzles_0n_pct": 68.17,
+      "puzzles_0n_time_s": 1.96,
+      "puzzles_0n_by_bucket": {
+        "<1200": 87.56,
+        "1200-1499": 72.66,
+        "1500-1799": 67.59,
+        "1800-2099": 60.05,
+        "2100+": 53.05
+      },
+      "puzzles_200n_solved": 1636,
+      "puzzles_200n_pct": 82.67,
+      "puzzles_200n_time_s": 119.29,
+      "puzzles_200n_nps": 3138.3,
+      "puzzles_200n_by_bucket": {
+        "<1200": 95.69,
+        "1200-1499": 89.62,
+        "1500-1799": 83.17,
+        "1800-2099": 79.4,
+        "2100+": 65.48
+      }
+    }
+  },
+  {
+    "name": "A2_recalib",
+    "xml": "C:\\Users\\MusheerAlam\\NeuraChess\\weights\\phase4_synth\\A2_recalib_hybrid_int8.xml",
+    "power": {
+      "power_plugged": true,
+      "battery_pct": 99.0
+    },
+    "far_5000": {
+      "gt_masked_top1_pct": 51.3,
+      "gt_masked_top3_pct": 80.36,
+      "gt_masked_policy_ce": 1.4874,
+      "gt_value_mse": 0.05691,
+      "gt_decisive_sign_pct": 95.15,
+      "gt_decisive_count": 3239,
+      "gt_illegal_targets": 0,
+      "gt_wdl_mse": 0.05693,
+      "far_5000_pos_s": 2862.8
+    },
+    "throughput": {
+      "b16_raw_med_ms": 5.332,
+      "b16_raw_pos_s": 3000.8,
+      "ponder_400ms_search_nps": 3693.7,
+      "ponder_400ms_nodes": 18123
+    },
+    "puzzles": {
+      "clean_count": 1979,
+      "puzzles_0n_solved": 1358,
+      "puzzles_0n_pct": 68.62,
+      "puzzles_0n_time_s": 1.82,
+      "puzzles_0n_by_bucket": {
+        "<1200": 87.56,
+        "1200-1499": 72.66,
+        "1500-1799": 68.84,
+        "1800-2099": 60.3,
+        "2100+": 53.81
+      },
+      "puzzles_200n_solved": 1638,
+      "puzzles_200n_pct": 82.77,
+      "puzzles_200n_time_s": 119.12,
+      "puzzles_200n_nps": 3143.5,
+      "puzzles_200n_by_bucket": {
+        "<1200": 95.69,
+        "1200-1499": 90.13,
+        "1500-1799": 82.41,
+        "1800-2099": 79.65,
+        "2100+": 65.99
+      }
+    }
+  },
+  {
+    "name": "A2_detrunc",
+    "xml": "C:\\Users\\MusheerAlam\\NeuraChess\\weights\\phase4_synth\\A2_detrunc_hybrid_int8.xml",
+    "power": {
+      "power_plugged": true,
+      "battery_pct": 99.0
+    },
+    "far_5000": {
+      "gt_masked_top1_pct": 51.3,
+      "gt_masked_top3_pct": 80.36,
+      "gt_masked_policy_ce": 1.4874,
+      "gt_value_mse": 0.05766,
+      "gt_decisive_sign_pct": 95.15,
+      "gt_decisive_count": 3239,
+      "gt_illegal_targets": 0,
+      "gt_wdl_mse": 0.05768,
+      "far_5000_pos_s": 2871.8
+    },
+    "throughput": {
+      "b16_raw_med_ms": 5.333,
+      "b16_raw_pos_s": 3000.4,
+      "ponder_400ms_search_nps": 3656.7,
+      "ponder_400ms_nodes": 17908
+    },
+    "puzzles": {
+      "clean_count": 1979,
+      "puzzles_0n_solved": 1358,
+      "puzzles_0n_pct": 68.62,
+      "puzzles_0n_time_s": 1.9,
+      "puzzles_0n_by_bucket": {
+        "<1200": 87.56,
+        "1200-1499": 72.66,
+        "1500-1799": 68.84,
+        "1800-2099": 60.3,
+        "2100+": 53.81
+      },
+      "puzzles_200n_solved": 1636,
+      "puzzles_200n_pct": 82.67,
+      "puzzles_200n_time_s": 120.01,
+      "puzzles_200n_nps": 3120.7,
+      "puzzles_200n_by_bucket": {
+        "<1200": 95.94,
+        "1200-1499": 90.13,
+        "1500-1799": 81.91,
+        "1800-2099": 79.65,
+        "2100+": 65.74
+      }
+    }
+  },
+  {
+    "name": "A2_soup75",
+    "xml": "C:\\Users\\MusheerAlam\\NeuraChess\\weights\\phase4_synth\\A2_soup75_hybrid_int8.xml",
+    "power": {
+      "power_plugged": true,
+      "battery_pct": 99.0
+    },
+    "far_5000": {
+      "gt_masked_top1_pct": 50.78,
+      "gt_masked_top3_pct": 79.7,
+      "gt_masked_policy_ce": 1.4911,
+      "gt_value_mse": 0.05725,
+      "gt_decisive_sign_pct": 95.12,
+      "gt_decisive_count": 3239,
+      "gt_illegal_targets": 0,
+      "gt_wdl_mse": 0.05727,
+      "far_5000_pos_s": 2850.6
+    },
+    "throughput": {
+      "b16_raw_med_ms": 5.352,
+      "b16_raw_pos_s": 2989.8,
+      "ponder_400ms_search_nps": 3685.0,
+      "ponder_400ms_nodes": 17996
+    },
+    "puzzles": {
+      "clean_count": 1979,
+      "puzzles_0n_solved": 1360,
+      "puzzles_0n_pct": 68.72,
+      "puzzles_0n_time_s": 1.88,
+      "puzzles_0n_by_bucket": {
+        "<1200": 88.58,
+        "1200-1499": 72.91,
+        "1500-1799": 67.84,
+        "1800-2099": 61.06,
+        "2100+": 53.3
+      },
+      "puzzles_200n_solved": 1644,
+      "puzzles_200n_pct": 83.07,
+      "puzzles_200n_time_s": 120.6,
+      "puzzles_200n_nps": 3102.8,
+      "puzzles_200n_by_bucket": {
+        "<1200": 95.94,
+        "1200-1499": 89.62,
+        "1500-1799": 84.17,
+        "1800-2099": 80.4,
+        "2100+": 65.23
+      }
+    }
+  },
+  {
+    "name": "A2_pol_graft",
+    "xml": "C:\\Users\\MusheerAlam\\NeuraChess\\weights\\phase4_synth\\A2_pol_graft_hybrid_int8.xml",
+    "power": {
+      "power_plugged": true,
+      "battery_pct": 99.0
+    },
+    "far_5000": {
+      "gt_masked_top1_pct": 50.88,
+      "gt_masked_top3_pct": 80.28,
+      "gt_masked_policy_ce": 1.49,
+      "gt_value_mse": 0.05691,
+      "gt_decisive_sign_pct": 95.15,
+      "gt_decisive_count": 3239,
+      "gt_illegal_targets": 0,
+      "gt_wdl_mse": 0.05693,
+      "far_5000_pos_s": 2866.9
+    },
+    "throughput": {
+      "b16_raw_med_ms": 5.369,
+      "b16_raw_pos_s": 2980.2,
+      "ponder_400ms_search_nps": 3637.3,
+      "ponder_400ms_nodes": 17883
+    },
+    "puzzles": {
+      "clean_count": 1979,
+      "puzzles_0n_solved": 1349,
+      "puzzles_0n_pct": 68.17,
+      "puzzles_0n_time_s": 1.88,
+      "puzzles_0n_by_bucket": {
+        "<1200": 87.31,
+        "1200-1499": 71.9,
+        "1500-1799": 67.59,
+        "1800-2099": 60.55,
+        "2100+": 53.55
+      },
+      "puzzles_200n_solved": 1643,
+      "puzzles_200n_pct": 83.02,
+      "puzzles_200n_time_s": 120.05,
+      "puzzles_200n_nps": 3117.6,
+      "puzzles_200n_by_bucket": {
+        "<1200": 95.69,
+        "1200-1499": 90.13,
+        "1500-1799": 83.42,
+        "1800-2099": 79.15,
+        "2100+": 66.75
+      }
+    }
+  }
+]
