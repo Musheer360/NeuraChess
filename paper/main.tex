@@ -107,11 +107,11 @@ This $10\times$ host speedup rests on five co-designed data structures:
     \end{aligned}
     \label{eq:puct}
   \end{equation}
-  where visited edges use $\tilde{Q}(s,a) = \frac{W(s,a) - L_v(s,a)}{N(s,a) + L_v(s,a)}$ and unvisited edges ($N+L_v=0$) receive $\tilde{Q}_{\mathrm{FPU}}(s) = Q(s) - \delta_{\mathrm{fpu}}\sqrt{\sum_{b:\,N(s,b)>0} P(s,b)}$, with locked defaults $c_{\mathrm{puct}}=1.5$, $\delta_{\mathrm{fpu}}=0.20$ ($\delta_{\mathrm{fpu}}^{\mathrm{root}}=0.10$), $T_{\mathrm{root}}=1.0$, and draw contempt $0.02$.
+  where visited edges use $\tilde{Q}(s,a) = \frac{W(s,a) - L_v(s,a)}{N(s,a) + L_v(s,a)}$ and unvisited edges ($N+L_v=0$) receive $\tilde{Q}_{\mathrm{FPU}}(s) = Q(s) - \delta_{\mathrm{fpu}}\sqrt{\sum_{b:\,N(s,b)>0} P(s,b)}$, where $Q(s)$ denotes the parent node's backed-up value from the side-to-move's perspective, with locked defaults $c_{\mathrm{puct}}=1.5$, $\delta_{\mathrm{fpu}}=0.20$ ($\delta_{\mathrm{fpu}}^{\mathrm{root}}=0.10$), $T_{\mathrm{root}}=1.0$, and draw contempt $0.02$.
   \item \textbf{BMI2 PEXT Bitboards \& Polyglot Zobrist Hashing:} Header-only C++23 move generation uses \texttt{\_pext\_u64} magic tables (\texttt{rook\_pext[102400]}, \texttt{bishop\_pext[5248]}) and incremental 128-bit Zobrist keys following the strict Polyglot convention (XORing \texttt{ep\_square} \emph{only} when a legal en-passant capture exists). Correctness is verified across all six canonical CPW Perft positions and a 2,000-position fixed-seed differential fuzzer against \texttt{python-chess} with zero discrepancies.
   \item \textbf{Zero-Copy Staging \& P-Core Pinning:} A single C-ABI call (\texttt{ft\_select\_and\_pack\_native}) gathers $B=16$ unexpanded leaves and writes their $(16,18,8,8)$ planes directly into caller-owned memory wrapped in \texttt{ov.Tensor(..., shared\_memory=True)}, eliminating host-to-runtime copies. Worker threads are pinned to performance P-cores (\texttt{0xc03}) with Windows HighQoS execution hints (\texttt{THREAD\_POWER\_THROTTLING\_EXECUTION\_SPEED=3}) to eliminate E-core scheduling jitter.
   \item \textbf{Subtree Reuse, 64\,MB Zobrist NN Cache, \& Exact Mate Solver:} Valid subtrees persist across opponent replies while purging path-dependent repetition/50-move tags. A 64\,MB \texttt{CanonicalNNCache} short-circuits transpositions without NPU calls (yielding $70.83\%$, $+154.1$\,Elo at $200$\,ms/move on pilot validation). Bottom-up exact mate propagation prioritizes shortest \texttt{mate\_plies} over PUCT visit count. When pondering is enabled with $B=16$, \texttt{nireq=2} asynchronous double-buffering overlaps CPU selection/backup of wave $t+1$ behind NPU execution of wave $t$.
-  \item \textbf{5-Piece Syzygy WDL/DTZ Tablebases:} Probing 5-piece Syzygy WDL tables~\cite{syzygy2013} at interior search nodes and DTZ tables at the root yields an immediate, decisive endgame gain: on identical paired openings (\texttt{openings\_320[0:10]}, 20 games vs.\ Stockfish~19 \texttt{UCI\_Elo 3000}), enabling Syzygy raised the \texttt{Hybrid\_Mid27} match score from $25.0\%$ ($5.0/20$) to \textbf{$47.5\%$ ($9.5/20$, $2\text{W}\text{--}15\text{D}\text{--}3\text{L}$, $3{,}812.2$\,NPS)}, a \textbf{$+22.5\%$} jump. Crucially, live games exposed a root-DTZ conversion pathology: ranking winning moves by \texttt{(-dtz\_plies, is\_zeroing)} caused the engine to shuffle non-zeroing waiting checks (e.g., repeating queen checks for 15 moves) before advancing a passed pawn. Reordering the winning key to \texttt{(tier, no\_rep2, is\_zeroing, -dtz\_plies)} enforces immediate pawn pushes and captures into the next DTZ phase while strictly respecting the 50-move rule ($\text{halfmove} + |\mathrm{DTZ}| \le 100$).
+  \item \textbf{5-Piece Syzygy WDL/DTZ Tablebases:} Probing 5-piece Syzygy WDL tables~\cite{syzygy2013} at interior search nodes and DTZ tables at the root yields an immediate, decisive endgame gain: on identical paired openings (\texttt{OPENINGS\_50[:10]}, \texttt{max\_plies=220}, 20 games vs.\ Stockfish~19 \texttt{UCI\_Elo 3000}, \texttt{phase4\_syzygy\_sf3000\_20g.json}), enabling Syzygy cut losses from $10$ to $3$ and raised the \texttt{Hybrid\_Mid27} match score from $25.0\%$ ($5.0/20$, $0\text{W}\text{--}10\text{D}\text{--}10\text{L}$) to \textbf{$47.5\%$ ($9.5/20$, $2\text{W}\text{--}15\text{D}\text{--}3\text{L}$, $3{,}812.2$\,NPS)}, a \textbf{$+22.5\%$} jump. Crucially, live games exposed a root-DTZ conversion pathology: ranking winning moves by \texttt{(-dtz\_plies, is\_zeroing)} caused the engine to shuffle non-zeroing waiting checks (e.g., repeating queen checks for 15 moves) before advancing a passed pawn. Reordering the winning key to \texttt{(tier, no\_rep2, is\_zeroing, -dtz\_plies)} enforces immediate pawn pushes and captures into the next DTZ phase while strictly respecting the 50-move rule ($\text{halfmove} + |\mathrm{DTZ}| \le 100$).
 \end{enumerate}
 
 \subsection{Time-Pressure Awareness and Real-Time Search Control}
@@ -120,23 +120,19 @@ Because AlphaZero-style neural networks accept only static board planes and cont
 \begin{enumerate}
   \item \textbf{Time-Pressure-Blind Allocation and Spurious Ponder Inflation:} The initial allocator used a flat rule $t = \min(0.04\,R + 0.80\,I,\; 0.25\,R)$ coupled with a $1.30\times$ cold-start multiplier whenever \texttt{retained\_visits < 100}. Under external UCI \texttt{go ponder} hosts (such as \texttt{lichess-bot}), internal ponder telemetry reported \texttt{retained\_visits = 0}, triggering $1.30\times$ inflation on \emph{every move}---burning ${\sim}4.0$\,s/move early in $1+1$ bullet and $>1.3$\,s/move even at $8.8$\,s remaining, steadily bleeding clock instead of banking increment.
   \item \textbf{Four-Gear Adaptive Clock Allocator:} We replaced the flat rule with a regime-aware allocator operating on effective remaining clock $R_e = \max(25\,\mathrm{ms},\; R - O)$ (subtracting network/GUI overhead $O$, default $150$\,ms) and increment $I$, defined piecewise across five operating regimes:
-\end{enumerate}
-\begin{equation}
-  {\footnotesize
-  t_{\mathrm{base}} =
-  \begin{cases}
-    \min(0.08R_e{+}0.30I,\; 0.18R_e,\; 160), & R_e < 2\text{s}, \\
-    \min(0.022R_e{+}0.48I,\; 0.14R_e), & 2\text{s} \le R_e < 6\text{s}, \\
-    \min(0.026R_e{+}0.62I,\; 0.16R_e), & 6\text{s} \le R_e < 15\text{s}, \\
-    \min(R_e/H(\mathrm{ply}){+}0.60I,\; C_{\mathrm{bul}}), & R_e{+}40I \le 115\text{s}, \\
-    \min(0.038R_e{+}0.78I,\; 0.22R_e), & \text{otherwise},
-  \end{cases}}
-  \label{eq:clock}
-\end{equation}
-where the bullet horizon $H(\mathrm{ply}) \in \{38, 32, 28\}$ tightens across opening, middlegame, and endgame plies under ceiling $C_{\mathrm{bul}} = \min(0.055\,R_e + 0.35\,I,\; 2200 + 0.30\,I)$ (cutting initial $1+1$ moves from $4{,}160$\,ms to $2{,}179$\,ms). In moderate ($6\text{--}15$\,s) and severe ($2\text{--}6$\,s) time trouble with $+1$\,s increment, budgets remain strictly below increment ($880$\,ms at $10$\,s and $560$\,ms at $4$\,s, banking $+440$\,ms/move), while critical scrambles ($<2$\,s) snap moves at $\le 160$\,ms. Detecting external \texttt{go ponder} suppresses spurious cold-start inflation, and an explicit \textbf{opponent flag-pressure multiplier} ($t \leftarrow 0.70\,t$) accelerates play whenever $R_{\mathrm{opp}} < 8\,\mathrm{s}$ and $R_e \ge \max(4\,\mathrm{s},\, 1.8\,R_{\mathrm{opp}})$.
-
-\begin{enumerate}
-  \setcounter{enumi}{2}
+  \begin{equation}
+    {\scriptsize
+    t_{\mathrm{base}} =
+    \begin{cases}
+      \min(0.08R_e{+}0.30I, 0.18R_e, 160), & R_e{<}2\text{s}, \\
+      \min(0.022R_e{+}0.48I, 0.14R_e), & 2{\le}R_e{<}6\text{s}, \\
+      \min(0.026R_e{+}0.62I, 0.16R_e), & 6{\le}R_e{<}15\text{s}, \\
+      \min(R_e/H(\mathrm{ply}){+}0.60I, C_{\mathrm{bul}}), & R_e{+}40I{\le}115\text{s}, \\
+      \min(0.038R_e{+}0.78I, 0.22R_e), & \text{else},
+    \end{cases}}
+    \label{eq:clock}
+  \end{equation}
+  where the bullet horizon $H(\mathrm{ply}) \in \{38, 32, 28\}$ tightens across opening, middlegame, and endgame plies under ceiling $C_{\mathrm{bul}} = \min(0.055\,R_e + 0.35\,I,\; 2200 + 0.30\,I)$ (cutting initial $1+1$ moves from $4{,}160$\,ms to $2{,}179$\,ms). In moderate ($6\text{--}15$\,s) and severe ($2\text{--}6$\,s) time trouble with $+1$\,s increment, budgets remain strictly below increment ($880$\,ms at $10$\,s and $560$\,ms at $4$\,s, banking $+440$\,ms/move), while critical scrambles ($<2$\,s) snap moves at $\le 160$\,ms. Detecting external \texttt{go ponder} suppresses spurious cold-start inflation, and an explicit \textbf{opponent flag-pressure multiplier} ($t \leftarrow 0.70\,t$) accelerates play whenever $R_{\mathrm{opp}} < 8\,\mathrm{s}$ and $R_e \ge \max(4\,\mathrm{s},\, 1.8\,R_{\mathrm{opp}})$.
   \item \textbf{MCTS Visit-Dominance Early Stopping:} Previously, the search loop consumed $100\%$ of $t_{\mathrm{base}}$ even on forced recaptures or already-proven checkmates. We added zero-overhead instant returns for single legal moves, mate-in-1, and root Syzygy DTZ hits, plus a periodic root check every 8 batches ($128$ visits) that terminates search early under four criteria: (i) proven forced win from the exact solver, (ii) \emph{uncatchable visit lead} ($N_{(1)} - N_{(2)} > 1.10\,\widehat{\mathrm{NPS}}\,t_{\mathrm{rem}}$ with $Q_{(1)} \ge Q_{(2)} - 0.02$), (iii) \emph{dominant obvious move} ($N_{(1)} \ge 0.72\,N_{\mathrm{tot}}$ and $N_{(1)} \ge 3.5\,N_{(2)}$ after $33\%$ of budget), or (iv) \emph{clear consensus} ($N_{(1)} \ge 0.58\,N_{\mathrm{tot}}$ and $N_{(1)} \ge 2.2\,N_{(2)}$ with $Q_{(1)} \ge Q_{(2)} + 0.01$ after $52\%$ of budget).
   \item \textbf{Ponder Cache-Wave Retry and Post-\texttt{ponderhit} Scaling:} Fixing a missing empty-wave cache retry in \texttt{run\_ponder\_session} prevented premature ponder exits on transposition-heavy lines, and adding post-\texttt{ponderhit} scaling shrinks post-hit search time to $18\%$ (or $45\%$) when $\ge 3\times$ (or $\ge 1.4\times$) budget nodes were already accumulated during opponent thinking.
 \end{enumerate}
@@ -170,7 +166,7 @@ As plotted in Figure~\ref{fig:block_sensitivity}(a), sensitivity is sharply conc
 In addition, isolating the residual skip additions (\texttt{.*\_out\_.*}) revealed that keeping both the four boundary blocks (\texttt{0, 1, 8, 9}), all SE gates, \emph{and} residual skip additions in FP16---quantizing only the $3\times 3$ convolutions inside middle blocks \texttt{2..7} (\texttt{Hybrid\_Middle\_2\_to\_7\_ConvOnly})---improved Top-1 agreement from $94.54\%$ to $95.52\%$, lowered policy KL from $0.007087$ to $0.004891$, cut $|\Delta V|_{\max}$ from $0.62988$ to $0.56921$, and increased raw NPU throughput from $2{,}681.3$ to $2{,}849.6$\,pos/s (and $2{,}956.6$\,pos/s in co-resident benchmarks). Remarkably, against Stockfish ground-truth labels on $5{,}000$ \texttt{Far-Test} positions, \texttt{Hybrid\_Mid2..7} PTQ matched Pure FP16 ($50.54\%$ vs.\ $50.46\%$ Top-1; $0.06085$ vs.\ $0.06117$ value MSE). Yet in actual 50-game Stockfish~19 \texttt{UCI\_Elo 3000} matches, un-retrained \texttt{Hybrid\_Mid2..7} PTQ still collapsed to \textbf{$33.0\%$} (and $25.0\%$ on slice \texttt{[75:85]}) versus $45.0\%$ for Pure FP16, exposing a critical gap between static offline metrics and closed-loop MCTS stability.
 
 \subsection{Joint Middle-Block W8A8 QAT and the $2\times2$ Causal Proof}
-To eliminate closed-loop PTQ quantization drift without sacrificing NPU speed, we implemented zero-sync CUDA-native fake-quantization wrappers (\texttt{W8A8FakeQuantConv2d}) exclusively on the $3\times 3$ convolutions of middle blocks \texttt{2..7} (or \texttt{2..9} for \texttt{12x192}) after analytically folding trunk BatchNorms. Each wrapped convolution applies per-output-channel symmetric INT8 weight quantization ($s_w^{(c)} = \max_{i,j,k}|W_{c,i,j,k}| / 127$) and per-tensor exponential moving average (EMA, $\gamma=0.05$) unsigned UINT8 activation quantization ($s_a = a_{\max}^{\mathrm{EMA}}/255$) using the Straight-Through Estimator (STE)~\cite{bengio2013ste,nagel2021whitepaper}:
+To eliminate closed-loop PTQ quantization drift without sacrificing NPU speed, we implemented zero-sync CUDA-native fake-quantization wrappers (\texttt{W8A8FakeQuantConv2d}) exclusively on the $3\times 3$ convolutions of middle blocks \texttt{2..7} (or \texttt{2..9} for \texttt{12x192}) after analytically folding trunk BatchNorms. Because every quantized $3\times 3$ convolution in blocks \texttt{2..7} immediately follows a $\mathrm{ReLU}$ nonlinearity ($X \ge 0$), input activations are quantized to unsigned $\mathrm{UINT8} \in [0, 255]$ via per-tensor exponential moving average (EMA, $\gamma=0.05$, $s_a = a_{\max}^{\mathrm{EMA}}/255$), while convolution weights use per-output-channel symmetric signed $\mathrm{INT8} \in [-127, 127]$ ($s_w^{(c)} = \max_{i,j,k}|W_{c,i,j,k}| / 127$) with the Straight-Through Estimator (STE)~\cite{bengio2013ste,nagel2021whitepaper}:
 \begin{align}
   \widehat{W}_c &= s_w^{(c)}\,\mathrm{clip}\!\left(\left\lfloor \frac{W_c}{s_w^{(c)}} \right\rceil,\,-127,\,127\right), \label{eq:wq}\\
   \widehat{X} &= s_a\,\mathrm{clip}\!\left(\left\lfloor \frac{X}{s_a} \right\rceil,\,0,\,255\right), \label{eq:aq}
@@ -315,15 +311,16 @@ After $280$\,M BF16 positions plus $20$\,M Stage-3 Middle-Block (\texttt{2..9}) 
     \textbf{Architecture} & \textbf{Params} & \textbf{$B{=}1$} & \textbf{$B{=}4$} & \textbf{$B{=}8$} & \textbf{$B{=}16$} & \textbf{Eng.\ NPS} \\
     \midrule
     \texttt{10x128} FP16 & 3.20\,M & 0.611 & 1.434 & 2.434 & 4.523 & 4,810.4 \\
-    \texttt{10x192} FP16 & 7.01\,M & 0.739 & 1.894 & 3.360 & 6.262 & 3,253.9 \\
-    \textbf{\texttt{10x192} QAT INT8} & \textbf{7.19\,M} & \textbf{0.708} & \textbf{1.603} & \textbf{2.859} & \textbf{5.412} & \textbf{3,987.9} \\
+    \texttt{10x192} FP16$^\ddagger$ & 7.01\,M & 0.739 & 1.894 & 3.360 & 6.262 & 3,253.9 \\
+    \textbf{\texttt{10x192} QAT INT8$^\ddagger$} & \textbf{7.19\,M} & \textbf{0.708} & \textbf{1.603} & \textbf{2.859} & \textbf{5.412} & \textbf{3,987.9} \\
     \texttt{12x192} QAT INT8 & 8.52\,M & 0.886 & 1.910 & 3.415 & 6.540 & 3,324.0$^\star$ \\
     \texttt{10x224} INT8 & 9.62\,M & 0.925 & 1.966 & 3.526 & 6.609 & 2,670.5$^\dagger$ \\
     \texttt{14x192} INT8 & 9.88\,M & 0.948 & 2.114 & 3.872 & 7.189 & 2,533.0$^\dagger$ \\
     \texttt{12x224} INT8 & 11.48\,M & 1.010 & 2.308 & 4.164 & 7.813 & 2,362.3$^\dagger$ \\
     \bottomrule
-    \multicolumn{7}{@{}l@{}}{\scriptsize $^\star$H2H $B{=}16$ NPS ($2{,}798.7$ cold gear-shift). $^\dagger$Cold-start gear-shift sweep NPS.}
   \end{tabular}}
+  \vspace{2pt}
+  \par\raggedright{\scriptsize $^\star$H2H $B{=}16$ NPS ($2{,}798.7$ cold gear-shift). $^\dagger$Cold-start gear-shift sweep NPS. $^\ddagger$\texttt{10x192} FP16 ($7.01$\,M) uses the \texttt{v1.0.2} scalar value head ($1024\!\to\!128\!\to\!1$); \texttt{10x192} QAT INT8 ($7.19$\,M with MLH / $7.15$\,M value-only) adds \texttt{HL-Gauss-64} ($1024\!\to\!256\!\to\!64$) and \texttt{MLH} ($512\!\to\!64\!\to\!1$) ($+0.18$\,M params).}
 \end{table}
 
 Paired $400$\,ms/move head-to-head NPU matches exposed a dramatic hardware-induced Elo inversion (Figure~\ref{fig:npu_pareto}(b)):
@@ -452,7 +449,10 @@ Finally, Table~\ref{tab:puzzles} details tactical scaling across all $1{,}979$ l
 \subsection{Conclusion and Future Directions}
 We have demonstrated that near-3,000-Elo neural MCTS is practical on a 3\,W consumer edge NPU when neural precision, distributional loss geometry, multi-shape compilation, and real-time search control are explicitly co-designed around on-chip SRAM and sequential tree dynamics. Protecting quantization-sensitive boundary blocks (\texttt{0, 1, 8, 9}) and skip connections while training middle blocks (\texttt{2..7}) jointly under W8A8 QAT unlocks $+19.6\%$ throughput and $+56.5$\,Elo over FP16; adding \texttt{HL-Gauss-64 + MLH} costs just $+0.19\%$ NPU latency; and coupling co-resident gear-shifting with clock-aware 4-gear allocation and MCTS early stopping delivers crisp, flag-free bullet play. Promising future avenues include distilling a parallel single-pass \texttt{Conv73} action-value head $Q_\theta(s,a)$ for learned First-Play Urgency (already benchmarked at just $+0.087$\,ms / $+1.36\%$ NPU overhead) and extending MLH-conditioned draw contempt into dynamic time-pressure search control.
 
-{\sloppy
+\paragraph{Reproducibility and Artifact Availability.}
+All C++23/Python source code, the 81-test verification suite (including canonical CPW Perft checks and the 2,000-position differential fuzzer), all raw JSON match and evaluation logs (\texttt{eval\_results/}), figure-generation scripts (\texttt{paper/generate\_figures.py}), and all 12 SHA-256-verified FP16 and Middle-Block QAT INT8 OpenVINO IRs are openly available under the GPL-3.0 license at \url{https://github.com/Musheer360/NeuraChess} (release tag \texttt{v1.1.0}). Live real-time Intel NPU~3720 games are publicly archived and playable at \url{https://lichess.org/@/NeuraChess-AI}.
+
+{\small\sloppy
 \bibliographystyle{plain}
 \bibliography{references}
 }
