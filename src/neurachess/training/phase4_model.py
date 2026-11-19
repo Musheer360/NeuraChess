@@ -137,20 +137,27 @@ class ChessSEResNetPhase4(nn.Module):
         val_channels: int = 16,
         val_hidden: int = 256,
         num_bins: int = 64,
+        conv_bias: bool = False,
     ):
         super().__init__()
         self.num_blocks = int(num_blocks)
         self.channels = int(channels)
         self.se_reduction = int(se_reduction)
         self.use_bn = bool(use_bn)
+        self.conv_bias = bool(conv_bias)
         self.num_bins = int(num_bins)
 
-        self.init_conv = nn.Conv2d(18, self.channels, kernel_size=3, padding=1, bias=False)
+        folded_bias = (not self.use_bn) and self.conv_bias
+        self.init_conv = nn.Conv2d(18, self.channels, kernel_size=3, padding=1, bias=folded_bias)
         self.init_bn = nn.BatchNorm2d(self.channels) if self.use_bn else nn.Identity()
 
         self.res_blocks = nn.ModuleList(
             [SEResidualBlock(self.channels, reduction=self.se_reduction, use_bn=self.use_bn) for _ in range(self.num_blocks)]
         )
+        if folded_bias:
+            for blk in self.res_blocks:
+                blk.conv1 = nn.Conv2d(self.channels, self.channels, kernel_size=3, padding=1, bias=True)
+                blk.conv2 = nn.Conv2d(self.channels, self.channels, kernel_size=3, padding=1, bias=True)
 
         self.pol_conv = nn.Conv2d(self.channels, 73, kernel_size=1, bias=not self.use_bn)
         self.pol_bn = nn.BatchNorm2d(73) if self.use_bn else nn.Identity()
@@ -277,6 +284,60 @@ def load_346m_into_10x192_phase4(model: ChessSEResNetPhase4, ckpt_path: str | Pa
         else:
             model.hl_head.val_conv.bias.data.zero_()
     return src_sd
+
+
+def load_folded_npz_into_phase4(model: ChessSEResNetPhase4, npz_path: str | Path) -> None:
+    """Load BN-folded `.npz` (e.g., `A2_soup75.npz`) into `ChessSEResNetPhase4(..., use_bn=False, conv_bias=True)`."""
+    with np.load(str(npz_path)) as z, torch.no_grad():
+        model.init_conv.weight.copy_(torch.from_numpy(z["init_conv_w"]).to(dtype=model.init_conv.weight.dtype))
+        if model.init_conv.bias is not None and "init_conv_b" in z:
+            model.init_conv.bias.copy_(torch.from_numpy(z["init_conv_b"]).to(dtype=model.init_conv.bias.dtype))
+        for i, blk in enumerate(model.res_blocks):
+            blk.conv1.weight.copy_(torch.from_numpy(z[f"res_{i}_conv1_w"]).to(dtype=blk.conv1.weight.dtype))
+            if blk.conv1.bias is not None and f"res_{i}_conv1_b" in z:
+                blk.conv1.bias.copy_(torch.from_numpy(z[f"res_{i}_conv1_b"]).to(dtype=blk.conv1.bias.dtype))
+            blk.conv2.weight.copy_(torch.from_numpy(z[f"res_{i}_conv2_w"]).to(dtype=blk.conv2.weight.dtype))
+            if blk.conv2.bias is not None and f"res_{i}_conv2_b" in z:
+                blk.conv2.bias.copy_(torch.from_numpy(z[f"res_{i}_conv2_b"]).to(dtype=blk.conv2.bias.dtype))
+            blk.se.squeeze.weight.copy_(torch.from_numpy(z[f"res_{i}_se_sq_w"]).to(dtype=blk.se.squeeze.weight.dtype))
+            blk.se.excite.weight.copy_(torch.from_numpy(z[f"res_{i}_se_ex_w"]).to(dtype=blk.se.excite.weight.dtype))
+        model.pol_conv.weight.copy_(torch.from_numpy(z["pol_73_w"]).to(dtype=model.pol_conv.weight.dtype))
+        if model.pol_conv.bias is not None and "pol_73_b" in z:
+            model.pol_conv.bias.copy_(torch.from_numpy(z["pol_73_b"]).to(dtype=model.pol_conv.bias.dtype))
+        if "val_conv_w" in z:
+            model.hl_head.val_conv.weight.copy_(torch.from_numpy(z["val_conv_w"]).to(dtype=model.hl_head.val_conv.weight.dtype))
+            model.hl_head.val_conv.bias.copy_(torch.from_numpy(z["val_conv_b"]).to(dtype=model.hl_head.val_conv.bias.dtype))
+            model.hl_head.val_fc1.weight.copy_(torch.from_numpy(z["val_dense1_w"]).to(dtype=model.hl_head.val_fc1.weight.dtype))
+            model.hl_head.val_fc1.bias.copy_(torch.from_numpy(z["val_dense1_b"]).to(dtype=model.hl_head.val_fc1.bias.dtype))
+            model.hl_head.val_fc2.weight.copy_(torch.from_numpy(z["val_dense2_w"]).to(dtype=model.hl_head.val_fc2.weight.dtype))
+            model.hl_head.val_fc2.bias.copy_(torch.from_numpy(z["val_dense2_b"]).to(dtype=model.hl_head.val_fc2.bias.dtype))
+        if "mlh_conv_w" in z:
+            model.ml_head.mlh_conv.weight.copy_(torch.from_numpy(z["mlh_conv_w"]).to(dtype=model.ml_head.mlh_conv.weight.dtype))
+            model.ml_head.mlh_conv.bias.copy_(torch.from_numpy(z["mlh_conv_b"]).to(dtype=model.ml_head.mlh_conv.bias.dtype))
+            model.ml_head.mlh_d1.weight.copy_(torch.from_numpy(z["mlh_d1_w"]).to(dtype=model.ml_head.mlh_d1.weight.dtype))
+            model.ml_head.mlh_d1.bias.copy_(torch.from_numpy(z["mlh_d1_b"]).to(dtype=model.ml_head.mlh_d1.bias.dtype))
+            model.ml_head.mlh_d2.weight.copy_(torch.from_numpy(z["mlh_d2_w"]).to(dtype=model.ml_head.mlh_d2.weight.dtype))
+            model.ml_head.mlh_d2.bias.copy_(torch.from_numpy(z["mlh_d2_b"]).to(dtype=model.ml_head.mlh_d2.bias.dtype))
+
+
+def transplant_hl_mlh_heads(dst_model: ChessSEResNetPhase4, src_ckpt_or_sd: str | Path | dict[str, torch.Tensor]) -> int:
+    """Transplant `hl_head.*` and `ml_head.*` tensors from a matching-channel checkpoint into `dst_model`."""
+    if isinstance(src_ckpt_or_sd, (str, Path)):
+        raw = torch.load(str(src_ckpt_or_sd), map_location="cpu", weights_only=False)
+        src_sd = extract_10x192_state_dict(raw)
+    else:
+        src_sd = extract_10x192_state_dict(src_ckpt_or_sd)
+    copied = 0
+    with torch.no_grad():
+        for k, dst_t in dst_model.state_dict().items():
+            if k.startswith(("hl_head.", "ml_head.")) and k in src_sd:
+                if tuple(src_sd[k].shape) != tuple(dst_t.shape):
+                    raise ValueError(f"Head shape mismatch for {k}: src={tuple(src_sd[k].shape)} vs dst={tuple(dst_t.shape)}")
+                dst_t.copy_(src_sd[k].to(device=dst_t.device, dtype=dst_t.dtype))
+                copied += 1
+    if copied == 0:
+        raise RuntimeError("No hl_head.*/ml_head.* tensors found in source checkpoint for transplant")
+    return copied
 
 
 def expand_10x192_to_12x192_identity(

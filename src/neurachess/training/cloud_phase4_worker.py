@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import gc
+import io
 import json
 import math
 import os
@@ -51,6 +52,8 @@ from neurachess.training.phase4_model import (
     export_phase4_to_folded_npz_and_ov,
     extract_10x192_state_dict,
     load_346m_into_10x192_phase4,
+    load_folded_npz_into_phase4,
+    transplant_hl_mlh_heads,
 )
 from neurachess.training.train_hl_gauss_value import CP_TANH_SCALE, compute_hl_gauss_targets
 
@@ -264,7 +267,7 @@ def convert_v2_shards_to_unified(v2_paths: list[Path], out_prefix: Path, tempera
     return out_bin, out_sc, int(v1_cat.shape[0])
 
 
-def list_t80_nonempty_urls(min_bytes: int = 50_000_000, seed: int = 42) -> list[str]:
+def list_t80_nonempty_urls(min_bytes: int = 50_000_000, seed: int = 42, skip_first: int = 0) -> list[str]:
     """Fetch `storage.lczero.org/files/training_data/test80/` HTML and filter non-empty `.tar` archives."""
     html = urllib.request.urlopen(urllib.request.Request(LC0_T80_URL, headers=UA_HEADER), timeout=30).read().decode("utf-8", "ignore")
     pat = re.compile(r'href="(training-run1-test80-[0-9]+-[0-9]+\.tar)"[^>]*>[^<]+</a>\s+\S+\s+\S+\s+(\d+)')
@@ -274,6 +277,8 @@ def list_t80_nonempty_urls(min_bytes: int = 50_000_000, seed: int = 42) -> list[
             urls.append(LC0_T80_URL + fname)
     rng = random.Random(seed)
     rng.shuffle(urls)
+    if skip_first > 0 and skip_first < len(urls):
+        urls = urls[skip_first:]
     return urls
 
 
@@ -380,6 +385,34 @@ def stream_lc0_t80_parallel(
     return pairs, idx
 
 
+def _find_zstd_frame_offset(url: str, start_byte: int, probe_mb: int = 16) -> int:
+    """Locate the first valid ZSTD frame header at or after `start_byte` via HTTP Range probe."""
+    import zstandard as zstd
+
+    magic = b"\x28\xb5\x2f\xfd"
+    probe_bytes = max(4, int(probe_mb)) * 1024 * 1024
+    req = urllib.request.Request(
+        url,
+        headers={**UA_HEADER, "Range": f"bytes={start_byte}-{start_byte + probe_bytes - 1}"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = resp.read()
+    pos = 0
+    while True:
+        idx = data.find(magic, pos)
+        if idx == -1:
+            break
+        try:
+            zr = zstd.ZstdDecompressor().stream_reader(io.BytesIO(data[idx:]))
+            sample = zr.read(1024)
+            if b"fen" in sample:
+                return start_byte + idx
+        except Exception:
+            pass
+        pos = idx + 4
+    raise RuntimeError(f"No valid ZSTD frame found within {probe_mb} MB of byte offset {start_byte:,}")
+
+
 class LichessContinuousStream:
     """Single-connection persistent `lichess_db_eval.jsonl.zst` reader yielding chunked `(v1, sc)` shards without resetting."""
 
@@ -393,6 +426,7 @@ class LichessContinuousStream:
         opener=None,
         worker_stride: int = 1,
         worker_rem: int = 0,
+        byte_offset: int = 0,
     ):
         self.sf_exe = sf_exe
         self.exclude_hash_file = exclude_hash_file
@@ -402,6 +436,7 @@ class LichessContinuousStream:
         self.opener = opener
         self.worker_stride = max(1, int(worker_stride))
         self.worker_rem = int(worker_rem) % self.worker_stride
+        self.byte_offset = max(0, int(byte_offset))
         self._resp = None
         self._zr = None
         self._byte_buf = b""
@@ -415,6 +450,12 @@ class LichessContinuousStream:
             return
         if self.opener is not None:
             self._resp = self.opener(LICHESS_EVAL_URL)
+        elif self.byte_offset > 0:
+            frame_abs = _find_zstd_frame_offset(LICHESS_EVAL_URL, self.byte_offset, probe_mb=16)
+            self.initial_skip = max(1, self.initial_skip)
+            req = urllib.request.Request(LICHESS_EVAL_URL, headers={**UA_HEADER, "Range": f"bytes={frame_abs}-"})
+            self._resp = urllib.request.urlopen(req, timeout=120)
+            print(f"[LichessStream] Instant HTTP Range ZSTD seek -> byte {frame_abs:,} (requested {self.byte_offset:,})", flush=True)
         else:
             req = urllib.request.Request(LICHESS_EVAL_URL, headers=UA_HEADER)
             self._resp = urllib.request.urlopen(req, timeout=120)
@@ -431,15 +472,22 @@ class LichessContinuousStream:
         self._zr = None
         self._resp = None
         self._byte_buf = b""
+        self._py_line_idx = 0
 
     def _filter_lines_block(self, lines_blk: bytes) -> bytes:
         if not lines_blk:
             return b""
         raw_Part = lines_blk[:-1] if lines_blk.endswith(b"\n") else lines_blk
+        cur = self._py_line_idx
+        # Fast C-level newline counting while skipping large line offsets (e.g., 40M lines)
+        if cur < self.initial_skip:
+            n_fast = raw_Part.count(b"\n") + 1
+            if cur + n_fast <= self.initial_skip:
+                self._py_line_idx = cur + n_fast
+                return b""
         lines = raw_Part.split(b"\n")
         n_lines = len(lines)
-        cur = self._py_line_idx
-        self._py_line_idx += n_lines
+        self._py_line_idx = cur + n_lines
         if cur + n_lines <= self.initial_skip:
             return b""
         start_off = max(0, self.initial_skip - cur)
@@ -1118,7 +1166,7 @@ def download_s3_mix_shard(s3_client, bucket: str, base_key: str, dst_dir: Path) 
 
 
 def run_harvest_shards(args: argparse.Namespace, s3_client, dirs: dict) -> None:
-    """High-throughput CPU Shard Harvester (`ml.c5.4xlarge` 16 vCPUs): streams 70% Lc0 T80 + 30% SF into S3."""
+    """High-throughput CPU Shard Harvester (`ml.c5.4xlarge` 16 vCPUs): streams 50% Lc0 T80 + 50% SF into S3."""
     tmp_dir: Path = dirs["tmp"]
     lc0_exe, sf_exe = ensure_cpp_converters(tmp_dir)
     excl_bin = dirs["excl_bin"]
@@ -1133,56 +1181,91 @@ def run_harvest_shards(args: argparse.Namespace, s3_client, dirs: dict) -> None:
 
     existing = set(list_ready_s3_mix_shards(s3_client, args.bucket, prefix)) if args.resume else set()
     todo_ids = [sid for sid in my_shard_ids if f"{prefix}/shard_{sid:03d}" not in existing]
+
+    sf_ratio = float(getattr(args, "sf_ratio", 0.50))
+    sf_per_shard = int(round(shard_sz * sf_ratio))
+    lc0_per_shard = shard_sz - sf_per_shard
+    t80_skip = max(0, int(getattr(args, "t80_skip", 40)))
+    sf_base_offset = max(0, int(getattr(args, "sf_line_offset", 40_000_000)))
+
     print(
         f"=== [Harvester w={w_id}/{n_workers}] Assigned {len(my_shard_ids)} shards "
-        f"({len(todo_ids)} remaining, shard_size={shard_sz:,}) -> s3://{args.bucket}/{prefix}/ ===",
+        f"({len(todo_ids)} remaining, shard_size={shard_sz:,}, "
+        f"mix={int(round((1.0 - sf_ratio) * 100))}% Lc0 / {int(round(sf_ratio * 100))}% SF, "
+        f"t80_skip={t80_skip}, sf_offset={sf_base_offset:,}) -> s3://{args.bucket}/{prefix}/ ===",
         flush=True,
     )
     if not todo_ids:
         return
 
-    sf_per_shard = int(round(shard_sz * 0.30))
-    lc0_per_shard = shard_sz - sf_per_shard
-    all_t80 = list_t80_nonempty_urls(seed=args.seed)
+    all_t80 = list_t80_nonempty_urls(seed=args.seed, skip_first=t80_skip)
     my_t80 = all_t80[w_id::n_workers] if all_t80 else []
     t80_idx = (len(my_shard_ids) - len(todo_ids)) % max(1, len(my_t80))
 
     stop_ev = threading.Event()
     sf_q: queue.Queue = queue.Queue(maxsize=6)
     sf_ring: list[tuple[np.ndarray, np.ndarray]] = []
+    v2_seed_v1 = np.empty((0, RECORD_SIZE_V1), dtype=np.uint8)
+    v2_seed_sc = np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
 
-    if dirs["v2_shards"]:
+    if dirs["v2_shards"] and len(todo_ids) == len(my_shard_ids):
         v2_b, v2_s, v2_n = convert_v2_shards_to_unified(dirs["v2_shards"], tmp_dir / f"harv_v2_sf_w{w_id}")
         if v2_n > 0 and v2_b.is_file():
             v_init, s_init = load_unified_chunk(v2_b, v2_s)
             v2_b.unlink(missing_ok=True)
             v2_s.unlink(missing_ok=True)
-            for off in range(0, len(v_init), sf_per_shard):
-                sub_v = v_init[off : off + sf_per_shard]
-                sub_s = s_init[off : off + sf_per_shard]
-                if len(sub_v) >= sf_per_shard // 2:
-                    sf_ring.append((sub_v, sub_s))
-                    if not sf_q.full():
-                        sf_q.put((sub_v, sub_s))
+            if len(v_init) >= sf_per_shard:
+                for off in range(0, len(v_init), sf_per_shard):
+                    sub_v = v_init[off : off + sf_per_shard]
+                    sub_s = s_init[off : off + sf_per_shard]
+                    if len(sub_v) == sf_per_shard:
+                        sf_ring.append((sub_v, sub_s))
+                        if not sf_q.full():
+                            sf_q.put((sub_v, sub_s))
+                    elif len(sub_v) > 0:
+                        v2_seed_v1, v2_seed_sc = sub_v, sub_s
+            else:
+                # Top up partial V2 seed (e.g., 500K) with streamed SF so shard 0 is an exact 50/50 2M shard
+                v2_seed_v1, v2_seed_sc = v_init, s_init
+                print(f"[Harvester w={w_id}] Loaded {len(v_init):,} V2 SF seed records (will top up to {sf_per_shard:,} from Lichess stream)", flush=True)
 
-    def _harv_sf_worker():
-        init_skip = 1_000_000 + (len(my_shard_ids) - len(todo_ids)) * sf_per_shard * n_workers
+    streams_per_worker = 2
+    base_byte_offset = max(3_000_000_000, int(sf_base_offset * 75))
+    region_span_bytes = 3_500_000_000
+    done_before = len(my_shard_ids) - len(todo_ids)
+
+    def _harv_sf_worker(stream_idx: int):
+        g_idx = w_id * streams_per_worker + stream_idx
+        start_byte = base_byte_offset + g_idx * region_span_bytes + (done_before // streams_per_worker) * int(sf_per_shard * 75)
         st = LichessContinuousStream(
             sf_exe, excl_hashes, excl_bin,
-            initial_skip=init_skip, threads=3,
-            worker_stride=n_workers, worker_rem=w_id,
+            initial_skip=1, threads=2,
+            worker_stride=1, worker_rem=0,
+            byte_offset=start_byte,
         )
         sf_seq = 0
-        sf_dir = tmp_dir / f"harv_sf_w{w_id}"
+        sf_streamed_total = 0
+        rem_v2_v, rem_v2_s = (v2_seed_v1, v2_seed_sc) if stream_idx == 0 else (
+            np.empty((0, RECORD_SIZE_V1), dtype=np.uint8),
+            np.empty((0, SIDECAR_SIZE), dtype=np.uint8),
+        )
+        sf_dir = tmp_dir / f"harv_sf_w{w_id}_s{stream_idx}"
         sf_dir.mkdir(parents=True, exist_ok=True)
         try:
             while not stop_ev.is_set():
                 try:
-                    bp, sp, cnt = st.read_chunk(sf_dir / f"sf_{sf_seq:04d}", sf_per_shard)
+                    need_sf = sf_per_shard - len(rem_v2_v) if len(rem_v2_v) > 0 else sf_per_shard
+                    bp, sp, cnt = st.read_chunk(sf_dir / f"sf_{sf_seq:04d}", need_sf)
                     if cnt > 0 and bp.is_file():
                         v, s = load_unified_chunk(bp, sp)
                         bp.unlink(missing_ok=True)
                         sp.unlink(missing_ok=True)
+                        sf_streamed_total += len(v)
+                        if len(rem_v2_v) > 0:
+                            v = np.concatenate([rem_v2_v, v], axis=0)[:sf_per_shard]
+                            s = np.concatenate([rem_v2_s, s], axis=0)[:sf_per_shard]
+                            rem_v2_v = np.empty((0, RECORD_SIZE_V1), dtype=np.uint8)
+                            rem_v2_s = np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
                         while not stop_ev.is_set():
                             try:
                                 sf_q.put((v, s), timeout=2.0)
@@ -1192,23 +1275,26 @@ def run_harvest_shards(args: argparse.Namespace, s3_client, dirs: dict) -> None:
                         sf_seq += 1
                     else:
                         st.close()
+                        st.byte_offset = start_byte + int(sf_streamed_total * 75)
                         time.sleep(2.0)
                 except Exception as exc:
-                    print(f"[Harvester SF w={w_id}] Stream reopen ({exc})", flush=True)
+                    print(f"[Harvester SF w={w_id} s={stream_idx}] Stream reopen ({exc})", flush=True)
                     st.close()
+                    st.byte_offset = start_byte + int(sf_streamed_total * 75)
                     time.sleep(3.0)
         finally:
             st.close()
             shutil.rmtree(sf_dir, ignore_errors=True)
 
-    sf_th = threading.Thread(target=_harv_sf_worker, daemon=True)
-    sf_th.start()
+    sf_threads = [threading.Thread(target=_harv_sf_worker, args=(si,), daemon=True) for si in range(streams_per_worker)]
+    for th in sf_threads:
+        th.start()
 
     stop_deadline = time.time() + max(300, args.max_runtime_sec - 120)
     lc0_buf_v1 = np.empty((0, RECORD_SIZE_V1), dtype=np.uint8)
     lc0_buf_sc = np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
     cpu_cnt = os.cpu_count() or 8
-    par_t80 = max(4, min(10, cpu_cnt - 4))
+    par_t80 = max(4, min(8, cpu_cnt - 6))
     t0_all = time.time()
     done_cnt = 0
 
@@ -1220,7 +1306,8 @@ def run_harvest_shards(args: argparse.Namespace, s3_client, dirs: dict) -> None:
 
             while len(lc0_buf_v1) < lc0_per_shard and my_t80:
                 w_dir = tmp_dir / f"harv_lc0_w{w_id}_{sid:03d}"
-                need = max(lc0_per_shard * 8, lc0_per_shard - len(lc0_buf_v1))
+                rem_shards = max(1, len(todo_ids) - done_cnt)
+                need = min(rem_shards * lc0_per_shard, max(lc0_per_shard * 6, lc0_per_shard - len(lc0_buf_v1)))
                 pairs, t80_idx = stream_lc0_t80_parallel(
                     lc0_exe, my_t80, t80_idx, w_dir, excl_bin, need,
                     workers=par_t80, threads_per_worker=1, tag=f"Harv-W{w_id}",
@@ -1240,14 +1327,21 @@ def run_harvest_shards(args: argparse.Namespace, s3_client, dirs: dict) -> None:
             lc0_buf_v1, lc0_buf_sc = lc0_buf_v1[take_lc:], lc0_buf_sc[take_lc:]
 
             v1_sf, sc_sf = np.empty((0, RECORD_SIZE_V1), dtype=np.uint8), np.empty((0, SIDECAR_SIZE), dtype=np.uint8)
-            try:
-                v1_sf, sc_sf = sf_q.get(timeout=8.0 if sf_ring else 120.0)
-                if len(sf_ring) >= 8:
-                    sf_ring.pop(0)
-                sf_ring.append((v1_sf, sc_sf))
-            except queue.Empty:
-                if sf_ring:
-                    v1_sf, sc_sf = sf_ring[sid % len(sf_ring)]
+            while len(v1_sf) == 0 and time.time() < stop_deadline:
+                try:
+                    v1_sf, sc_sf = sf_q.get(timeout=90.0 if sf_ring else 180.0)
+                    if len(sf_ring) >= 8:
+                        sf_ring.pop(0)
+                    sf_ring.append((v1_sf, sc_sf))
+                except queue.Empty:
+                    if sf_ring:
+                        print(f"[Harvester w={w_id}] SF queue wait timed out on shard_{sid:03d}; using ring fallback", flush=True)
+                        v1_sf, sc_sf = sf_ring[sid % len(sf_ring)]
+                        break
+                    print(f"[Harvester w={w_id}] Waiting for first SF Range chunk on shard_{sid:03d}...", flush=True)
+            if len(v1_sf) == 0:
+                print(f"[Harvester w={w_id}] Deadline hit while waiting for SF chunk; skipping incomplete shard_{sid:03d}.", flush=True)
+                break
 
             mv1, msc = _build_mixed_epoch_pool(v1_sf[:sf_per_shard], sc_sf[:sf_per_shard], v1_lc, sc_lc, seed=args.seed + sid)
             out_dir = tmp_dir / f"upload_w{w_id}"
@@ -1267,6 +1361,7 @@ def run_harvest_shards(args: argparse.Namespace, s3_client, dirs: dict) -> None:
             rate = (done_cnt * len(mv1)) / max(1.0, time.time() - t0_all)
             print(
                 f"[Harvester w={w_id}] Uploaded shard_{sid:03d} ({len(mv1):,} pos, "
+                f"sf={min(len(v1_sf), sf_per_shard):,}, lc0={len(v1_lc):,}, "
                 f"done={done_cnt}/{len(todo_ids)}, avg={rate:,.0f} pos/s)",
                 flush=True,
             )
@@ -1584,9 +1679,450 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
                 print(f"  [S3 Upload] checkpoints/phase4_job_b/{rel}", flush=True)
 
 
+def _mean_150k_val_mse(ev: dict) -> float:
+    vals = [float(ev[k]["val_mse"]) for k in ("far_test_50k", "in_region_50k", "heldout_400m_50k") if isinstance(ev.get(k), dict) and "val_mse" in ev[k]]
+    return float(sum(vals) / len(vals)) if vals else float("inf")
+
+
+def run_job_c_10x192_mastery(args: argparse.Namespace, device: torch.device, s3_client, dirs: dict) -> None:
+    """400M-Position 10x192 Mastery Pipeline (360M unquantized BF16 + 40M Middle-2..7 W8A8 QAT)."""
+    tmp_dir: Path = dirs["tmp"]
+    model_dir: Path = dirs["model"]
+    ckpt_dir: Path = dirs["ckpt"]
+    eval_files: dict[str, Path] = dirs["eval_files"]
+    t0_job = time.time()
+
+    a2_s3_key = getattr(args, "a2_soup75_s3_key", "checkpoints/phase4_job_c/init/A2_soup75_10x192.pt")
+    jb_s3_key = getattr(args, "job_b_ema95_s3_key", "checkpoints/phase4_job_c/init/12x192_mid2_9_hl64_ema_09995.pt")
+    a2_init_pt = _download_or_locate(
+        dirs["search"], "A2_soup75_10x192.pt", s3_client, args.bucket, a2_s3_key, tmp_dir / "A2_soup75_10x192.pt"
+    )
+    jb_init_pt = _download_or_locate(
+        dirs["search"], "12x192_mid2_9_hl64_ema_09995.pt", s3_client, args.bucket, jb_s3_key, tmp_dir / "12x192_mid2_9_hl64_ema_09995.pt"
+    )
+
+    m10 = ChessSEResNetPhase4(num_blocks=10, channels=192, use_bn=False, conv_bias=True).to(device)
+    a2_raw = torch.load(str(a2_init_pt), map_location="cpu", weights_only=False)
+    a2_sd = extract_10x192_state_dict(a2_raw)
+    m10.load_state_dict(a2_sd, strict=True)
+    if device.type == "cuda":
+        m10 = m10.to(memory_format=torch.channels_last)
+
+    ref_pol = _capture_first_batch_pol_logits(m10, eval_files, device)
+
+    # Stage split: 360M unquantized BF16 + 40M Middle-2..7 W8A8 QAT (proportional for small unit-test runs)
+    qat_pos = min(40_000_000, max(0, args.total_positions // 10))
+    stage1_pos = max(args.batch_size, args.total_positions - qat_pos)
+
+    eval_logs: dict = {}
+    step0_choice = "a2_soup75_native"
+    stage1_done = False
+
+    # Check if Stage 1 already completed before a Stage 2 Spot preemption
+    s3_s1_done_key = "checkpoints/phase4_job_c/stage1_complete.pt"
+    s3_resume_key = "checkpoints/phase4_job_c/latest.pt"
+    local_s1_done = ckpt_dir / "job_c_stage1_complete.pt"
+    local_resume = ckpt_dir / "job_c_latest.pt"
+
+    ema_9995 = FastModelEMA(m10, decay=0.9995)
+    ema_9999 = FastModelEMA(m10, decay=0.9999)
+    opt = torch.optim.AdamW(m10.parameters(), lr=8e-5, weight_decay=1e-4, fused=(device.type == "cuda"))
+    step_state = {"step": 0, "seen": 0, "seed": args.seed, "t0": time.time(), "last_ckpt": time.time()}
+
+    if args.resume and s3_client and args.bucket:
+        try:
+            s3_client.download_file(args.bucket, s3_s1_done_key, str(local_s1_done))
+            ck_done = torch.load(str(local_s1_done), map_location=device, weights_only=False)
+            ema_9995.load_shadow_dict(ck_done["ema_09995_state_dict"], m10)
+            ema_9999.load_shadow_dict(ck_done["ema_09999_state_dict"], m10)
+            step_state["step"] = int(ck_done.get("step", 0))
+            step_state["seen"] = int(ck_done.get("seen", stage1_pos))
+            eval_logs.update(ck_done.get("eval_logs", {}))
+            step0_choice = ck_done.get("step0_head_choice", step0_choice)
+            stage1_done = True
+            print(f"[Job C Resume] Stage 1 already complete (seen={step_state['seen']:,}); resuming straight into Stage 2 QAT!", flush=True)
+        except Exception:
+            stage1_done = False
+
+    if not stage1_done and args.resume and s3_client and args.bucket:
+        try:
+            s3_client.download_file(args.bucket, s3_resume_key, str(local_resume))
+            ck = torch.load(str(local_resume), map_location=device, weights_only=False)
+            m10.load_state_dict(ck["model_state_dict"])
+            ema_9995.load_shadow_dict(ck["ema_09995_state_dict"], m10)
+            ema_9999.load_shadow_dict(ck["ema_09999_state_dict"], m10)
+            opt.load_state_dict(ck["optimizer_state_dict"])
+            step_state["step"] = int(ck.get("step", 0))
+            step_state["seen"] = int(ck.get("seen", 0))
+            eval_logs.update(ck.get("eval_logs", {}))
+            step0_choice = ck.get("step0_head_choice", step0_choice)
+            print(f"[Job C Resume OK] Stage 1 step={step_state['step']:,}, seen={step_state['seen']:,}", flush=True)
+        except Exception as e:
+            print(f"[Job C Resume Note] Starting fresh ({e})", flush=True)
+
+    # Step-0 Cross-Architecture Warm-Start Verification (Policy drift == 0.000e+00 & lowest Step-0 150K MSE)
+    if not stage1_done and step_state["seen"] == 0:
+        print("\n=== [Job C Step 0] Verifying A2_soup75 trunk + Cross-Architecture Head Selection ===", flush=True)
+        ev_native = evaluate_unified_150k(m10, eval_files, device, ref_baseline_pol=ref_pol)
+        mse_native = _mean_150k_val_mse(ev_native)
+        print(f"[Job C Step-0 A2_soup75 Native Heads] mean_mse={mse_native:.5f} | {json.dumps(ev_native)}", flush=True)
+
+        native_heads = {k: v.detach().cpu().clone() for k, v in m10.state_dict().items() if k.startswith(("hl_head.", "ml_head."))}
+        n_copied = transplant_hl_mlh_heads(m10, jb_init_pt)
+        ev_trans = evaluate_unified_150k(m10, eval_files, device, ref_baseline_pol=ref_pol)
+        mse_trans = _mean_150k_val_mse(ev_trans)
+        print(f"[Job C Step-0 JobB-ema95 Transplanted Heads ({n_copied} tensors)] mean_mse={mse_trans:.5f} | {json.dumps(ev_trans)}", flush=True)
+
+        eval_logs["step0_a2_soup75_native"] = ev_native
+        eval_logs["step0_job_b_transplanted"] = ev_trans
+
+        if mse_trans <= mse_native:
+            step0_choice = "job_b_ema95_transplanted"
+            chosen_ev = ev_trans
+            print(f"[Job C Step-0 Choice] Keeping Job B ema_09995 transplanted heads (MSE {mse_trans:.5f} <= {mse_native:.5f})", flush=True)
+        else:
+            step0_choice = "a2_soup75_native"
+            with torch.no_grad():
+                for k, t_cpu in native_heads.items():
+                    m10.state_dict()[k].copy_(t_cpu.to(device=device, dtype=m10.state_dict()[k].dtype))
+            chosen_ev = ev_native
+            print(
+                f"[Job C Step-0 Choice] Keeping A2_soup75 native matched heads (MSE {mse_native:.5f} < Job B transplant {mse_trans:.5f}; avoids cross-depth feature-shift shock)",
+                flush=True,
+            )
+
+        max_step0_drift = max(
+            float(v.get("max_policy_logit_drift_vs_346m", 0.0))
+            for v in chosen_ev.values()
+            if isinstance(v, dict)
+        )
+        print(f"[Job C Step-0 Policy Preservation VERIFIED] max_drift_vs_A2_soup75={max_step0_drift:.3e}", flush=True)
+        if max_step0_drift > 1e-5:
+            raise RuntimeError(f"Job C Step-0 policy drift check FAILED: {max_step0_drift:.3e} > 1e-5")
+
+        # Re-initialize EMAs & optimizer cleanly from chosen Step-0 weights
+        ema_9995 = FastModelEMA(m10, decay=0.9995)
+        ema_9999 = FastModelEMA(m10, decay=0.9999)
+        opt = torch.optim.AdamW(m10.parameters(), lr=8e-5, weight_decay=1e-4, fused=(device.type == "cuda"))
+
+    # Async S3 double-buffered shard prefetcher across the 80 fresh 50/50 shards
+    pool_q: queue.Queue = queue.Queue(maxsize=4)
+    stop_prod = threading.Event()
+    s3_pref = args.s3_shard_prefix.strip("/")
+
+    def _s3_shard_producer():
+        dl_dir = tmp_dir / "job_c_s3_prefetch"
+        pass_idx = step_state["seen"] // 160_000_000
+        seen_in_pass: set[str] = set()
+        wait_logged = False
+        while not stop_prod.is_set():
+            ready_keys = list_ready_s3_mix_shards(s3_client, args.bucket, s3_pref)
+            unseen = [k for k in ready_keys if k not in seen_in_pass]
+            if not unseen and ready_keys:
+                seen_in_pass.clear()
+                pass_idx += 1
+                unseen = list(ready_keys)
+                print(f"[Job C Data] Starting shuffled pass #{pass_idx} over {len(ready_keys)} S3 shards ({len(ready_keys) * 2}M pos)", flush=True)
+
+            if not unseen:
+                if not wait_logged:
+                    print(f"[Job C Data] Waiting for S3 shards under s3://{args.bucket}/{s3_pref}/ ...", flush=True)
+                    wait_logged = True
+                time.sleep(5.0)
+                continue
+            wait_logged = False
+
+            rng_p = random.Random(args.seed + pass_idx * 1009 + len(seen_in_pass))
+            rng_p.shuffle(unseen)
+            for bkey in unseen:
+                if stop_prod.is_set():
+                    break
+                try:
+                    mv1, msc = download_s3_mix_shard(s3_client, args.bucket, bkey, dl_dir)
+                    seen_in_pass.add(bkey)
+                    while not stop_prod.is_set():
+                        try:
+                            pool_q.put((mv1, msc), timeout=2.0)
+                            break
+                        except queue.Full:
+                            continue
+                except Exception as exc:
+                    print(f"[Job C S3 Prefetch Warning] {bkey}: {exc}", flush=True)
+                # Poll S3 every 4 shards during Pass 0 so newly harvested shards join immediately
+                if pass_idx == 0 and (len(seen_in_pass) % 4 == 0):
+                    break
+        pool_q.put(None)
+
+    prod_th = threading.Thread(target=_s3_shard_producer, daemon=True)
+    prod_th.start()
+
+    calib_inputs = None
+    last_pool_pair: tuple[np.ndarray, np.ndarray] | None = None
+
+    def _capture_calib(mv1: np.ndarray) -> None:
+        nonlocal calib_inputs
+        if calib_inputs is None and len(mv1) >= 500:
+            cx = unpack_v1_tensor_to_inputs_and_meta(torch.from_numpy(mv1[:500].copy()))[0].numpy().astype(np.float32)
+            calib_inputs = [cx[i : i + 1] for i in range(len(cx))]
+
+    # -------------------- Stage 1: 360M Unquantized BF16 Mastery --------------------
+    if not stage1_done:
+        fwd_m10: nn.Module = m10
+        if device.type == "cuda" and os.name != "nt":
+            try:
+                fwd_m10 = torch.compile(m10, mode="default")
+                print("[Job C Stage 1] Enabled torch.compile(mode='default') on CUDA L40S!", flush=True)
+            except Exception as exc:
+                print(f"[Job C Stage 1 Note] Using eager CUDA ({exc})", flush=True)
+                fwd_m10 = m10
+
+        tot_steps_s1 = max(1, (stage1_pos + args.batch_size - 1) // args.batch_size)
+        warmup_s1 = min(300, max(1, tot_steps_s1 // 20))
+
+        def _lr_c1(o, stp, _seen):
+            lr = compute_cosine_lr(stp, tot_steps_s1, warmup_s1, 8e-5, 4e-6)
+            for pg in o.param_groups:
+                pg["lr"] = lr
+
+        def _save_s1_ckpt(st):
+            ck_p = ckpt_dir / "job_c_latest.pt"
+            torch.save({
+                "stage": "stage1",
+                "step": st["step"],
+                "seen": st["seen"],
+                "step0_head_choice": step0_choice,
+                "eval_logs": eval_logs,
+                "model_state_dict": m10.state_dict(),
+                "ema_09995_state_dict": ema_9995.shadow,
+                "ema_09999_state_dict": ema_9999.shadow,
+                "optimizer_state_dict": opt.state_dict(),
+            }, ck_p)
+            if s3_client and args.bucket:
+                try:
+                    s3_client.upload_file(str(ck_p), args.bucket, s3_resume_key)
+                    print(f"  [Checkpoint] Uploaded {s3_resume_key} at seen={st['seen']:,}", flush=True)
+                except Exception as e:
+                    print(f"  [Checkpoint Warning] {e}", flush=True)
+
+        # Reserve 40 min before hard MaxRuntimeInSeconds for Stage 1 exports + Stage 2 40M QAT + final eval
+        s1_deadline = t0_job + max(600, args.max_runtime_sec - 2400)
+        print(
+            f"\n=== [Job C Stage 1] Unquantized BF16 10x192 Mastery "
+            f"({stage1_pos:,} pos, B={args.batch_size}, cosine LR 8e-5 -> 4e-6) ===",
+            flush=True,
+        )
+        m10.train()
+        while step_state["seen"] < stage1_pos:
+            item = pool_q.get()
+            if item is None:
+                break
+            mv1, msc = item
+            _capture_calib(mv1)
+            hit_dl = _train_on_pool(
+                fwd_m10, mv1, msc, device, opt,
+                batch_size=args.batch_size, freeze_trunk=False,
+                pol_weight=1.0, val_weight=1.0, mlh_weight=0.05,
+                ema_list=[ema_9995, ema_9999], step_state=step_state, lr_fn=_lr_c1,
+                max_positions=stage1_pos, s3_ckpt_fn=_save_s1_ckpt,
+                stop_deadline_ts=s1_deadline,
+            )
+            last_pool_pair = (mv1, msc)
+            if hit_dl:
+                print("[Job C Stage 1] Reached Stage 1 graceful deadline; exporting Pure FP16 & proceeding to Stage 2 QAT!", flush=True)
+                break
+
+        _save_s1_ckpt(step_state)
+
+        s1_dir = model_dir / "stage1_fp16"
+        s1_dir.mkdir(parents=True, exist_ok=True)
+        for lbl, prefix_lbl, shadow in [
+            ("stage1_ema09995", "10x192_mastery_ema09995", ema_9995.shadow),
+            ("stage1_ema09999", "10x192_mastery_ema09999", ema_9999.shadow),
+        ]:
+            m10.load_state_dict(shadow)
+            ev = evaluate_unified_150k(m10, eval_files, device, ref_baseline_pol=ref_pol)
+            eval_logs[lbl] = ev
+            print(f"[Job C {lbl} 150K Eval] mean_mse={_mean_150k_val_mse(ev):.5f} | {json.dumps(ev)}", flush=True)
+            exp = export_phase4_to_folded_npz_and_ov(m10, s1_dir, prefix_lbl)
+            # Also provide exact `<prefix>_fp16.npz` and `<prefix>_fp16.pt` names
+            shutil.copy2(exp["folded_npz"], s1_dir / f"{prefix_lbl}_fp16.npz")
+            torch.save({
+                "architecture": "10x192_folded_hl64_mlh",
+                "label": lbl,
+                "seen": step_state["seen"],
+                "model_state_dict": shadow,
+                "eval_150k": ev,
+            }, s1_dir / f"{prefix_lbl}_fp16.pt")
+
+        torch.save({
+            "step": step_state["step"],
+            "seen": step_state["seen"],
+            "step0_head_choice": step0_choice,
+            "eval_logs": eval_logs,
+            "ema_09995_state_dict": ema_9995.shadow,
+            "ema_09999_state_dict": ema_9999.shadow,
+        }, local_s1_done)
+        if s3_client and args.bucket:
+            s3_client.upload_file(str(local_s1_done), args.bucket, s3_s1_done_key)
+            for p in s1_dir.glob("*"):
+                if p.is_file():
+                    s3_client.upload_file(str(p), args.bucket, f"checkpoints/phase4_job_c/stage1_fp16/{p.name}")
+                    print(f"  [S3 Upload] checkpoints/phase4_job_c/stage1_fp16/{p.name}", flush=True)
+
+    # -------------------- Stage 2: 40M Middle-Block (2..7) W8A8 QAT Polish --------------------
+    mse_95 = _mean_150k_val_mse(eval_logs.get("stage1_ema09995", {}))
+    mse_99 = _mean_150k_val_mse(eval_logs.get("stage1_ema09999", {}))
+    best_s1_lbl = "stage1_ema09995" if mse_95 <= mse_99 else "stage1_ema09999"
+    best_s1_shadow = ema_9995.shadow if mse_95 <= mse_99 else ema_9999.shadow
+    print(
+        f"\n=== [Job C Stage 2] Selected best 360M EMA: {best_s1_lbl} "
+        f"(ema09995 MSE={mse_95:.5f} vs ema09999 MSE={mse_99:.5f}) ===",
+        flush=True,
+    )
+
+    s2_deadline = t0_job + max(300, args.max_runtime_sec - 360)
+    if qat_pos > 0 and time.time() < s2_deadline:
+        print(f"=== [Job C Stage 2] Middle-Block (2..7) W8A8 QAT Polish ({qat_pos:,} pos, cosine LR 1.5e-5 -> 1e-6) ===", flush=True)
+        m10_qat = ChessSEResNetPhase4(num_blocks=10, channels=192, use_bn=False, conv_bias=True).to(device)
+        m10_qat.load_state_dict(best_s1_shadow)
+        for p in m10_qat.parameters():
+            p.requires_grad_(True)
+        apply_middle_w8a8_qat(m10_qat, qat_blocks=(2, 3, 4, 5, 6, 7))
+        if device.type == "cuda":
+            m10_qat = m10_qat.to(memory_format=torch.channels_last)
+        m10_qat.train()
+        enforce_frozen_bn_eval(m10_qat)
+
+        if calib_inputs is None:
+            first_item = pool_q.get()
+            if first_item is not None:
+                _capture_calib(first_item[0])
+                last_pool_pair = first_item
+
+        if calib_inputs:
+            with torch.no_grad():
+                cx_t = torch.from_numpy(np.concatenate(calib_inputs[:256], axis=0)).to(
+                    device=device, memory_format=torch.channels_last if device.type == "cuda" else torch.contiguous_format
+                )
+                m10_qat(cx_t)
+
+        ema_qat = FastModelEMA(m10_qat, decay=0.9995)
+        opt_qat = torch.optim.AdamW(
+            [p for p in m10_qat.parameters() if p.requires_grad],
+            lr=1.5e-5, weight_decay=1e-4, fused=(device.type == "cuda"),
+        )
+        tot_qat_steps = max(1, (qat_pos + args.batch_size - 1) // args.batch_size)
+        warmup_qat = min(250, max(1, tot_qat_steps // 10))
+        st_qat = {"step": 0, "seen": 0, "seed": args.seed + 777, "t0": time.time(), "last_ckpt": time.time()}
+        s3_s2_key = "checkpoints/phase4_job_c/stage2_latest.pt"
+
+        if args.resume and s3_client and args.bucket:
+            try:
+                loc_s2 = ckpt_dir / "job_c_stage2_latest.pt"
+                s3_client.download_file(args.bucket, s3_s2_key, str(loc_s2))
+                ck2 = torch.load(str(loc_s2), map_location=device, weights_only=False)
+                m10_qat.load_state_dict(ck2["model_state_dict"])
+                ema_qat.load_shadow_dict(ck2["ema_09995_state_dict"], m10_qat)
+                opt_qat.load_state_dict(ck2["optimizer_state_dict"])
+                st_qat["step"] = int(ck2.get("step", 0))
+                st_qat["seen"] = int(ck2.get("seen", 0))
+                print(f"[Job C Stage 2 Resume OK] step={st_qat['step']:,}, seen={st_qat['seen']:,}", flush=True)
+            except Exception:
+                pass
+
+        def _lr_c2(o, stp, _seen):
+            lr_q = compute_cosine_lr(stp, tot_qat_steps, warmup_qat, 1.5e-5, 1e-6)
+            for pg in o.param_groups:
+                pg["lr"] = lr_q
+
+        def _save_s2_ckpt(st):
+            ck2_p = ckpt_dir / "job_c_stage2_latest.pt"
+            torch.save({
+                "stage": "stage2_qat",
+                "step": st["step"],
+                "seen": st["seen"],
+                "model_state_dict": m10_qat.state_dict(),
+                "ema_09995_state_dict": ema_qat.shadow,
+                "optimizer_state_dict": opt_qat.state_dict(),
+            }, ck2_p)
+            if s3_client and args.bucket:
+                try:
+                    s3_client.upload_file(str(ck2_p), args.bucket, s3_s2_key)
+                    print(f"  [Checkpoint] Uploaded {s3_s2_key} at qat_seen={st['seen']:,}", flush=True)
+                except Exception as e:
+                    print(f"  [Checkpoint Warning] {e}", flush=True)
+
+        while st_qat["seen"] < qat_pos and time.time() < s2_deadline:
+            try:
+                q_item = pool_q.get(timeout=10.0)
+            except queue.Empty:
+                q_item = last_pool_pair
+            if q_item is None:
+                q_item = last_pool_pair
+            if q_item is None:
+                break
+            qv1, qsc = q_item
+            _capture_calib(qv1)
+            hit_q = _train_on_pool(
+                m10_qat, qv1, qsc, device, opt_qat,
+                batch_size=args.batch_size, freeze_trunk=False,
+                pol_weight=1.0, val_weight=1.0, mlh_weight=0.05,
+                ema_list=[ema_qat], step_state=st_qat, lr_fn=_lr_c2,
+                max_positions=qat_pos, s3_ckpt_fn=_save_s2_ckpt,
+                stop_deadline_ts=s2_deadline,
+            )
+            last_pool_pair = (qv1, qsc)
+            if hit_q:
+                print("[Job C Stage 2] Hit Stage 2 graceful deadline; exporting final QAT FP16 + Middle-2..7 INT8!", flush=True)
+                break
+
+        m10_qat.load_state_dict(ema_qat.shadow)
+        ev_qat = evaluate_unified_150k(m10_qat, eval_files, device, ref_baseline_pol=ref_pol)
+        eval_logs["stage2_qat_mid2_7"] = ev_qat
+        print(f"[Job C Stage 2 qat_mid2_7 150K Eval] mean_mse={_mean_150k_val_mse(ev_qat):.5f} | {json.dumps(ev_qat)}", flush=True)
+
+        out_qat = model_dir / "qat_mid2_7"
+        exp_qat = export_phase4_to_folded_npz_and_ov(
+            m10_qat, out_qat, "10x192_mastery_qat_mid2_7",
+            calib_inputs=calib_inputs, int8_blocks=(2, 3, 4, 5, 6, 7),
+        )
+        torch.save({
+            "architecture": "10x192_folded_mid2_7_qat_hl64_mlh",
+            "best_stage1_ema": best_s1_lbl,
+            "stage1_seen": step_state["seen"],
+            "stage2_qat_seen": st_qat["seen"],
+            "model_state_dict": m10_qat.state_dict(),
+            "ema_09995_state_dict": ema_qat.shadow,
+            "eval_150k": ev_qat,
+            "export": exp_qat,
+        }, out_qat / "10x192_mastery_qat_mid2_7.pt")
+
+    stop_prod.set()
+    last_pool_pair = None
+    gc.collect()
+
+    rep_c = {
+        "mode": "job_c_10x192_mastery",
+        "step0_head_choice": step0_choice,
+        "best_stage1_ema": best_s1_lbl,
+        "stage1_seen": step_state["seen"],
+        "stage2_qat_target": qat_pos,
+        "elapsed_sec": round(time.time() - t0_job, 1),
+        "eval_150k": eval_logs,
+    }
+    (model_dir / "phase4_job_c_report.json").write_text(json.dumps(rep_c, indent=2), encoding="utf-8")
+
+    if s3_client and args.bucket:
+        for p in model_dir.rglob("*"):
+            if p.is_file():
+                rel = p.relative_to(model_dir).as_posix()
+                s3_client.upload_file(str(p), args.bucket, f"checkpoints/phase4_job_c/{rel}")
+                print(f"  [S3 Upload] checkpoints/phase4_job_c/{rel}", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["job_a", "job_b", "harvest_shards"], required=True)
+    parser.add_argument("--mode", choices=["job_a", "job_b", "job_c_10x192_mastery", "harvest_shards"], required=True)
     parser.add_argument("--bucket", type=str, default=DEFAULT_BUCKET)
     parser.add_argument("--region", type=str, default=DEFAULT_REGION)
     parser.add_argument("--batch_size", type=int, default=512)
@@ -1598,6 +2134,11 @@ def main() -> None:
     parser.add_argument("--num_workers", type=int, default=1)
     parser.add_argument("--shard_size", type=int, default=2_000_000)
     parser.add_argument("--s3_shard_prefix", type=str, default="data/phase4_mix_shards")
+    parser.add_argument("--sf_ratio", type=float, default=0.50)
+    parser.add_argument("--t80_skip", type=int, default=40)
+    parser.add_argument("--sf_line_offset", type=int, default=40_000_000)
+    parser.add_argument("--a2_soup75_s3_key", type=str, default="checkpoints/phase4_job_c/init/A2_soup75_10x192.pt")
+    parser.add_argument("--job_b_ema95_s3_key", type=str, default="checkpoints/phase4_job_c/init/12x192_mid2_9_hl64_ema_09995.pt")
     args = parser.parse_args()
     _ensure_runtime_deps()
 
@@ -1633,6 +2174,8 @@ def main() -> None:
     s3_v2_names = ("shard_000.bin", "shard_001.bin")
     if args.mode == "harvest_shards":
         my_v2 = [s3_v2_names[i] for i in range(len(s3_v2_names)) if (i % max(1, int(args.num_workers))) == int(args.worker_id)]
+    elif args.mode == "job_c_10x192_mastery":
+        my_v2 = []
     else:
         my_v2 = list(s3_v2_names)
     for sfn in my_v2:
@@ -1648,6 +2191,8 @@ def main() -> None:
         run_harvest_shards(args, s3_client, dirs)
     elif args.mode == "job_a":
         run_job_a(args, device, s3_client, dirs)
+    elif args.mode == "job_c_10x192_mastery":
+        run_job_c_10x192_mastery(args, device, s3_client, dirs)
     else:
         run_job_b(args, device, s3_client, dirs)
 

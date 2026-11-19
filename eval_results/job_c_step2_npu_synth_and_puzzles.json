@@ -1,0 +1,224 @@
+{
+  "stage_a": [
+    {
+      "name": "JobC_base_int8",
+      "xml": "weights\\phase4_job_c\\qat_mid2_7\\10x192_mastery_qat_mid2_7_hybrid_int8.xml",
+      "b16_med_ms": 5.351,
+      "b16_raw_pos_s": 2990.2,
+      "far_5000": {
+        "gt_masked_top1_pct": 50.94,
+        "gt_masked_top3_pct": 80.42,
+        "gt_masked_policy_ce": 1.4737,
+        "gt_value_mse": 0.04981,
+        "gt_decisive_sign_pct": 96.08,
+        "gt_decisive_count": 3239,
+        "gt_illegal_targets": 0,
+        "far_5000_pos_s": 2884.2
+      },
+      "puzzles": {
+        "0n_solved": 1326,
+        "0n_pct": 67.0,
+        "0n_time_s": 1.81,
+        "0n_by_bucket": {
+          "<1200": 88.32,
+          "1200-1499": 70.63,
+          "1500-1799": 64.82,
+          "1800-2099": 58.79,
+          "2100+": 52.54
+        }
+      }
+    },
+    {
+      "name": "JobC_recalib_2k_int8",
+      "xml": "weights\\phase4_job_c\\synth\\JobC_recalib_hybrid_int8.xml",
+      "b16_med_ms": 5.333,
+      "b16_raw_pos_s": 3000.1,
+      "far_5000": {
+        "gt_masked_top1_pct": 51.0,
+        "gt_masked_top3_pct": 80.64,
+        "gt_masked_policy_ce": 1.4733,
+        "gt_value_mse": 0.04959,
+        "gt_decisive_sign_pct": 96.14,
+        "gt_decisive_count": 3239,
+        "gt_illegal_targets": 0,
+        "far_5000_pos_s": 2883.4
+      },
+      "puzzles": {
+        "0n_solved": 1328,
+        "0n_pct": 67.1,
+        "0n_time_s": 1.81,
+        "0n_by_bucket": {
+          "<1200": 87.82,
+          "1200-1499": 70.63,
+          "1500-1799": 65.08,
+          "1800-2099": 59.05,
+          "2100+": 53.05
+        }
+      }
+    },
+    {
+      "name": "JobC_soup85_A2_int8",
+      "xml": "weights\\phase4_job_c\\synth\\JobC_soup85_A2_hybrid_int8.xml",
+      "b16_med_ms": 5.321,
+      "b16_raw_pos_s": 3007.0,
+      "far_5000": {
+        "gt_masked_top1_pct": 51.3,
+        "gt_masked_top3_pct": 80.22,
+        "gt_masked_policy_ce": 1.4678,
+        "gt_value_mse": 0.05119,
+        "gt_decisive_sign_pct": 96.05,
+        "gt_decisive_count": 3239,
+        "gt_illegal_targets": 0,
+        "far_5000_pos_s": 2893.5
+      },
+      "puzzles": {
+        "0n_solved": 1327,
+        "0n_pct": 67.05,
+        "0n_time_s": 1.81,
+        "0n_by_bucket": {
+          "<1200": 87.56,
+          "1200-1499": 72.91,
+          "1500-1799": 65.58,
+          "1800-2099": 57.79,
+          "2100+": 51.52
+        }
+      }
+    },
+    {
+      "name": "JobC_soup75_A2_int8",
+      "xml": "weights\\phase4_job_c\\synth\\JobC_soup75_A2_hybrid_int8.xml",
+      "b16_med_ms": 5.357,
+      "b16_raw_pos_s": 2986.6,
+      "far_5000": {
+        "gt_masked_top1_pct": 50.94,
+        "gt_masked_top3_pct": 80.48,
+        "gt_masked_policy_ce": 1.4691,
+        "gt_value_mse": 0.05215,
+        "gt_decisive_sign_pct": 96.02,
+        "gt_decisive_count": 3239,
+        "gt_illegal_targets": 0,
+        "far_5000_pos_s": 2894.1
+      },
+      "puzzles": {
+        "0n_solved": 1318,
+        "0n_pct": 66.6,
+        "0n_time_s": 1.87,
+        "0n_by_bucket": {
+          "<1200": 87.56,
+          "1200-1499": 72.15,
+          "1500-1799": 64.57,
+          "1800-2099": 57.54,
+          "2100+": 51.27
+        }
+      }
+    },
+    {
+      "name": "JobC_qat_fp16",
+      "xml": "weights\\phase4_job_c\\qat_mid2_7\\10x192_mastery_qat_mid2_7_fp16.xml",
+      "b16_med_ms": 6.318,
+      "b16_raw_pos_s": 2532.6,
+      "far_5000": {
+        "gt_masked_top1_pct": 51.32,
+        "gt_masked_top3_pct": 80.48,
+        "gt_masked_policy_ce": 1.4661,
+        "gt_value_mse": 0.04905,
+        "gt_decisive_sign_pct": 95.71,
+        "gt_decisive_count": 3239,
+        "gt_illegal_targets": 0,
+        "far_5000_pos_s": 2462.3
+      },
+      "puzzles": {
+        "0n_solved": 1335,
+        "0n_pct": 67.46,
+        "0n_time_s": 1.9,
+        "0n_by_bucket": {
+          "<1200": 88.07,
+          "1200-1499": 72.41,
+          "1500-1799": 66.08,
+          "1800-2099": 58.29,
+          "2100+": 52.54
+        }
+      }
+    }
+  ],
+  "stage_b": [
+    {
+      "name": "JobC_base_int8",
+      "xml": "weights\\phase4_job_c\\qat_mid2_7\\10x192_mastery_qat_mid2_7_hybrid_int8.xml",
+      "b16_med_ms": 5.34,
+      "b16_raw_pos_s": 2996.1,
+      "far_5000": {
+        "gt_masked_top1_pct": 50.94,
+        "gt_masked_top3_pct": 80.42,
+        "gt_masked_policy_ce": 1.4737,
+        "gt_value_mse": 0.04981,
+        "gt_decisive_sign_pct": 96.08,
+        "gt_decisive_count": 3239,
+        "gt_illegal_targets": 0,
+        "far_5000_pos_s": 2873.1
+      },
+      "puzzles": {
+        "0n_solved": 1326,
+        "0n_pct": 67.0,
+        "0n_time_s": 1.84,
+        "0n_by_bucket": {
+          "<1200": 88.32,
+          "1200-1499": 70.63,
+          "1500-1799": 64.82,
+          "1800-2099": 58.79,
+          "2100+": 52.54
+        },
+        "200n_solved": 1655,
+        "200n_pct": 83.63,
+        "200n_time_s": 119.4,
+        "200n_nps": 3140.6,
+        "200n_by_bucket": {
+          "<1200": 96.7,
+          "1200-1499": 90.89,
+          "1500-1799": 84.17,
+          "1800-2099": 80.15,
+          "2100+": 66.24
+        }
+      }
+    },
+    {
+      "name": "JobC_recalib_2k_int8",
+      "xml": "weights\\phase4_job_c\\synth\\JobC_recalib_hybrid_int8.xml",
+      "b16_med_ms": 5.404,
+      "b16_raw_pos_s": 2961.0,
+      "far_5000": {
+        "gt_masked_top1_pct": 51.0,
+        "gt_masked_top3_pct": 80.64,
+        "gt_masked_policy_ce": 1.4733,
+        "gt_value_mse": 0.04959,
+        "gt_decisive_sign_pct": 96.14,
+        "gt_decisive_count": 3239,
+        "gt_illegal_targets": 0,
+        "far_5000_pos_s": 2877.6
+      },
+      "puzzles": {
+        "0n_solved": 1328,
+        "0n_pct": 67.1,
+        "0n_time_s": 1.84,
+        "0n_by_bucket": {
+          "<1200": 87.82,
+          "1200-1499": 70.63,
+          "1500-1799": 65.08,
+          "1800-2099": 59.05,
+          "2100+": 53.05
+        },
+        "200n_solved": 1652,
+        "200n_pct": 83.48,
+        "200n_time_s": 119.59,
+        "200n_nps": 3137.6,
+        "200n_by_bucket": {
+          "<1200": 96.7,
+          "1200-1499": 90.89,
+          "1500-1799": 84.42,
+          "1800-2099": 80.65,
+          "2100+": 64.72
+        }
+      }
+    }
+  ]
+}

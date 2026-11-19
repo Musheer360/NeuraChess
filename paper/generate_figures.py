@@ -776,18 +776,19 @@ def make_fig4() -> None:
 
     # --- Panel (c): Stockfish 19 Ladder & go nodes 3500 Crossover ---
     ax3 = fig.add_subplot(gs[2])
+    ladder_786m = load_json("job_c_stockfish_ladder_150g.json")
     cats = ["SF19\nElo 2800\n(50g)", "SF19\nElo 3000\n(50g)", "SF19\nElo 3190\n(50g)", "SF19\nNodes 3500\n(40g)"]
     v10_scores = [62.0, 49.0, 39.0, 37.50]
     v11_scores = [
-        float(ladder["tiers"]["2800"]["score_pct"]),
-        float(ladder["tiers"]["3000"]["score_pct"]),
-        float(ladder["tiers"]["3190"]["score_pct"]),
+        float(ladder_786m["tiers"]["2800"]["score_pct"]),
+        float(ladder_786m["tiers"]["3000"]["score_pct"]),
+        float(ladder_786m["tiers"]["3190"]["score_pct"]),
         float(nodes3500["score_pct"]),
     ]
     v11_cis = [
-        ladder["tiers"]["2800"]["wilson_95_ci_pct"],
-        ladder["tiers"]["3000"]["wilson_95_ci_pct"],
-        ladder["tiers"]["3190"]["wilson_95_ci_pct"],
+        ladder_786m["tiers"]["2800"]["wilson_95_ci_pct"],
+        ladder_786m["tiers"]["3000"]["wilson_95_ci_pct"],
+        ladder_786m["tiers"]["3190"]["wilson_95_ci_pct"],
         nodes3500["wilson_95_ci_pct"],
     ]
     yerr_lo = [s - ci[0] for s, ci in zip(v11_scores, v11_cis)]
@@ -804,7 +805,7 @@ def make_fig4() -> None:
                     color=[COLORS["blue"], COLORS["blue"], COLORS["blue"], COLORS["green"]],
                     edgecolor="#111111", linewidth=0.65,
                     yerr=[yerr_lo, yerr_hi], capsize=3.0, error_kw=dict(lw=1.0, ecolor="#111111"),
-                    label="v1.1 MidQAT-Soup (95% CI)", zorder=4)
+                    label="10x192-MidQAT-786M (95% CI)", zorder=4)
 
     for r, v in zip(r_old, v10_scores):
         ax3.text(r.get_x() + r.get_width() / 2, v + 1.4, f"{v:.1f}%",
@@ -816,7 +817,7 @@ def make_fig4() -> None:
 
     ax3.text(
         1.15, 113.0,
-        f"Mean Implied Elo: {ladder['mean_implied_elo']:.0f}\n(3,988 pondered NPS, 150g)",
+        f"Mean Implied Elo: {ladder_786m['mean_implied_elo']:.0f}\n({ladder_786m['mean_effective_nps']:,.0f} pondered NPS, 150g)",
         ha="center", va="top", fontsize=7.0, color="#1F2937",
         bbox=dict(boxstyle="round,pad=0.24", fc="#F8FAFC", ec="#CBD5E1", lw=0.75),
     )

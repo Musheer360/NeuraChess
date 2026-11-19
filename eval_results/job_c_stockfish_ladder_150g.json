@@ -1,0 +1,95 @@
+{
+  "model": "neurachess-10x192-mastery-qat-int8 (Job C 786M)",
+  "xml": "weights\\phase4_job_c\\qat_mid2_7\\10x192_mastery_qat_mid2_7_hybrid_int8.xml",
+  "openings_file": "eval_results\\openings_320.json",
+  "opening_ranges": {
+    "2800": "[0:25]",
+    "3000": "[25:50]",
+    "3190": "[50:75]"
+  },
+  "config": {
+    "movetime_ms": 400,
+    "batch_size": 16,
+    "ponder": true,
+    "fpu_reduction": 0.2,
+    "max_plies": 150,
+    "adjudicate_material": true,
+    "syzygy": true
+  },
+  "total_games": 150,
+  "wins": 46,
+  "draws": 60,
+  "losses": 44,
+  "points": 76.0,
+  "overall_score_pct": 50.67,
+  "mean_effective_nps": 4013.3,
+  "mean_implied_elo": 3006.3,
+  "tiers": {
+    "2800": {
+      "total_games": 50,
+      "wins": 34,
+      "draws": 9,
+      "losses": 7,
+      "points": 38.5,
+      "score_pct": 77.0,
+      "wilson_95_ci_pct": [
+        63.67,
+        86.48
+      ],
+      "effective_nps": 3975.6,
+      "elo_diff_vs_tier": 209.9,
+      "implied_elo": 3009.9,
+      "adjudicated": {
+        "wins": 6,
+        "draws": 9,
+        "losses": 0
+      },
+      "late_endgame_losses": 7,
+      "slice_file": "eval_results\\job_c_sf_2800_50g.json"
+    },
+    "3000": {
+      "total_games": 50,
+      "wins": 6,
+      "draws": 32,
+      "losses": 12,
+      "points": 22.0,
+      "score_pct": 44.0,
+      "wilson_95_ci_pct": [
+        31.16,
+        57.69
+      ],
+      "effective_nps": 4075.1,
+      "elo_diff_vs_tier": -41.9,
+      "implied_elo": 2958.1,
+      "adjudicated": {
+        "wins": 4,
+        "draws": 20,
+        "losses": 3
+      },
+      "late_endgame_losses": 10,
+      "slice_file": "eval_results\\job_c_sf_3000_50g.json"
+    },
+    "3190": {
+      "total_games": 50,
+      "wins": 6,
+      "draws": 19,
+      "losses": 25,
+      "points": 15.5,
+      "score_pct": 31.0,
+      "wilson_95_ci_pct": [
+        19.93,
+        44.78
+      ],
+      "effective_nps": 3989.3,
+      "elo_diff_vs_tier": -139.0,
+      "implied_elo": 3051.0,
+      "adjudicated": {
+        "wins": 4,
+        "draws": 9,
+        "losses": 4
+      },
+      "late_endgame_losses": 17,
+      "slice_file": "eval_results\\job_c_sf_3190_50g.json"
+    }
+  }
+}

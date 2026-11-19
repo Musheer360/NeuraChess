@@ -22,17 +22,17 @@ MODEL_ASSETS = {
         {
             "filename": "neurachess-10x192-qat-int8.xml",
             "aliases": ["neurachess-10x192-qat-int8.xml"],
-            "sha256": "86fce43ef5a89580f548cf56fa79079b055afdf1da8eb0903ff6537874df5bcb",
+            "sha256": "4c95e88c22b5bb0df084db2aab08f4a040b82f0eb0cc6551b017f503382adefc",
         },
         {
             "filename": "neurachess-10x192-qat-int8.bin",
             "aliases": ["neurachess-10x192-qat-int8.bin"],
-            "sha256": "9db3c4d6e1f45a07a4cc0cd6cfc5898edc1c3ffdc8171137a754de0b7f3db260",
+            "sha256": "3b5b4c63f0c161d6baaa505705d0595481b5d8d5618901388e30a4a4ecad86e1",
         },
         {
             "filename": "neurachess-10x192-qat-int8.npz",
             "aliases": ["neurachess-10x192-qat-int8.npz"],
-            "sha256": "99d2689b76cec74927f425d121cddc6a9e2b6360704a721ba0b0f67cc30c5df2",
+            "sha256": "72423a8979fdb1d049e22fb72746d0298a6b5eb75832463e14bbbdd988f65edc",
         },
     ],
     "12x192": [
