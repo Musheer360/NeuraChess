@@ -20,7 +20,7 @@
   linkcolor=blue!60!black,
   citecolor=green!45!black,
   urlcolor=blue!70!black,
-  pdftitle={Compute-Optimal Neural MCTS on Edge NPUs},
+  pdftitle={Mixed-Precision Neural MCTS and Multi-Shape Batching on a 3W Edge NPU},
   pdfauthor={Musheer Alam}
 }
 
@@ -34,7 +34,7 @@
 \setlength{\belowcaptionskip}{4pt}
 \emergencystretch=1.5em
 
-\title{\textbf{Compute-Optimal Neural MCTS on Edge NPUs: Sensitivity-Guided Hybrid Quantization, Distributional Value Heads, and Co-Resident Graph Gear-Shifting}}
+\title{\textbf{Mixed-Precision Neural MCTS and Multi-Shape Batching on a 3W Edge NPU}}
 
 \author{
   Musheer Alam \\
@@ -51,9 +51,9 @@
     \maketitle
     \vspace{-1.4em}
     \begin{abstract}
-      \noindent Modern neural Monte Carlo Tree Search (MCTS) engines such as AlphaZero and Leela Chess Zero rely on 250--700\,W datacenter GPUs with high-bandwidth memory and dynamic batching. Migrating neural MCTS onto a 3\,W consumer edge neural processing unit (Intel AI Boost NPU~3720) exposes a fundamentally different hardware regime governed by ahead-of-time static tensor compilation, a tight ${\sim}4$\,MB on-chip CMX SRAM ceiling, and sequential tree-expansion dependencies that break standard quantization and scaling recipes. We present \textsc{NeuraChess} (\texttt{v1.1.0}), a hardware--algorithm co-designed chess engine pairing a vectorized C++23 PUCT runtime with sensitivity-guided mixed-precision NPU inference. Profiling reveals a sharp execution asymmetry: once tree traversal is moved to C++23, host P-cores sit $91.44\%$ idle ($373.64$\,ms/move) awaiting NPU evaluations. Driven by this bottleneck, we establish four core findings. First, layerwise quantization profiling across a 10-block Squeeze-and-Excitation ResNet uncovers a bimodal boundary failure---\texttt{block\_9} triggers a $>9\times$ policy KL divergence spike ($0.013042$) while \texttt{block\_1} causes a $0.926$ maximum value inversion; keeping boundary blocks (\texttt{0, 1, 8, 9}), SE gates, residual skip additions, and heads in FP16 while applying joint Middle-Block (\texttt{2..7}) W8A8 quantization-aware training (QAT) and zero-retraining weight souping reverses a $-12\%$ to $-20\%$ post-training quantization (PTQ) collapse into $+19.6\%$ search throughput ($3{,}891$ vs.\ $3{,}254$\,NPS) and a $+56.5$\,Elo head-to-head victory across 180 paired NPU games (pentanomial SPRT $\mathrm{LLR} = +3.8313 > +2.9444$, \texttt{ACCEPT\_H1}). Second, function-preserving depth expansion (\texttt{10x192}\,$\to$\,\texttt{12x192}, Step-0 drift $0.000$) maps an on-chip CMX SRAM latency cliff explaining why \texttt{12x192} wins by $+48.9$\,Elo in FP16 yet loses to \texttt{10x192 QAT INT8} under real-time NPU latency constraints. Third, upgrading scalar $\tanh$ value regression to a 64-bin Histogram Loss (\texttt{HL-Gauss-64}) plus Moves-Left Head (MLH) adds only $+0.012$\,ms ($+0.19\%$), while co-resident static-graph gear-shifting ($B\in\{1,4,8,16\}$ in $59.09$\,MB NPU memory) accelerates Mate-in-3 search by $3.15\times$ and boosts 50\,ms/100\,ms puzzle accuracy by $+8.0\%$/$+7.0\%$ (whereas warm pondered trees favor static $B=16$ double-buffering). Fourth, testing whether free idle CPU cycles can aid neural search via a $37.85$\,ns exact bitboard Static Exchange Evaluator (SEE) yields a consistent negative result validating Sutton's \emph{Bitter Lesson}. End-to-end, \textsc{NeuraChess} reaches $2{,}992$ mean implied \texttt{UCI\_Elo} across 150 Stockfish~19 ladder games, surges from $37.50\%$ to $83.75\%$ in fixed-node (\texttt{nodes 3500}) crossover play, and solves $95.65\%$ of $1{,}979$ clean Lichess puzzles at 800 nodes.
+      \noindent Deploying neural Monte Carlo Tree Search (MCTS) on a 3\,W edge NPU (Intel AI Boost NPU~3720) differs from datacenter GPUs due to static graph compilation and sequential tree backups. Profiling our C++23 PUCT chess engine (\textsc{NeuraChess}) shows that host CPU work takes $8.56\%$ of move time while $91.44\%$ waits on NPU evaluations. Layerwise W8A8 profiling of a 10-block SE-ResNet isolates boundary sensitivity in \texttt{block\_1} and \texttt{block\_9}; keeping boundary layers, SE gates, skips, and heads in FP16 while applying Middle-Block (\texttt{2..7}) W8A8 QAT yields $+18.5\%$ unpondered throughput ($3{,}821$ vs.\ $3{,}225$\,NPS) and $54.0\%$ ($+27.9$\,Elo) in a 100-game single-variable control on identical weights. Combined with a 64-bin \texttt{HL-Gauss} value head, blended training data, and weight souping, the upgraded engine wins a 180-game NPU match by $+56.5$\,Elo ($\mathrm{LLR} = +3.83$). We also analyze multi-shape batching, linear depth scaling, and negative idle-CPU heuristic ablations.
     \end{abstract}
-    \vspace{1.1em}
+    \vspace{1.0em}
   \end{@twocolumnfalse}
 ]
 
@@ -62,40 +62,57 @@
 \label{sec:intro}
 % =========================================================================
 
-The paradigm introduced by AlphaZero~\cite{silver2018alphazero} and scaled by community efforts such as Leela Chess Zero (\textsc{Lc0})~\cite{lc02024} demonstrated that coupling deep policy--value neural networks with Predictor Upper Confidence Trees (PUCT)~\cite{rosin2011puct} yields superhuman strategic play. Yet the systems assumptions underlying server-GPU neural MCTS do not transfer to ultra-low-power consumer edge accelerators. On a datacenter GPU (e.g., NVIDIA L40S or H100), hundreds of watts of thermal headroom, gigabytes of HBM bandwidth, and large asynchronous search batches ($B=64$--$512$) amortize kernel launch latency and absorb transformer attention overheads. By contrast, a modern laptop-integrated neural processing unit---specifically the Intel AI Boost NPU~3720 inside Intel Core Ultra (Meteor Lake) processors operating at roughly 3\,W---enforces three structural constraints that directly reshape both neural architecture and tree search:
+Neural Monte Carlo Tree Search (MCTS) engines such as AlphaZero~\cite{silver2018alphazero} and Leela Chess Zero (\textsc{Lc0})~\cite{lc02024} pair deep policy--value networks with Predictor Upper Confidence Trees (PUCT)~\cite{rosin2011puct} on 250--700\,W datacenter GPUs. Migrating this workload to an ultra-low-power consumer neural processing unit---the Intel AI Boost NPU~3720 integrated into Intel Core Ultra processors (${\sim}3$\,W)---alters both architectural and algorithmic trade-offs in three ways:
 
 \begin{enumerate}
-  \item \textbf{Static Ahead-of-Time Graph Compilation:} OpenVINO's NPU compiler lowers fixed-shape graphs into monolithic hardware command blobs~\cite{openvino2024}. Dynamic control flow and runtime shape recompilation are prohibitively expensive during millisecond-scale chess moves, requiring fixed shapes or explicit co-resident multi-shape compilation.
-  \item \textbf{Tight On-Chip SRAM Capacity (${\sim}4$\,MB CMX):} When weights and intermediate feature maps exceed the NPU's on-chip Connection Matrix (CMX) scratchpad, the compiler inserts DMA spills to shared LPDDR memory. As we prove empirically in Section~\ref{sec:scaling}, this induces a sharp latency cliff beyond ${\sim}7.5$--$8.0$\,M parameters, inverting GPU scaling rules where deeper models reliably win under fixed wall-clock budgets.
-  \item \textbf{Iterative Sequential Tree Dependencies:} Unlike throughput-bound vision classification or LLM prefill, PUCT search is a sequential feedback loop where batch $t+1$'s leaf selection depends on value backups from batch $t$. Increasing batch size from $B=16$ to $B=32$ or $B=64$ raises raw NPU pos/s but collapses playing strength to $26.56\%$ and $0.00\%$ against $B=16$ due to virtual-loss staleness. Likewise, scaled dot-product attention transformers stall on NPU~3720 ($723$--$1{,}351$\,pos/s), running $2.8\times$--$5.3\times$ slower than convolutional Squeeze-and-Excitation (SE) ResNets ($3{,}831$\,pos/s at \texttt{10x128})~\cite{he2016resnet,hu2018senet}.
+  \item \textbf{Static Ahead-of-Time Graph Compilation:} OpenVINO compiles fixed-shape neural graphs into hardware command blobs~\cite{openvino2024}. Dynamic batching and runtime shape recompilation are too slow for sub-second chess moves, necessitating either a single fixed batch shape or co-resident multi-shape compilation.
+  \item \textbf{Sequential Feedback Bottlenecks:} Unlike throughput-oriented vision classification, PUCT search is an iterative loop in which leaf selection for batch $t+1$ depends on value backups from batch $t$. Increasing batch size from $B=16$ to $B=32$ or $B=64$ raises raw NPU throughput but reduces equal-time playing strength to $26.56\%$ ($8.5/32$) and $0.00\%$ ($0/16$) against $B=16$ because large batches inflate virtual-loss staleness and cut sequential backup waves (for instance, at $200$\,ms/move, $B=64$ executes fewer than ten sequential feedback waves, and under a 50-node budget fewer than one full wave).
+  \item \textbf{Quantization Sensitivity Under Tree Backup:} Standard uniform post-training quantization (PTQ)~\cite{nagel2021whitepaper} tolerates 1--2\% classification drift, whereas in MCTS a single large value-head error on a tactical leaf propagates directly through PUCT backup and degrades move selection.
 \end{enumerate}
+
+In this paper, we present a systematic empirical study of neural MCTS co-design on Intel NPU~3720 through \textsc{NeuraChess}:
+\begin{itemize}
+  \item \textbf{Execution Asymmetry (Section~\ref{sec:formulation}):} Moving PUCT search into vectorized C++23 reduces active host CPU time to $8.56\%$ ($34.97$\,ms/move), leaving $91.44\%$ ($373.64$\,ms/move) spent awaiting NPU evaluations. Microbenchmarks confirm that SE-ResNets~\cite{he2016resnet,hu2018senet} outperform attention transformers by $2.8\times$--$5.3\times$ on NPU~3720.
+  \item \textbf{Sensitivity-Guided Mixed-Precision QAT \& Souping (Section~\ref{sec:qat}):} Layerwise sensitivity scanning identifies concentrated errors in \texttt{block\_1} (value outlier $0.926$) and \texttt{block\_9} ($>9\times$ policy KL increase). Joint Middle-Block (\texttt{2..7}) W8A8 QAT eliminates PTQ degradation, isolated directly by a 100-game single-variable head-to-head control on identical weights, and zero-retraining weight souping~\cite{wortsman2022modelsoups} restores zero-search tactical sharpness.
+  \item \textbf{Linear Depth--Latency Scaling \& Elo Inversion (Section~\ref{sec:scaling}):} Function-preserving depth expansion (\texttt{10x192}\,$\to$\,\texttt{12x192}~\cite{chen2016net2net}, Step-0 drift $0.000$) exhibits linear per-batch latency scaling ($5.412\,\text{ms} \times 1.2 = 6.494\,\text{ms}$ vs.\ $6.540\,\text{ms}$ measured). We analyze why \texttt{12x192} wins by $+48.9$\,Elo in FP16 yet trails \texttt{10x192-MidQAT} under fixed $400$\,ms wall-clock constraints due to reduced sequential PUCT wave count.
+  \item \textbf{Distributional Value Geometry, Multi-Shape Batching, \& Negative Ablations (Section~\ref{sec:hlgauss_gear}):} Replacing scalar $\tanh$ regression with 64-bin \texttt{HL-Gauss}~\cite{imani2018hlgauss,farebrother2024stop} and a Moves-Left Head adds only $+0.012$\,ms ($+0.19\%$). Co-resident $B\in\{1,4,8,16\}$ batch gear-shifting ($59.09$\,MB NPU memory) speeds Mate-in-3 search by $3.15\times$ and improves 50\,ms/100\,ms puzzle solve rates by $+8.0$/$+7.0$ percentage points, whereas warm pondered trees favor static $B=16$ double-buffering. We also document negative results for 50-node async double-buffering ($-18.69\%$) and idle-CPU $37.85$\,ns Static Exchange Evaluation prior shaping.
+  \item \textbf{End-to-End Evaluation (Section~\ref{sec:eval}) \& Systems Appendix (Appendix~\ref{app:systems}):} We report 180-game paired SPRT matches, 150-game Stockfish~19 ladder runs ($2{,}992$ mean implied \texttt{UCI\_Elo}), fixed-node crossover analysis, and $1{,}979$ leakage-free Lichess puzzles ($95.65\%$ at 800 nodes), with full 95\% Wilson confidence intervals throughout. Appendix~\ref{app:systems} details the C++23 bitboard runtime, 5-piece Syzygy integration, real-time clock-aware UCI bullet control, and our decoupled Spot training pipeline.
+\end{itemize}
 
 \begin{figure*}[t]
   \centering
   \includegraphics[width=\textwidth]{figures/fig1_block_sensitivity.pdf}
-  \caption{\textbf{Sensitivity-Guided Mixed-Precision Quantization on Intel NPU 3720.} (a) Single-block W8A8 PTQ scan across \texttt{block\_0}--\texttt{block\_9} of \texttt{10x192} evaluated on $5{,}000$ \texttt{Far-Test} positions reveals two sharp boundary cliffs: \texttt{block\_9} triggers a $>9\times$ policy KL divergence spike ($0.013042$), while \texttt{block\_1} causes a $0.926$ maximum value error. (b) Throughput and quality comparison across pure FP16, uniform 10-block PTQ, Hybrid Middle-Block (\texttt{2..7}) PTQ, and joint Middle-Block W8A8 QAT (\texttt{A2}), showing how QAT unlocks $3{,}988$\,NPS while simultaneously lowering policy CE ($1.618 \to 1.491$) and gaining $+56.5$\,Elo.}
+  \caption{\textbf{Sensitivity-Guided Mixed-Precision Quantization on Intel NPU 3720.} (a) Single-block W8A8 PTQ scan across \texttt{block\_0}--\texttt{block\_9} of \texttt{10x192} ($N=5{,}000$ held-out positions) identifies two boundary errors: \texttt{block\_9} produces a $>9\times$ policy KL increase ($0.013042$) and \texttt{block\_1} produces a $0.926$ maximum value error. (b) Throughput and quality across Pure FP16, uniform 10-block PTQ, Mid-2..7 PTQ, and \texttt{10x192-MidQAT-Soup} (INT8). $^\ast$The $+56.5$\,Elo gain reflects the combined \texttt{v1.1} upgrade (data mix + \texttt{HL-Gauss-64} + Mid-Block QAT); single-variable INT8 vs.\ FP16 results appear in Section~\ref{sec:qat}.}
   \label{fig:block_sensitivity}
 \end{figure*}
 
-Furthermore, neural MCTS exhibits extreme sensitivity to uniform post-training quantization (PTQ)~\cite{nagel2021whitepaper}: whereas 1--2\% top-1 degradation is often benign in image classification, a single $0.97$ value-head sign inversion on a tactical leaf propagates through PUCT backup into immediate game-losing blunders.
-
-We organize this study around the execution asymmetry of edge-NPU neural MCTS and four interconnected scientific theses:
-\begin{itemize}
-  \item \textbf{Execution Model \& the $91.4\%$ CPU-Idle Asymmetry (Section~\ref{sec:formulation}):} Vectorizing PUCT in C++23 (\texttt{fast\_tree}) collapses host CPU overhead to $8.56\%$ ($34.97$\,ms/move), leaving $91.44\%$ of wall time blocked on NPU latency and motivating both NPU-side acceleration and zero-staleness CPU utilization tests.
-  \item \textbf{Sensitivity-Guided Middle-Block W8A8 QAT \& Souping (Section~\ref{sec:qat}):} Layerwise profiling isolates bimodal boundary failure at \texttt{block\_1} and \texttt{block\_9}; a $2\times2$ causal factorial proves joint Middle-Block (\texttt{2..7}) W8A8 QAT reverses PTQ collapse into $+16.2\%$--$+19.6\%$ NPS and $+56.5$\,Elo, refined via zero-retraining weight souping~\cite{wortsman2022modelsoups}.
-  \item \textbf{Compute-Optimal Scaling \& the CMX SRAM Cliff (Section~\ref{sec:scaling}):} Function-preserving \texttt{Net2DeeperNet}~\cite{chen2016net2net} depth expansion (\texttt{10x192}\,$\to$\,\texttt{12x192}, Step-0 drift $0.000$) reveals how CMX SRAM spillover causes \texttt{12x192} to win $+48.9$\,Elo in FP16 yet lose to \texttt{10x192 QAT INT8} under real-time NPU latency.
-  \item \textbf{Distributional Value Geometry \& Multi-Shape Gear-Shifting (Section~\ref{sec:hlgauss_gear}):} \texttt{HL-Gauss-64 + MLH}~\cite{imani2018hlgauss,farebrother2024stop} adds $+0.012$\,ms ($+0.19\%$) overhead while improving endgame calibration; co-resident $B\in\{1,4,8,16\}$ graphs ($59.09$\,MB) yield a $3.15\times$ Mate-in-3 speedup and $+8.0\%$/$+7.0\%$ fast-puzzle gains, bounded by warm-tree double-buffering and 50-node async dispersion ($-18.69\%$).
-  \item \textbf{Testing the Bitter Lesson in Idle CPU Cycles (Section~\ref{sec:see}):} Exploiting the $91.44\%$ idle CPU window with an exact $37.85$\,ns bitboard Static Exchange Evaluator degrades tactical and value benchmarks, quantitatively validating Sutton's \emph{Bitter Lesson}~\cite{sutton2019bitter}. Section~\ref{sec:eval} presents full 180-game SPRT, Stockfish~19 ladder, fixed-node crossover, and 1,979-puzzle evaluations; Appendix~\ref{app:systems} documents low-level C++23 engineering, clock-aware UCI bullet control, and our $\$63.59$ Spot FinOps pipeline.
-\end{itemize}
-
 % =========================================================================
-\section{Problem Formulation and the CPU--NPU Execution Asymmetry}
+\section{Execution Model and CPU--NPU Asymmetry}
 \label{sec:formulation}
 % =========================================================================
 
-\textsc{NeuraChess} represents each board state $s$ as an $18 \times 8 \times 8$ \texttt{float32} tensor under a zero-overhead \texttt{gpu\_unpack} layout encoding 12 piece bitboards (planes $0\text{--}11$), side-to-move (plane $12$), four castling rights (planes $13\text{--}16$), and normalized half-move clock ($\text{halfmove}/100$, plane $17$). Actions use AlphaZero's canonical $4{,}672$-move space ($64$ source squares $\times 73$ move planes) with vertical reflection ($q \mapsto q \oplus 56$) for Black. Replacing a legacy flattened dense policy projection ($C\cdot 64 \to 4{,}672$) with a spatial $1\times 1$ \texttt{Conv73} head ($C \to 73$) plus BatchNorm cut \texttt{6x128} parameter count by \textbf{$5.39\times$} ($11.55$\,M $\to 2.14$\,M) and increased Intel NPU~3720 $B=16$ throughput by \textbf{$+17.8\%$} ($5{,}080.7 \to 5{,}985.2$\,pos/s). Controlled 5\,M-position ablations on \texttt{6x128} confirmed that legal-masked Boltzmann soft-target cross-entropy ($T=0.5$, illegal logits masked to $-10^4$) lowered \texttt{far\_test} cross-entropy from $2.4539$ (hard dense targets) and $2.9642$ (unmasked soft targets) to $2.2184$. Prior to OpenVINO export, all \texttt{BatchNorm2d} layers are analytically folded into preceding convolutions (\texttt{fold\_conv\_bn}), and static graphs compile under \texttt{PERFORMANCE\_HINT="LATENCY"} and \texttt{NPU\_TURBO=YES}.
+\textsc{NeuraChess} encodes each board state $s$ as an $18 \times 8 \times 8$ \texttt{float32} tensor containing 12 piece bitboards (planes $0\text{--}11$), side-to-move (plane $12$), castling rights (planes $13\text{--}16$), and normalized half-move clock ($\text{halfmove}/100$, plane $17$) without host-side rank flips during training. Actions use AlphaZero's $4{,}672$-move encoding ($64$ source squares $\times 73$ move planes) reflected vertically ($q \mapsto q \oplus 56$) for Black. Replacing a flattened dense policy head ($C\cdot 64 \to 4{,}672$) with a spatial $1\times 1$ \texttt{Conv73} convolution ($C \to 73$) plus BatchNorm reduced \texttt{6x128} parameter count by $5.39\times$ ($11.55$\,M $\to 2.14$\,M) and raised $B=16$ NPU throughput by $+17.8\%$ ($5{,}080.7 \to 5{,}985.2$\,pos/s). Controlled 5\,M-position ablations on \texttt{6x128} indicated that legal-masked Boltzmann soft-target cross-entropy ($T=0.5$, illegal logits masked to $-10^4$) lowered held-out cross-entropy from $2.4539$ (hard targets) and $2.9642$ (unmasked soft targets) to $2.2184$. Prior to OpenVINO export, all \texttt{BatchNorm2d} layers are analytically folded into preceding convolutions, and static graphs compile with \texttt{PERFORMANCE\_HINT="LATENCY"} and \texttt{NPU\_TURBO=YES}.
 
-At inference time, a cache-aligned C++23 Struct-of-Arrays tree runtime (\texttt{fast\_tree}; full bitboard, Zobrist NN cache, P-core affinity, and Syzygy tablebase details in Appendix~\ref{app:engine}) executes batched PUCT with First-Play Urgency (FPU) reduction across 8 children per cycle via AVX2 intrinsics:
+\begin{table}[t]
+  \centering
+  \caption{\textbf{Backbone Microbenchmark on Intel NPU 3720 ($B=16$, FP16).} Scaled dot-product attention transformers incur hardware stalls relative to SE-ResNets at comparable parameter counts.}
+  \label{tab:cnn_vs_tf}
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    \textbf{Backbone Architecture} & \textbf{Params} & \textbf{NPU $B{=}16$ (pos/s)} & \textbf{Eff.\ TFLOPS} & \textbf{Rel.\ Speed} \\
+    \midrule
+    \texttt{10x128} SE-ResNet (\texttt{Conv73}) & 3.20\,M & \textbf{3,831.2} & \textbf{1.541} & \textbf{1.00$\times$} \\
+    \texttt{6x192} Transformer (6 heads, rel-bias) & 2.00\,M & 1,351.0 & 0.336 & $0.35\times$ \\
+    \texttt{6x192} Transformer (Smolgen) & --- & 1,164.0 & 0.290 & $0.30\times$ \\
+    \texttt{8x256} Transformer (8 heads, rel-bias) & --- & 722.9 & --- & $0.19\times$ \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+Table~\ref{tab:cnn_vs_tf} summarizes our early backbone selection sweep on Intel NPU~3720: convolutional SE-ResNets sustain $1.541$ effective TFLOPS ($3{,}831.2$\,pos/s at \texttt{10x128}), whereas attention transformers achieve only $722.9$--$1{,}351.0$\,pos/s ($2.84\times$--$5.30\times$ slower). We therefore adopt SE-ResNet backbones exclusively.
+
+At search time, a cache-aligned C++23 Struct-of-Arrays PUCT runtime (\texttt{fast\_tree}; implementation details in Appendix~\ref{app:engine}) evaluates 8 children per cycle via AVX2 intrinsics:
 \begin{equation}
   \begin{aligned}
     \mathrm{PUCT}(s,a) &= \tilde{Q}(s,a) \\
@@ -103,153 +120,147 @@ At inference time, a cache-aligned C++23 Struct-of-Arrays tree runtime (\texttt{
   \end{aligned}
   \label{eq:puct}
 \end{equation}
-where visited edges use $\tilde{Q}(s,a) = \frac{W(s,a) - L_v(s,a)}{N(s,a) + L_v(s,a)}$ and unvisited edges ($N+L_v=0$) receive $\tilde{Q}_{\mathrm{FPU}}(s) = Q(s) - \delta_{\mathrm{fpu}}\sqrt{\sum_{b:\,N(s,b)>0} P_\theta(s,b)}$, where $Q(s)$ denotes the parent node's backed-up value from the side-to-move's perspective (production defaults: $c_{\mathrm{puct}}=1.5$, $\delta_{\mathrm{fpu}}=0.20$, $\delta_{\mathrm{fpu}}^{\mathrm{root}}=0.10$, $T_{\mathrm{root}}=1.0$, contempt $0.02$).
+where visited edges use $\tilde{Q}(s,a) = \frac{W(s,a) - L_v(s,a)}{N(s,a) + L_v(s,a)}$ and unvisited edges ($N+L_v=0$) receive $\tilde{Q}_{\mathrm{FPU}}(s) = Q(s) - \delta_{\mathrm{fpu}}\sqrt{\sum_{b:\,N(s,b)>0} P_\theta(s,b)}$, with $Q(s)$ denoting the parent node's backed-up value from the side-to-move's perspective (production defaults: $c_{\mathrm{puct}}=1.5$, $\delta_{\mathrm{fpu}}=0.20$, $\delta_{\mathrm{fpu}}^{\mathrm{root}}=0.10$, $T_{\mathrm{root}}=1.0$, draw contempt $0.02$).
 
-\paragraph{The $91.44\%$ CPU-Idle Telemetry Finding.}
-Whereas Python \texttt{python-chess} prototypes spent ${\sim}350$\,ms of every $400$\,ms move on host move generation and tree traversal, profiling \texttt{fast\_tree} on an Intel Core Ultra 5~125U (Redwood Cove P-cores + Intel AI Boost NPU~3720, \texttt{10x192 FP16}, $400$\,ms/move, sequential $B=16$) reveals a $10\times$ host reduction and an extreme hardware execution asymmetry: active host CPU computation requires just \textbf{$34.97$\,ms/move ($8.56\%$ duty cycle}---$5.23$\,ms setup, $16.57$\,ms AVX2 leaf selection, $2.74$\,ms zero-copy dispatch, $10.43$\,ms backup), while the CPU thread sits idle for \textbf{$373.64$\,ms/move ($91.44\%$ of wall time)} blocked on $6.26$--$6.84$\,ms NPU batch evaluations. This single telemetry measurement defines the design space for the remainder of the paper: every meaningful playing-strength gain must either (i) reduce NPU batch latency without corrupting search fidelity (Sections~\ref{sec:qat}--\ref{sec:hlgauss_gear}), (ii) extract higher tactical depth per millisecond of NPU wait (Section~\ref{sec:hlgauss_gear}), or (iii) test whether otherwise wasted CPU idle cycles can inject useful domain knowledge without introducing staleness (Section~\ref{sec:see}).
+\paragraph{CPU--NPU Execution Asymmetry.}
+While Python prototypes spent ${\sim}350$\,ms per $400$\,ms move on host move generation and tree traversal, profiling \texttt{fast\_tree} on an Intel Core Ultra 5~125U (Redwood Cove P-cores + Intel NPU~3720, \texttt{10x192} FP16, nominal $400$\,ms/move, sequential $B=16$) shows a $10\times$ reduction in host time: active CPU computation requires $34.97$\,ms/move ($8.56\%$ duty cycle: $5.23$\,ms setup, $16.57$\,ms AVX2 selection, $2.74$\,ms zero-copy dispatch, $10.43$\,ms backup), whereas $373.64$\,ms/move ($91.44\%$) is spent waiting on $6.26$--$6.84$\,ms NPU batch calls. The $408.61$\,ms combined wall time reflects waiting for the final in-flight $B=16$ NPU batch (${\sim}6.5$\,ms) to complete after the nominal $400$\,ms budget expires before emitting \texttt{bestmove}. Because NPU inference accounts for over $91\%$ of latency, improving playing strength requires reducing per-batch NPU latency without degrading evaluation quality, increasing effective search depth per millisecond, or testing whether idle CPU cycles can usefully assist search.
 
 % =========================================================================
 \section{Sensitivity-Guided Middle-Block W8A8 QAT and Weight Souping}
 \label{sec:qat}
 % =========================================================================
 
-\subsection{Failure of Uniform W8A8 Quantization}
-On Intel NPU~3720, INT8 multiply-accumulate arrays offer nearly double the peak throughput of FP16, making W8A8 quantization the highest-leverage lever against the $91.44\%$ NPU wait bottleneck. Yet applying standard uniform post-training quantization (\texttt{nncf.quantize} with fast bias correction~\cite{nagel2020adaround,openvino2024}) across all 10 residual blocks (\texttt{Full\_10Block\_W8A8}) failed catastrophically: on $5{,}000$ held-out \texttt{Far-Test} positions, policy Top-1 agreement against FP16 fell to $90.96\%$, mean policy KL divergence reached $0.021977$, and maximum value error $\max_s |V_{\mathrm{INT8}}(s) - V_{\mathrm{FP16}}(s)|$ hit \textbf{$0.97510$}---nearly a complete $[-1,+1]$ win-to-loss inversion. Weight-only \texttt{W8A16\_ASYM} compression ($6.71$\,MB) degraded agreement to $97.28\%$ while running \emph{slower} than FP16 ($2{,}479.0$ vs.\ $2{,}592.2$ added visits/s) due to runtime dequantization overhead. Even a 20\,M-position uniform 10-block QAT fine-tune reached only $92.52\%$ Top-1 agreement and lost \textbf{$-6.0\%$} in 50-game Stockfish~19 \texttt{UCI\_Elo 3000} matches ($43.0\%$ vs.\ $49.0\%$) despite an $+18.94\%$ NPS boost ($4{,}105$ vs.\ $3{,}452$\,NPS).
+\subsection{Failure Modes of Uniform W8A8 Quantization}
+INT8 execution on Intel NPU~3720 provides a direct path to lowering batch latency. However, uniform post-training quantization (\texttt{nncf.quantize} with fast bias correction~\cite{nagel2020adaround,openvino2024}) across all 10 residual blocks of our 346\,M-position baseline (\texttt{10x192-Scalar-FP16}) degraded accuracy substantially: across $5{,}000$ held-out positions, Top-1 policy agreement with FP16 fell to $90.96\%$, mean legal-masked policy KL divergence reached $0.021977$, and maximum value error $\max_s |V_{\mathrm{INT8}}(s) - V_{\mathrm{FP16}}(s)|$ reached $0.97510$. Weight-only \texttt{W8A16\_ASYM} compression ($6.71$\,MB) lowered Top-1 agreement to $97.28\%$ while running slower than FP16 ($2{,}479.0$ vs.\ $2{,}592.2$ added visits/s) due to runtime dequantization overhead. A 20\,M-position uniform 10-block QAT run reached only $92.52\%$ Top-1 agreement and scored $43.0\%$ vs.\ $49.0\%$ ($-6.0$ percentage points over 50 Stockfish~19 \texttt{UCI\_Elo 3000} games) despite $+18.94\%$ higher NPS ($4{,}105$ vs.\ $3{,}452$\,NPS).
 
 \subsection{Layerwise Sensitivity Scan (\texttt{block\_0}--\texttt{block\_9})}
-To diagnose why uniform W8A8 fails in neural MCTS, we performed an isolated single-block quantization scan across all 10 residual blocks of \texttt{Full 346M 10x192} using NNCF \texttt{IgnoredScope} masks calibrated on 500 real positions and measured against FP16 over $5{,}000$ \texttt{Far-Test} positions. For each block $k \in \{0,\dots,9\}$, we recorded Top-1 policy agreement, mean legal-masked policy KL divergence $D_{\mathrm{KL}}(P_{\mathrm{FP16}} \| P_k)$, and maximum absolute value deviation $|\Delta V|_{\max}$.
-
-As shown in Figure~\ref{fig:block_sensitivity}(a), sensitivity concentrates sharply at the two network boundaries:
+To localize quantization error, we quantized each residual block $k \in \{0,\dots,9\}$ individually via NNCF \texttt{IgnoredScope} masks (500 calibration boards) and evaluated against FP16 on $5{,}000$ held-out positions. Figure~\ref{fig:block_sensitivity}(a) indicates two localized boundary sensitivities:
 \begin{itemize}
-  \item \textbf{Final Block Policy Cliff (\texttt{block\_9}):} Quantizing \texttt{block\_9} alone causes policy KL divergence to explode to \textbf{$0.013042$}---more than \textbf{$9\times$ higher} than any other block ($0.000462$--$0.001436$ across \texttt{block\_0}--\texttt{block\_8})---dropping Top-1 agreement from ${\sim}98.0\%$ down to $94.20\%$. Because \texttt{block\_9} feeds directly into the unbounded $4{,}672$-logit \texttt{Conv73} head, minor INT8 activation clipping flips logit rankings among closely contested tactical moves.
-  \item \textbf{Early Block Value Cliff (\texttt{block\_1}):} Quantizing \texttt{block\_1} alone triggers a massive \textbf{$0.92645$} maximum value deviation (compared to $0.125$ at \texttt{block\_0} and $0.278$--$0.574$ across \texttt{block\_2}--\texttt{block\_9}). Early convolutions mix sparse binary $\{0,1\}$ piece bitboards with the continuous half-move clock; quantization noise injected here amplifies across nine downstream residual blocks into catastrophic value outliers.
+  \item \textbf{Final Block Policy Sensitivity (\texttt{block\_9}):} Quantizing \texttt{block\_9} alone increases mean policy KL divergence to $0.013042$---more than $9\times$ higher than blocks $0\text{--}8$ ($0.000462$--$0.001436$)---reducing Top-1 agreement from ${\sim}98.0\%$ to $94.20\%$. Because \texttt{block\_9} directly feeds the unbounded $4{,}672$-logit \texttt{Conv73} projection, activation clipping alters rankings among close candidate moves.
+  \item \textbf{Early Block Value Sensitivity (\texttt{block\_1}):} Quantizing \texttt{block\_1} alone yields a $0.92645$ maximum value deviation (vs.\ $0.125$ at \texttt{block\_0} and $0.278$--$0.574$ across \texttt{block\_2}--\texttt{block\_9}). Early layers combine sparse binary $\{0,1\}$ piece planes with the continuous half-move plane, and quantization noise here propagates through nine downstream blocks into value outliers.
 \end{itemize}
 
-Ablating residual skip additions (\texttt{.*\_out\_.*}) further showed that keeping all four boundary blocks (\texttt{0, 1, 8, 9}), all SE gates, \emph{and} residual skip additions in FP16---quantizing only the $3\times 3$ convolutions inside middle blocks \texttt{2..7} (\texttt{Hybrid\_Middle\_2\_to\_7\_ConvOnly})---improved Top-1 agreement from $94.54\%$ to $95.52\%$, cut policy KL from $0.007087$ to $0.004891$, lowered $|\Delta V|_{\max}$ from $0.62988$ to $0.56921$, and increased raw NPU throughput from $2{,}681.3$ to $2{,}849.6$\,pos/s ($2{,}956.6$\,pos/s in co-resident benchmarks). Strikingly, against Stockfish ground-truth labels on $5{,}000$ \texttt{Far-Test} positions, \texttt{Hybrid\_Mid2..7} PTQ matched Pure FP16 ($50.54\%$ vs.\ $50.46\%$ Top-1; $0.06085$ vs.\ $0.06117$ value MSE). Yet in 50-game Stockfish~19 \texttt{UCI\_Elo 3000} matches, un-retrained \texttt{Hybrid\_Mid2..7} PTQ collapsed to \textbf{$33.0\%$} (and $25.0\%$ on slice \texttt{[75:85]}) versus $45.0\%$ for Pure FP16, exposing a critical disconnect between static offline metrics and closed-loop MCTS stability.
+Keeping boundary blocks (\texttt{0, 1, 8, 9}), all SE gates, and residual skip additions in FP16 while quantizing only the $3\times 3$ convolutions in middle blocks \texttt{2..7} (\texttt{Mid-2..7 PTQ}) raised Top-1 agreement from $94.54\%$ (with skip additions quantized) to $95.52\%$, lowered policy KL from $0.007087$ to $0.004891$, reduced $|\Delta V|_{\max}$ from $0.62988$ to $0.56921$, and increased raw $B=16$ throughput from $2{,}681.3$ to $2{,}849.6$\,pos/s ($2{,}956.6$\,pos/s co-resident). Against Stockfish ground-truth labels on $5{,}000$ held-out positions, \texttt{Mid-2..7 PTQ} matched Pure FP16 ($50.54\%$ vs.\ $50.46\%$ Top-1; $0.06085$ vs.\ $0.06117$ value MSE). In closed-loop Stockfish~19 \texttt{UCI\_Elo 3000} matches, however, un-retrained PTQ degraded playing strength, scoring $33.0\%$ over 50 games without Syzygy and dropping from $40.0\%$ ($5\text{W}\text{--}6\text{D}\text{--}9\text{L}$, 95\% CI $[21.88\%, 61.34\%]$) to $25.0\%$ ($2\text{W}\text{--}6\text{D}\text{--}12\text{L}$, 95\% CI $[11.19\%, 46.87\%]$) on a 20-game paired diagnostic subset with Syzygy enabled.
 
-\subsection{Joint Middle-Block W8A8 QAT and the $2\times2$ Causal Proof}
-To eliminate closed-loop PTQ drift while preserving INT8 NPU speed, we implemented zero-sync CUDA-native fake-quantization wrappers (\texttt{W8A8FakeQuantConv2d}) exclusively on the $3\times 3$ convolutions of middle blocks \texttt{2..7} (or \texttt{2..9} for \texttt{12x192}) after analytically folding trunk BatchNorms. Because every quantized $3\times 3$ convolution in blocks \texttt{2..7} immediately follows a $\mathrm{ReLU}$ nonlinearity ($X \ge 0$), input activations are quantized to unsigned $\mathrm{UINT8} \in [0, 255]$ via per-tensor exponential moving average (EMA, $\gamma=0.05$, $s_a = a_{\max}^{\mathrm{EMA}}/255$), while convolution weights use per-output-channel symmetric signed $\mathrm{INT8} \in [-127, 127]$ ($s_w^{(c)} = \max_{i,j,k}|W_{c,i,j,k}| / 127$) with the Straight-Through Estimator (STE)~\cite{bengio2013ste,nagel2021whitepaper}:
+\subsection{Joint Middle-Block W8A8 QAT and Single-Variable Control}
+To adapt trunk weights to middle-block quantization noise, we apply CUDA-native fake-quantization wrappers exclusively to the $3\times 3$ convolutions of middle blocks \texttt{2..7} (or \texttt{2..9} in \texttt{12x192}) after analytically folding trunk BatchNorms. Because every quantized $3\times 3$ convolution immediately follows a $\mathrm{ReLU}$ nonlinearity ($X \ge 0$), input activations use unsigned $\mathrm{UINT8} \in [0, 255]$ quantization with per-tensor exponential moving average scaling ($\gamma=0.05$, $s_a = a_{\max}^{\mathrm{EMA}}/255$), while weights use per-output-channel symmetric signed $\mathrm{INT8} \in [-127, 127]$ scaling ($s_w^{(c)} = \max_{i,j,k}|W_{c,i,j,k}| / 127$) under the Straight-Through Estimator (STE)~\cite{bengio2013ste,nagel2021whitepaper}:
 \begin{align}
   \widehat{W}_c &= s_w^{(c)}\,\mathrm{clip}\!\left(\left\lfloor \frac{W_c}{s_w^{(c)}} \right\rceil,\,-127,\,127\right), \label{eq:wq}\\
   \widehat{X} &= s_a\,\mathrm{clip}\!\left(\left\lfloor \frac{X}{s_a} \right\rceil,\,0,\,255\right), \label{eq:aq}
 \end{align}
-with backward pass $\partial \widehat{W}/\partial W = I$ and $\partial \widehat{X}/\partial X = I$, while outer blocks (\texttt{0, 1, N-2, N-1}), SE blocks, residual additions, and policy/value/MLH heads remain strictly in FP16/BF16.
+with backward pass $\partial \widehat{W}/\partial W = I$ and $\partial \widehat{X}/\partial X = I$. Outer blocks (\texttt{0, 1, N-2, N-1}), SE gates, residual additions, and heads remain in FP16/BF16. We train this joint configuration (\texttt{10x192-MidQAT}) for 40\,M positions on a 70\% Lc0 T80 / 30\% Stockfish mixture with the distributional value head of Section~\ref{sec:hlgauss_gear} (cloud pipeline in Appendix~\ref{app:finops}).
 
 \begin{table}[t]
   \centering
-  \caption{\textbf{$2\times2$ Causal Factorial vs.\ Stockfish~19 \texttt{UCI\_Elo 3000}} (50g/arm, \texttt{openings\_320[75:100]}, 400\,ms/move, Ponder + Syzygy). Joint Mid-Block W8A8 QAT reverses the PTQ drop into score, NPS, and endgame gains.}
-  \label{tab:factorial}
+  \caption{\textbf{Stockfish~19 \texttt{UCI\_Elo 3000} Precision and Trunk Ablation} (50g/arm on unseen Slice~A, 400\,ms/move, Ponder ON, Syzygy ON except where noted). Wide 95\% Wilson CIs (${\pm}13\%$) motivate direct paired head-to-head controls.}
+  \label{tab:sf3000_ablation}
   \resizebox{\columnwidth}{!}{%
-  \begin{tabular}{@{}llcccc@{}}
+  \begin{tabular}{@{}llccccc@{}}
     \toprule
-    \textbf{Trunk Regime} & \textbf{Precision} & \textbf{Score} & \textbf{W--D--L} & \textbf{NPS} & \textbf{EG L} \\
+    \textbf{Model Configuration} & \textbf{Precision} & \textbf{Score (\%)} & \textbf{95\% Wilson CI} & \textbf{W--D--L} & \textbf{NPS} & \textbf{EG L} \\
     \midrule
-    \texttt{346M} Ref (Scalar) & Pure FP16 & 45.0\% & 16--13--21 & 3,292.9 & 7 \\
+    \texttt{10x192-Scalar} (Ref) & Pure FP16 & 45.0 & $[32.06, 58.65]$ & 16--13--21 & 3,292.9 & 7 \\
+    \texttt{10x192-Frozen} (HL64) & Pure FP16 & 33.0 & $[21.59, 46.83]$ & 7--19--24 & 3,245.2 & 13 \\
+    \texttt{10x192-Scalar} (PTQ)$^\dagger$ & Mid-2..7 INT8 & 33.0 & $[21.59, 46.83]$ & 6--21--23 & 3,980.0 & 11 \\
     \midrule
-    Frozen (\texttt{A1} HL64) & Pure FP16 & 33.0\% & 7--19--24 & 3,245.2 & 13 \\
-    Frozen (PTQ, no QAT) & Mid-2..7 INT8 & 33.0\%$^\dagger$ & 6--21--23 & 3,980.0 & 11 \\
-    \midrule
-    Joint (\texttt{A2} HL64) & Pure FP16 & 39.0\% & 9--21--20 & 3,335.3 & 7 \\
-    \textbf{Joint (\texttt{A2} HL64)} & \textbf{Mid-2..7 QAT} & \textbf{41.0\%} & \textbf{10--21--19} & \textbf{3,873.9} & \textbf{5} \\
+    \texttt{10x192-MidQAT} (HL64) & Pure FP16 & 39.0 & $[26.73, 52.84]$ & 9--21--20 & 3,335.3 & 7 \\
+    \textbf{\texttt{10x192-MidQAT} (HL64)} & \textbf{Mid-2..7 INT8} & \textbf{41.0} & $[28.49, 54.80]$ & \textbf{10--21--19} & \textbf{3,873.9} & \textbf{5} \\
     \bottomrule
-    \multicolumn{6}{@{}l@{}}{\scriptsize $^\dagger$Collapsed further to $25.0\%$ ($2\text{W}\text{--}6\text{D}\text{--}12\text{L}$) on diagnostic slice \texttt{[75:85]}.}
   \end{tabular}}
+  \vspace{2pt}
+  \par\raggedright{\scriptsize $^\dagger$50g run used the scalar baseline without Syzygy; on a 20g paired Syzygy subset of Slice~A, Mid-2..7 PTQ scored $25.0\%$ ($[11.19, 46.87]$) vs.\ $40.0\%$ ($[21.88, 61.34]$) for Pure FP16.}
 \end{table}
 
-Table~\ref{tab:factorial} and Figure~\ref{fig:qat_sprt}(a) present the controlled $2\times2$ factorial crossing $\{\text{Frozen Trunk vs.\ Joint Trunk}\} \times \{\text{Pure FP16 vs.\ Mid-2..7 INT8}\}$ over 50 paired Stockfish~19 \texttt{UCI\_Elo 3000} games. Under a frozen trunk, Mid-2..7 PTQ degrades playing strength by $-12.0\%$ ($45.0\% \to 33.0\%$, and $-20.0\%$ on slice \texttt{[75:85]}) despite reaching $3{,}980.0$\,NPS. Training the trunk jointly with Middle-Block W8A8 QAT (\texttt{A2}, 40\,M blended positions; training infrastructure in Appendix~\ref{app:finops}) completely reverses the sign of quantization: moving from \texttt{A2 FP16} to \texttt{A2 Mid-2..7 QAT INT8} raises match score by \textbf{$+2.0\%$ ($39.0\% \to 41.0\%$)}, increases search throughput by \textbf{$+16.2\%$ ($3{,}335.3 \to 3{,}873.9$\,NPS)}, and cuts late endgame losses from $7$ to $5$. Most decisively, in direct head-to-head NPU matches against the \texttt{346M 10x192} Pure FP16 baseline (Section~\ref{sec:eval}), \texttt{A2 Mid-2..7 QAT INT8} wins by \textbf{$+56.5$\,Elo} ($58.06\%$ over 180 games).
+Table~\ref{tab:sf3000_ablation} and Figure~\ref{fig:qat_sprt}(a) summarize 50-game reference matches against Stockfish~19 \texttt{UCI\_Elo 3000}. Exporting the jointly trained \texttt{10x192-MidQAT} checkpoint as Middle-Block INT8 rather than Pure FP16 increases pondered throughput by $+16.2\%$ ($3{,}335.3 \to 3{,}873.9$\,NPS) with a $41.0\%$ vs.\ $39.0\%$ score and fewer late endgame losses ($5$ vs.\ $7$). Because 50-game Stockfish matches carry ${\pm}13$ percentage-point Wilson intervals, and because our 180-game championship match against \texttt{10x192-Scalar-FP16} ($+56.5$\,Elo, Section~\ref{sec:eval}) simultaneously changed training data, value head, and quantization, we ran a dedicated \textbf{100-game (50-pair) single-variable head-to-head NPU control} comparing identical \texttt{10x192-MidQAT} weights exported as Middle-\texttt{2..7} INT8 vs.\ Pure FP16 (400\,ms/move, static $B=16$, Syzygy ON, unseen Slices~A--B). In this controlled 100-game match (Table~\ref{tab:sprt180}), Middle-\texttt{2..7} INT8 achieved $3{,}821.2$ vs.\ $3{,}225.0$\,NPS ($+18.5\%$ real search speedup) and scored $54.00\%$ ($43\text{W}\text{--}22\text{D}\text{--}35\text{L}$, $+27.9$\,Elo; game-level 95\% Wilson CI $[44.26\%, 63.44\%]$, paired pentanomial $[1, 4, 34, 8, 3]$ with 95\% CI $[48.88\%, 59.12\%]$ or $[-7.8, +64.1]$\,Elo, $\mathrm{LLR} = +0.9872$). While 100 games cannot reject $H_0: \Delta\mathrm{Elo}=0$ at $\alpha=0.05$, the control confirms that Middle-\texttt{2..7} W8A8 QAT harvests $+18.5\%$ throughput on identical weights with no measurable quantization accuracy regression, leaving the remaining share of the 180-game $+56.5$\,Elo improvement attributable to the blended training data, \texttt{HL-Gauss-64}/\texttt{MLH} heads, and weight souping.
 
-\subsection{Zero-Retraining Weight Souping (\texttt{A2\_soup75})}
-Offline zero-search diagnostics revealed a subtle trade-off after 40\,M joint fine-tuning on the blended Lc0/Stockfish stream: while \texttt{A2} slashed \texttt{far\_test} policy CE from $1.5659$ to $1.4589$ and dramatically improved endgame value calibration, its raw zero-search ($0\text{n}$) tactical puzzle accuracy dipped from $71.5\%$ (\texttt{346M}) to $68.17\%$ because soft Lc0 T80 targets slightly smoothed sharp tactical policy peaks. Following Model Soups~\cite{wortsman2022modelsoups}, we formed a linear weight-space interpolation across all shared stem, residual-block, and \texttt{Conv73} tensors between \texttt{A2} and its \texttt{346M} parent while keeping \texttt{A2}'s \texttt{HL-Gauss-64} and \texttt{MLH} heads intact:
+\subsection{Zero-Retraining Weight Souping (\texttt{10x192-MidQAT-Soup})}
+Fine-tuning \texttt{10x192-MidQAT} on soft Lc0 T80 targets reduced held-out policy CE from $1.5659$ to $1.4589$ and improved endgame value MSE, but reduced zero-search ($0\text{n}$) puzzle Top-1 accuracy from $71.5\%$ to $68.17\%$. Following Model Soups~\cite{wortsman2022modelsoups}, we linearly interpolated shared stem, residual-block, and \texttt{Conv73} weights between \texttt{10x192-MidQAT} and its pretrained \texttt{10x192-Scalar} parent while retaining the \texttt{HL-Gauss-64} and \texttt{MLH} heads:
 \begin{equation}
-  \theta_{\mathrm{soup}}(\alpha) = \alpha\,\theta_{\mathrm{A2}} + (1 - \alpha)\,\theta_{\mathrm{346M}}, \qquad \alpha = 0.75,
+  \theta_{\mathrm{soup}}(\alpha) = \alpha\,\theta_{\mathrm{MidQAT}} + (1 - \alpha)\,\theta_{\mathrm{Scalar}}, \qquad \alpha = 0.75,
   \label{eq:soup}
 \end{equation}
-followed by clean \texttt{gpu\_unpack} NNCF recalibration (\texttt{A2\_recalib}) on 2,000 real positions. Table~\ref{tab:synthesis} compares all five zero-retraining local synthesis candidates on Intel NPU~3720.
+followed by NNCF recalibration on 2,000 positions. Table~\ref{tab:synthesis} compares five zero-retraining local candidates on Intel NPU~3720. \texttt{10x192-MidQAT-Soup} achieved the highest $0\text{n}$ ($68.72\%$) and $200\text{n}$ ($83.07\%$) puzzle solve rates at $2{,}989.8$\,pos/s raw $B=16$ throughput ($5.352$\,ms), and scored $54.00\%$ ($16\text{W}\text{--}22\text{D}\text{--}12\text{L}$, 95\% Wilson CI $[40.40\%, 67.03\%]$, pentanomial $[0,6,11,6,2]$, zero double-losses) against un-souped \texttt{10x192-MidQAT} in 50 paired NPU games.
 
 \begin{table}[t]
   \centering
-  \caption{\textbf{Zero-Retraining Local Synthesis on Intel NPU 3720} ($5{,}000$ \texttt{test\_far} positions and $1{,}979$ clean Lichess puzzles). \texttt{A2\_soup75} recovers policy sharpness while preserving QAT calibration and ${\sim}3{,}000$\,pos/s speed.}
+  \caption{\textbf{Zero-Retraining Local Synthesis on Intel NPU 3720} ($5{,}000$ held-out positions and $1{,}979$ clean Lichess puzzles). Weight souping ($\alpha=0.75$) improves puzzle accuracy while retaining ${\sim}3{,}000$\,pos/s raw throughput.}
   \label{tab:synthesis}
   \resizebox{\columnwidth}{!}{%
   \begin{tabular}{@{}lcccc@{}}
     \toprule
-    \textbf{Candidate} & \textbf{Far5k CE / MSE} & \textbf{0n Pz} & \textbf{200n Pz} & \textbf{Raw $B{=}16$} \\
+    \textbf{Candidate} & \textbf{Held-Out CE / MSE} & \textbf{0n Pz} & \textbf{200n Pz} & \textbf{Raw $B{=}16$} \\
     \midrule
-    \texttt{A2\_base} (S3) & 1.4879 / 0.05697 & 68.17\% & 82.67\% & 2,890.2 \\
-    \texttt{A2\_recalib} & \textbf{1.4874} / \textbf{0.05691} & 68.62\% & 82.77\% & \textbf{3,000.8} \\
-    \texttt{A2\_detrunc} ($\times 1.038$) & 1.4874 / 0.05766 & 68.62\% & 82.67\% & 3,000.4 \\
-    \textbf{\texttt{A2\_soup75} ($\alpha{=}0.75$)} & 1.4911 / 0.05725 & \textbf{68.72\%} & \textbf{83.07\%} & 2,989.8 \\
-    \texttt{A2\_pol\_graft} & 1.4900 / 0.05691 & 68.17\% & 83.02\% & 2,980.2 \\
+    \texttt{10x192-MidQAT} (Base) & 1.4879 / 0.05697 & 68.17\% & 82.67\% & 2,890.2 \\
+    \texttt{MidQAT-Recalib} & \textbf{1.4874} / \textbf{0.05691} & 68.62\% & 82.77\% & \textbf{3,000.8} \\
+    \texttt{MidQAT-Rescaled} ($\times 1.038$) & 1.4874 / 0.05766 & 68.62\% & 82.67\% & 3,000.4 \\
+    \textbf{\texttt{10x192-MidQAT-Soup} ($\alpha{=}0.75$)} & 1.4911 / 0.05725 & \textbf{68.72\%} & \textbf{83.07\%} & 2,989.8 \\
+    \texttt{MidQAT-PolicyGraft} & 1.4900 / 0.05691 & 68.17\% & 83.02\% & 2,980.2 \\
     \bottomrule
   \end{tabular}}
 \end{table}
-
-\texttt{A2\_soup75} achieved the highest clean puzzle solve rate at both $0\text{n}$ ($68.72\%$, $1{,}360/1{,}979$) and $200\text{n}$ ($83.07\%$, $1{,}644/1{,}979$), retained $2{,}989.8$\,pos/s raw $B=16$ throughput ($5.352$\,ms), and defeated \texttt{A2\_base} head-to-head by \textbf{$54.00\%$} ($16\text{W}\text{--}22\text{D}\text{--}12\text{L}$, pentanomial $[0,6,11,6,2]$, \emph{zero} double-losses across 25 opening pairs), earning promotion as the \texttt{v1.1.0} flagship.
 
 \begin{figure*}[t]
   \centering
   \includegraphics[width=\textwidth]{figures/fig2_npu_pareto_frontier.pdf}
-  \caption{\textbf{Intel NPU 3720 Scaling Curves and the CMX SRAM Pareto Cliff.} (a) Median turnaround latency across $B\in\{1,4,8,16\}$ from \texttt{10x128} ($3.20$\,M) to \texttt{12x224} ($11.48$\,M); crossing ${\sim}7.85$\,M parameters triggers a steep latency jump as weights and activations spill beyond the ${\sim}4$\,MB on-chip CMX SRAM. (b) Real-time in-engine NPS ($400$\,ms/move) vs.\ parameter count overlaid with paired head-to-head Elo outcomes. Although \texttt{12x192 FP16} defeats \texttt{10x192 FP16} by $+48.9$\,Elo, it loses by $-77.7$\,Elo to \texttt{10x192 QAT INT8} ($3{,}988$\,NPS), and even \texttt{12x192 QAT INT8} ($3{,}324$\,NPS) trails by $-13.9$\,Elo, placing \texttt{10x192 QAT INT8} at the hardware Pareto optimum.}
+  \caption{\textbf{Intel NPU 3720 Linear Compute--Latency Scaling and Real-Time Depth--Speed Tradeoff.} (a) Median turnaround latency across $B\in\{1,4,8,16\}$ vs.\ forward-pass compute (GFLOPs/position). Scaling from \texttt{10x192-MidQAT} ($0.86$\,GFLOPs, $5.41$\,ms) to \texttt{12x192-MidQAT} ($1.03$\,GFLOPs, $6.54$\,ms) follows linear depth scaling ($5.412 \times 1.2 = 6.494$\,ms, within $0.7\%$). (b) Unpondered H2H NPS ($400$\,ms/move) vs.\ compute overlaid with paired Elo results: \texttt{12x192} FP16 leads \texttt{10x192} FP16 ($+48.9$\,Elo) but trails \texttt{10x192-MidQAT} INT8 ($-77.7$\,Elo), and \texttt{12x192-MidQAT} INT8 still trails slightly ($-13.9$\,Elo) due to fewer sequential PUCT waves per move. $^\ast$Combined \texttt{v1.1} upgrade.}
   \label{fig:npu_pareto}
 \end{figure*}
 
 % =========================================================================
-\section{Compute-Optimal Scaling and the On-Chip CMX SRAM Pareto Cliff}
+\section{Depth--Latency Scaling and the Real-Time Elo Inversion}
 \label{sec:scaling}
 % =========================================================================
 
 \subsection{Function-Preserving Depth Expansion (\texttt{10x192}\,$\to$\,\texttt{12x192})}
-Having shown that Middle-Block W8A8 QAT unlocks $+19.6\%$ search throughput on \texttt{10x192}, a natural question arises: should that INT8 latency headroom be spent on deeper search or reinvested into a larger neural backbone? To map the exact capacity--throughput frontier on Intel NPU~3720, we swept four larger candidate architectures (\texttt{12x192}, \texttt{10x224}, \texttt{14x192}, \texttt{12x224}) compiled with middle-block W8A8 quantization and \texttt{HL-Gauss-64} (Table~\ref{tab:scaling}, Figure~\ref{fig:npu_pareto}). All four missed our $3{,}250$\,NPS cold-start gate, with \texttt{12x192\_mid2\_9\_hl64} ($8.52$\,M backbone params, $8.55$\,M with MLH, $B=16$ latency $6.540$\,ms) coming closest.
+To test whether INT8 latency headroom is better invested in search depth or a deeper neural trunk, we benchmarked four larger mixed-precision candidates (\texttt{12x192}, \texttt{10x224}, \texttt{14x192}, \texttt{12x224}) on Intel NPU~3720 (Table~\ref{tab:scaling}, Figure~\ref{fig:npu_pareto}). Among candidates exceeding \texttt{10x192}, \texttt{12x192-MidQAT} ($8.52$\,M backbone params, $1.027$\,GFLOPs/position, $B=16$ latency $6.540$\,ms) retained the highest throughput.
 
-Rather than training \texttt{12x192} from scratch, we initialized \texttt{Job~B} via function-preserving \texttt{Net2DeeperNet}~\cite{chen2016net2net} residual block injection from the converged \texttt{346M 10x192} checkpoint: stem, \texttt{Conv73} policy, and blocks $0\text{--}9$ were copied into indices $\{0,1,2,3,4,6,7,8,9,10\}$, while inserted blocks at indices $5$ and $11$ initialized \texttt{conv1} via Kaiming normal and set \texttt{conv2} weights/biases to zero with identity \texttt{bn2}, guaranteeing $f(x) = x + \mathrm{SE}(0) = x$. Verification prior to Step~0 confirmed exact \textbf{$0.000\text{e}{+}00$} maximum policy logit drift across all evaluation splits.
-
-\subsection{The ${\sim}4$\,MB CMX SRAM Wall and Real-Time Elo Inversion}
-After $280$\,M BF16 positions plus $20$\,M Stage-3 Middle-Block (\texttt{2..9}) W8A8 QAT, \texttt{12x192} achieved our strongest offline accuracy across every held-out split: $1.4428$ (\texttt{ema\_09995}) and $1.4474$ (\texttt{qat\_mid2\_9}) \texttt{far\_test} policy CE, and best-in-class OOD endgame value MSE ($0.05684$, $98.84\%$ decisive sign accuracy).
+Rather than training \texttt{12x192} from scratch, we applied function-preserving \texttt{Net2DeeperNet}~\cite{chen2016net2net} residual block injection from the converged \texttt{10x192-Scalar} checkpoint: blocks $0\text{--}9$ mapped into indices $\{0,1,2,3,4,6,7,8,9,10\}$, while inserted blocks at indices $5$ and $11$ initialized \texttt{conv1} via Kaiming normal and set \texttt{conv2} weights/biases to zero with identity \texttt{bn2}, ensuring $f(x) = x + \mathrm{SE}(0) = x$. Step-0 verification confirmed $0.000\text{e}{+}00$ maximum policy logit drift across all evaluation splits. After training on $280$\,M BF16 positions plus $20$\,M Middle-Block (\texttt{2..9}) W8A8 QAT positions, \texttt{12x192-MidQAT} achieved our lowest offline error across every held-out split ($1.4428$ FP16 / $1.4474$ QAT policy CE; $0.05684$ endgame value MSE; $98.84\%$ endgame decisive sign accuracy).
 
 \begin{table}[t]
   \centering
-  \caption{\textbf{Intel NPU 3720 Architecture Scaling Sweep.} Latencies are median turnaround (ms) under \texttt{LATENCY} + \texttt{NPU\_TURBO}. Beyond ${\sim}8$\,M parameters, CMX SRAM spillover compresses search NPS below the \texttt{10x192 QAT INT8} Pareto knee.}
+  \caption{\textbf{Intel NPU 3720 Architecture Scaling Sweep.} Latencies are median turnaround (ms) under \texttt{LATENCY} + \texttt{NPU\_TURBO}. Per-batch latency scales nearly linearly with depth and compute.}
   \label{tab:scaling}
   \resizebox{\columnwidth}{!}{%
-  \begin{tabular}{@{}lcccccc@{}}
+  \begin{tabular}{@{}lccccccc@{}}
     \toprule
-    \textbf{Architecture} & \textbf{Params} & \textbf{$B{=}1$} & \textbf{$B{=}4$} & \textbf{$B{=}8$} & \textbf{$B{=}16$} & \textbf{Eng.\ NPS} \\
+    \textbf{Architecture} & \textbf{Params} & \textbf{GFLOPs} & \textbf{$B{=}1$} & \textbf{$B{=}4$} & \textbf{$B{=}8$} & \textbf{$B{=}16$} & \textbf{Eng.\ NPS} \\
     \midrule
-    \texttt{10x128} FP16 & 3.20\,M & 0.611 & 1.434 & 2.434 & 4.523 & 4,810.4 \\
-    \texttt{10x192} FP16$^\ddagger$ & 7.01\,M & 0.739 & 1.894 & 3.360 & 6.262 & 3,253.9 \\
-    \textbf{\texttt{10x192} QAT INT8$^\ddagger$} & \textbf{7.19\,M} & \textbf{0.708} & \textbf{1.603} & \textbf{2.859} & \textbf{5.412} & \textbf{3,987.9} \\
-    \texttt{12x192} QAT INT8 & 8.52\,M & 0.886 & 1.910 & 3.415 & 6.540 & 3,324.0$^\star$ \\
-    \texttt{10x224} INT8 & 9.62\,M & 0.925 & 1.966 & 3.526 & 6.609 & 2,670.5$^\dagger$ \\
-    \texttt{14x192} INT8 & 9.88\,M & 0.948 & 2.114 & 3.872 & 7.189 & 2,533.0$^\dagger$ \\
-    \texttt{12x224} INT8 & 11.48\,M & 1.010 & 2.308 & 4.164 & 7.813 & 2,362.3$^\dagger$ \\
+    \texttt{10x128} FP16 & 3.20\,M & 0.382 & 0.611 & 1.434 & 2.434 & 4.523 & 4,810.4 \\
+    \texttt{10x192} FP16$^\ddagger$ & 7.01\,M & 0.856 & 0.739 & 1.894 & 3.360 & 6.262 & 3,253.9 \\
+    \textbf{\texttt{10x192-MidQAT}$^\ddagger$} & \textbf{7.19\,M} & \textbf{0.857} & \textbf{0.708} & \textbf{1.603} & \textbf{2.859} & \textbf{5.412} & \textbf{3,890.7$^\diamond$} \\
+    \texttt{12x192-MidQAT} & 8.52\,M & 1.027 & 0.886 & 1.910 & 3.415 & 6.540 & 3,324.0$^\star$ \\
+    \texttt{10x224} INT8 & 9.62\,M & 1.165 & 0.925 & 1.966 & 3.526 & 6.609 & 2,670.5$^\dagger$ \\
+    \texttt{14x192} INT8 & 9.88\,M & 1.197 & 0.948 & 2.114 & 3.872 & 7.189 & 2,533.0$^\dagger$ \\
+    \texttt{12x224} INT8 & 11.48\,M & 1.396 & 1.010 & 2.308 & 4.164 & 7.813 & 2,362.3$^\dagger$ \\
     \bottomrule
   \end{tabular}}
   \vspace{2pt}
-  \par\raggedright{\scriptsize $^\star$H2H $B{=}16$ NPS ($2{,}798.7$ cold gear-shift). $^\dagger$Cold-start gear-shift sweep NPS. $^\ddagger$\texttt{10x192} FP16 ($7.01$\,M) uses the \texttt{v1.0.2} scalar value head ($1024\!\to\!128\!\to\!1$); \texttt{10x192} QAT INT8 ($7.19$\,M with MLH / $7.15$\,M value-only) adds \texttt{HL-Gauss-64} ($1024\!\to\!256\!\to\!64$) and \texttt{MLH} ($512\!\to\!64\!\to\!1$) ($+0.18$\,M params).}
+  \par\raggedright{\scriptsize $^\diamond$Unpondered H2H NPS ($3{,}987.9$ pondered ladder NPS). $^\star$Unpondered H2H $B{=}16$ NPS ($2{,}798.7$ cold gear-shift). $^\dagger$Cold-start gear-shift sweep NPS. $^\ddagger$\texttt{10x192} FP16 ($7.01$\,M) uses the scalar value head ($1024\!\to\!128\!\to\!1$); \texttt{10x192-MidQAT} ($7.19$\,M with MLH / $7.15$\,M value-only) adds \texttt{HL-Gauss-64} ($1024\!\to\!256\!\to\!64$) and \texttt{MLH} ($512\!\to\!64\!\to\!1$) ($+0.18$\,M params).}
 \end{table}
 
-Yet paired $400$\,ms/move head-to-head NPU matches exposed a stark hardware-induced Elo inversion (Figure~\ref{fig:npu_pareto}(b)):
+\subsection{Linear Depth--Latency Scaling and Sequential Wave Budgets}
+As shown in Figure~\ref{fig:npu_pareto}(a) and Table~\ref{tab:scaling}, NPU~3720 batch latency scales closely with residual depth and forward-pass FLOPs rather than exhibiting an abrupt memory discontinuity: \texttt{12x192-MidQAT} has $1.2\times$ the residual blocks ($1.20\times$ FLOPs) of \texttt{10x192-MidQAT}, and its measured $B=16$ latency ($6.540$\,ms) lies within $0.7\%$ of linear depth scaling ($5.412\,\text{ms} \times 1.2 = 6.494$\,ms; $6.37$ vs.\ $6.32$\,ms/GFLOP). Similarly, \texttt{14x192} ($1.197$\,GFLOPs, $7.189$\,ms) achieves $6.01$\,ms/GFLOP, and wider 224-channel backbones sustain $5.60$--$5.67$\,ms/GFLOP.
+
+Nevertheless, paired $400$\,ms/move head-to-head matches reveal a clear real-time Elo inversion (Figure~\ref{fig:npu_pareto}(b), Table~\ref{tab:sprt180}):
 \begin{itemize}
-  \item \textbf{FP16 vs.\ FP16:} \texttt{12x192 ema\_09995 FP16} defeated \texttt{346M 10x192 FP16} by \textbf{$+48.9$\,Elo ($57.0\%$, $22\text{W}\text{--}13\text{D}\text{--}15\text{L}$)} despite running $16.9\%$ slower ($2{,}698.4$ vs.\ $3{,}246.0$\,NPS)---proving that deeper representation quality overcomes a modest FP16 speed penalty.
-  \item \textbf{Inversion Against \texttt{10x192 QAT INT8}:} Facing \texttt{A2 10x192 QAT INT8} ($3{,}803.4$\,NPS), \texttt{12x192 FP16} fell to \textbf{$39.0\%$ ($-77.7$\,Elo, $11\text{W}\text{--}17\text{D}\text{--}22\text{L}$)}. Even after applying Middle-Block (\texttt{2..9}) W8A8 QAT to \texttt{12x192}---lifting its NPS by $+24.3\%$ to $3{,}324.0$\,NPS and recovering $+64$\,Elo---the deeper model still trailed \texttt{A2 10x192 QAT INT8} at \textbf{$48.0\%$ ($-13.9$\,Elo, $16\text{W}\text{--}16\text{D}\text{--}18\text{L}$)}.
+  \item \textbf{FP16 vs.\ FP16:} \texttt{12x192} (FP16) scored $57.0\%$ ($+48.9$\,Elo, 95\% CI $[43.27\%, 69.73\%]$, $22\text{W}\text{--}13\text{D}\text{--}15\text{L}$) against \texttt{10x192-Scalar} (FP16) despite running $16.9\%$ slower ($2{,}698.4$ vs.\ $3{,}246.0$\,NPS).
+  \item \textbf{Against \texttt{10x192-MidQAT} (INT8):} Facing \texttt{10x192-MidQAT} ($3{,}803.4$\,NPS), \texttt{12x192} (FP16) dropped to $39.0\%$ ($-77.7$\,Elo, 95\% CI $[26.73\%, 52.84\%]$). Quantizing \texttt{12x192} middle blocks (\texttt{2..9}) raised its speed by $+24.3\%$ ($2{,}673.1 \to 3{,}324.0$\,NPS) and recovered $+64$\,Elo, yet \texttt{12x192-MidQAT} still scored $48.0\%$ ($-13.9$\,Elo, 95\% CI $[34.80\%, 61.49\%]$, $16\text{W}\text{--}16\text{D}\text{--}18\text{L}$) against \texttt{10x192-MidQAT} ($3{,}868.4$\,NPS).
 \end{itemize}
-Conversely, shrinking below \texttt{10x192} to \texttt{10x128 FP16} ($3.20$\,M, $4{,}810.4$\,NPS) yielded only $45.5\%$ against \texttt{10x192 FP16} ($3{,}290.3$\,NPS) across 100 paired games because channel reduction degraded 150k policy CE by $+0.0541$. Crossing ${\sim}7.85$\,M parameters pushes intermediate tensors and quantized weights past Intel NPU~3720's ${\sim}4$\,MB on-chip CMX SRAM into LPDDR DMA spills, causing a $+20.8\%$ $B=16$ latency cliff ($5.412 \to 6.540$\,ms) that erases \texttt{12x192}'s capacity edge. Thus, \texttt{10x192 Mid-2..7 QAT INT8} sits precisely at the compute-optimal Pareto knee of the edge NPU.
+This inversion follows directly from sequential MCTS wave budgets: under a fixed $400$\,ms move limit, a $+20.8\%$ per-batch latency cost ($5.412 \to 6.540$\,ms) linearly reduces the number of sequential PUCT backup waves per move, offsetting \texttt{12x192}'s modest offline policy and value gains. Conversely, shrinking to \texttt{10x128} FP16 ($3.20$\,M, $4{,}810.4$\,NPS) scored $45.5\%$ (95\% CI $[36.09\%, 55.25\%]$ over 100 games) against \texttt{10x192} FP16 ($3{,}290.3$\,NPS) because reduced channel width degraded held-out policy CE by $+0.0541$. On Intel NPU~3720, \texttt{10x192-MidQAT} therefore provides the strongest real-time balance between network capacity and sequential wave count.
 
 % =========================================================================
-\section{Distributional Value Geometry and Co-Resident Graph Gear-Shifting}
+\section{Distributional Value Geometry, Co-Resident Batching, and Negative Ablations}
 \label{sec:hlgauss_gear}
 % =========================================================================
 
-\subsection{\texttt{HL-Gauss-64 + MLH}, Expectation Anchoring, and Boundary Truncation}
-Post-mortem depth-14 Stockfish audits of 44 losses in \texttt{v1.0.0} established that $43.18\%$ ($19/44$) occurred despite Stockfish's best move already lying inside Policy Top-3---demonstrating that scalar $\tanh$ MSE value regression suffered from zero-shrinkage and weak gradients in sharp tactical positions. Replacing scalar regression with categorical Histogram Loss with Gaussian smoothing (\texttt{HL-Gauss})~\cite{imani2018hlgauss,farebrother2024stop} resolves this bottleneck at virtually zero NPU compute cost.
-
-We squash centipawn evaluation $c$ into $v = \tanh(c \cdot \frac{\ln 10}{800}) \in [-1, 1]$ and partition $[-1, 1]$ into $K = 64$ bins with uniform centers $z_i = -1 + \frac{2i}{K-1}$ ($i \in \{0,\dots,63\}$), bin width $w = \frac{2}{63} \approx 0.03175$, outer-padded bin edges $e_j = -1 - \frac{w}{2} + jw$ ($j \in \{0,\dots,64\}$), and smoothing width $\sigma = 1.5w \approx 0.04762$. The target categorical distribution $q(v) \in \Delta^{63}$ integrates a truncated Gaussian centered at $v$ over each bin via the standard normal CDF $\Phi$:
+\subsection{\texttt{HL-Gauss-64 + MLH} and Boundary Truncation}
+Depth-14 Stockfish audits of 44 baseline losses indicated that $43.18\%$ ($19/44$) occurred even when Stockfish's best move already ranked inside Policy Top-3, pointing to value-head miscalibration under scalar $\tanh$ MSE regression. We replace scalar regression with 64-bin Histogram Loss with Gaussian smoothing (\texttt{HL-Gauss})~\cite{imani2018hlgauss,farebrother2024stop}. Centipawn evaluations $c$ map via $v = \tanh(c \cdot \frac{\ln 10}{800}) \in [-1, 1]$ onto $K = 64$ uniform bin centers $z_i = -1 + \frac{2i}{K-1}$ with width $w = \frac{2}{63} \approx 0.03175$, outer-padded edges $e_j = -1 - \frac{w}{2} + jw$, and smoothing $\sigma = 1.5w \approx 0.04762$. Target probabilities integrate the normal CDF $\Phi$:
 \begin{align}
   \tilde{q}_i(v) &= \Phi\!\left(\frac{e_{i+1} - v}{\sigma}\right) - \Phi\!\left(\frac{e_i - v}{\sigma}\right), \nonumber\\
   q_i(v) &= \frac{\tilde{q}_i(v)}{\sum_{m=0}^{63} \tilde{q}_m(v)}.
   \label{eq:hlgauss}
 \end{align}
-The value head (\texttt{Conv1x1(C,16)} $\to$ \texttt{Linear(1024,256)} $\to$ \texttt{Linear(256,64)}) emits logits $\ell_v \in \mathbb{R}^{64}$ with probabilities $p = \mathrm{softmax}(\ell_v)$ and folded scalar expectation $\hat{v} = \sum_{i=0}^{63} p_i z_i$ computed directly on the NPU. An auxiliary Moves-Left Head (\texttt{Conv1x1(C,8)} $\to$ \texttt{Linear(512,64)} $\to$ \texttt{Linear(64,1)} $\to$ \texttt{ReLU}) predicts remaining plies $\hat{m}(s)$ on trajectory-labeled shards. The joint Phase~4 loss combines top-8 soft policy cross-entropy, \texttt{HL-Gauss-64} cross-entropy anchored by an explicit expectation MSE term ($\lambda_{\mathrm{mse}} = 2.0$), and masked Smooth-$L_1$ MLH loss:
+The value head (\texttt{Conv1x1(C,16)} $\to$ \texttt{Linear(1024,256)} $\to$ \texttt{Linear(256,64)}) emits probabilities $p = \mathrm{softmax}(\ell_v)$ and a graph-folded expectation $\hat{v} = \sum_{i=0}^{63} p_i z_i$, paired with an auxiliary Moves-Left Head (\texttt{Conv1x1(C,8)} $\to$ \texttt{Linear(512,64)} $\to$ \texttt{Linear(64,1)} $\to$ \texttt{ReLU}) predicting remaining plies $\hat{m}(s)$. Training minimizes top-8 soft policy cross-entropy, \texttt{HL-Gauss-64} cross-entropy anchored by an expectation MSE term ($\lambda_{\mathrm{mse}} = 2.0$), and masked Smooth-$L_1$ MLH loss:
 \begin{align}
   \mathcal{L} &= w_{\mathrm{pol}}\,\mathcal{L}_{\mathrm{pol}}
   + w_{\mathrm{val}}\!\left(\mathcal{L}_{\mathrm{HL\text{-}CE}}(p, q(v)) + 2.0\,(\hat{v} - v)^2\right) \nonumber\\
@@ -257,37 +268,23 @@ The value head (\texttt{Conv1x1(C,16)} $\to$ \texttt{Linear(1024,256)} $\to$ \te
   \label{eq:loss}
 \end{align}
 
-\paragraph{Hardware Overhead and Boundary Truncation.}
-Compiling both heads on Intel NPU~3720 ($B=16$, 200 timed iterations) confirmed that upgrading from scalar $\tanh$ ($6.386$\,ms, $13.36$\,MB IR) to \texttt{HL-Gauss-64 + MLH} ($6.399$\,ms, $13.44$\,MB IR) adds just \textbf{$+0.012$\,ms ($+0.19\%$)} latency because the dense head projections fit entirely inside L1/CMX cache. On held-out \texttt{test\_far} endgames ($\le 12$ pieces), \texttt{HL-Gauss-64} reduced value MSE from $0.07172$ to $0.06548$ (\texttt{A2}) and $0.05950$ (\texttt{12x192}) while raising endgame decisive sign accuracy from $96.93\%$ to $98.62\%$--$98.84\%$.
+On Intel NPU~3720 ($B=16$, 200 timed iterations), upgrading from scalar $\tanh$ ($6.386$\,ms, $13.36$\,MB IR) to \texttt{HL-Gauss-64 + MLH} ($6.399$\,ms, $13.44$\,MB IR) adds $+0.012$\,ms ($+0.19\%$). On held-out endgames ($\le 12$ pieces), \texttt{HL-Gauss-64} reduced value MSE from $0.07172$ to $0.06548$ (\texttt{10x192-MidQAT}) and $0.05950$ (\texttt{12x192-MidQAT}) while raising endgame decisive sign accuracy from $96.93\%$ to $98.62\%$--$98.84\%$. Because renormalizing the truncated tail beyond $e_{64} = 1 + w/2$ pulls ideal extreme targets inward to $\pm 0.9704$ ($\pm 0.9606$ on unpadded $[-1,1]$; empirically saturating near $\pm 0.962$), we tested post-hoc support rescaling ($z_i \leftarrow 1.038\,z_i$, \texttt{MidQAT-Rescaled} in Table~\ref{tab:synthesis}). Rescaling worsened held-out MSE ($0.05691 \to 0.05766$) and $200\text{n}$ puzzles ($82.77\% \to 82.67\%$) because the $2.0\,(\hat{v} - v)^2$ anchor in Eq.~\eqref{eq:loss} already compensates for interior bias.
 
-Mathematically, renormalizing the truncated Gaussian tail above $e_{64} = 1 + w/2$ in Eq.~\eqref{eq:hlgauss} pulls the ideal target expectation at $v = \pm 1$ inward to $\mathbb{E}_{q(\pm 1)}[z] = \pm 0.9704$ ($\pm 0.9606$ under unpadded $[-1,1]$ edges; empirically saturating near $\pm 0.962$ under noisy targets). Testing post-hoc scalar de-truncation (\texttt{A2\_detrunc}, rescaling $z_i \leftarrow 1.038\,z_i$) in Table~\ref{tab:synthesis} \emph{regressed} \texttt{test\_far} MSE ($0.05691 \to 0.05766$) and $200\text{n}$ puzzles ($82.77\% \to 82.67\%$) because the $2.0\,(\hat{v} - v)^2$ expectation anchor in Eq.~\eqref{eq:loss} already compensates for interior bias, causing post-rescaling to overshoot calibrated middlegame evaluations.
+\subsection{Co-Resident Multi-Shape Batching ($B\in\{1,4,8,16\}$)}
+Intel NPU~3720 exhibits sub-linear batch latency: for \texttt{10x192-MidQAT} (FP16), median latencies are $0.708$\,ms ($0.739$\,ms) at $B=1$, $1.603$\,ms ($1.894$\,ms) at $B=4$, $2.859$\,ms ($3.360$\,ms) at $B=8$, and $5.412$\,ms ($6.262$\,ms) at $B=16$. Consequently, $B=4$ completes $3.38\times$ faster per sequential wave than $B=16$ while preserving $84.4\%$ of peak raw throughput ($2{,}495.6$ vs.\ $2{,}956.6$\,pos/s). Compiling all four static shapes simultaneously co-resident requires only $59.09$\,MB of NPU memory ($13.70$, $27.95$, $42.88$, and $59.09$\,MB cumulative; $172.38$\,MB host RSS delta).
 
-\subsection{Co-Resident Static-Graph Gear-Shifting ($B\in\{1,4,8,16\}$)}
-Static profiling of Intel NPU~3720 reveals a strongly sub-linear turnaround latency curve: for \texttt{10x192} Pure FP16 (\texttt{Hybrid Mid-2..7 INT8}), median latencies are $0.739$\,ms ($0.708$\,ms) at $B=1$, $1.894$\,ms ($1.603$\,ms) at $B=4$, $3.360$\,ms ($2.859$\,ms) at $B=8$, and $6.262$\,ms ($5.412$\,ms) at $B=16$. Thus $B=4$ executes \textbf{$3.38\times$ faster} per sequential wave than $B=16$ while preserving \textbf{$84.4\%$} of peak raw throughput ($2{,}495.6$ vs.\ $2{,}956.6$\,pos/s), and $B=8$ runs $1.89\times$ faster at $94.6\%$ of peak throughput. OpenVINO allows compiling all four static shapes simultaneously \emph{co-resident} in just \textbf{$59.09$\,MB} of NPU memory ($13.70$, $27.95$, $42.88$, and $59.09$\,MB cumulative; $172.38$\,MB host RSS delta).
+To exploit fast small-batch waves without sacrificing middlegame throughput (naive entropy gating over-triggered $B=4$ on $94.4\%$ of batches), our collision-bounded batch gear-shifting controller applies three structural rules: (i) \emph{Cold-Start Ramp} ($N_{\mathrm{root}} < 16 \Rightarrow B=4$), (ii) \emph{Capped Narrow Root} (in check or $\le 5$ legal moves with $N_{\mathrm{root}} < 32 \Rightarrow B=4$), and (iii) \emph{Collision-Bounded Flush} (during \texttt{select(16)}, once $\ge 6$ virtual-loss collisions or cache/terminal hits occur, immediately flush $B=4$ for $1\text{--}4$ unique uncached leaves or $B=8$ for $5\text{--}8$ leaves). In cold-start tactical benchmarks (Figure~\ref{fig:puzzles_ladder}(b)), this controller reduced Mate-in-3 wall time ($n=100$, $400$\,ms) by $3.15\times$ ($7.25 \to 2.30$\,s at $97/100$ solved, mean nodes $190.28 \to 43.13$, avg ply $1.739 \to 2.192$), and combined with middle-block INT8 raised 500-puzzle accuracy by $+8.0$ percentage points at $50$\,ms ($80.0\% \to 88.0\%$, avg ply $2.21 \to 3.35$) and $+7.0$ percentage points at $100$\,ms ($85.6\% \to 92.6\%$, $2100+$ tier $69\% \to 80\%$).
 
-Naive entropy-gated batch switching over-triggered $B=4$ on $94.4\%$ of batches in open middlegames, hurting node volume. Our collision-bounded \texttt{gear\_shift\_v3} scheduler replaces entropy heuristics with three structural triggers: (i) \emph{Cold-Start Ramp} ($N_{\mathrm{root}} < 16 \Rightarrow B=4$), (ii) \emph{Capped Narrow Root} (in check or $\le 5$ legal moves with $N_{\mathrm{root}} < 32 \Rightarrow B=4$), and (iii) \emph{Collision-Bounded Flush} (during \texttt{select(16)}, once $\ge 6$ virtual-loss collisions or cache/terminal hits occur, immediately flush $B=4$ for $1\text{--}4$ unique uncached leaves or $B=8$ for $5\text{--}8$ leaves instead of padding to $16$). In cold-start tactical regimes (Figure~\ref{fig:puzzles_ladder}(b)), \texttt{gear\_shift\_v3} delivers major speed and accuracy gains:
-\begin{itemize}
-  \item \textbf{Mate-in-3 ($n=100$, $400$\,ms):} Preserves $97/100$ solve rate while cutting wall time from $7.25$\,s to \textbf{$2.30$\,s ($3.15\times$ speedup)}, reducing mean evaluated nodes from $190.28$ to $43.13$ and lifting average ply from $1.739$ to $2.192$.
-  \item \textbf{Fast Clean Puzzles ($n=500$):} Combining \texttt{gear\_shift\_v3} with \texttt{Hybrid Mid-2..7 INT8} boosts $50$\,ms solve accuracy by \textbf{$+8.0\%$ ($80.0\% \to 88.0\%$}, avg ply $2.21 \to 3.35$, max ply $4.33 \to 7.12$) and $100$\,ms accuracy by \textbf{$+7.0\%$ ($85.6\% \to 92.6\%$}, $2100+$ tier $69\% \to 80\%$).
-\end{itemize}
-
-\subsection{Regime Boundaries: Pondered Double-Buffering vs.\ Async Dispersion}
-Controlled search ablations uncovered two complementary sequential-dependency boundaries governing batch execution on edge NPUs:
+\subsection{Regime Boundaries: Pondered Double-Buffering and Async Dispersion}
+Ablations isolate two opposing boundaries on batch concurrency:
 \begin{enumerate}
-  \item \textbf{Warm Pondered Trees Favor Static $B=16$ Double-Buffering:} Under $400$\,ms/move games with pondering enabled, opponent-turn pondering already pre-populates $785.7$ retained root visits on average (far above the $N_{\mathrm{root}} < 32$ ramp), so $>80\%$ of waves already run $B=16$. Switching static graphs disrupts \texttt{nireq=2} asynchronous double-buffering overlap, causing \texttt{gear\_shift\_v3} to drop Pure FP16 score against Stockfish~19 \texttt{UCI\_Elo 3000} from $45.0\%$ to $30.0\%$ ($3\text{W}\text{--}6\text{D}\text{--}11\text{L}$ on slice \texttt{[75:85]}). Production search therefore automatically gates \texttt{allow\_gear\_shift = (not use\_ponder) or (movetime\_ms <= 150)}.
-  \item \textbf{50-Node Async Double-Buffering Dispersion ($-18.69\%$):} Conversely, enabling \texttt{nireq=2} double-buffering under tight fixed-node limits severely degrades search quality. Investigating an archived $-19$-point puzzle dip on \texttt{10x128} ($50\text{n}$, $B=16$) across all $1{,}979$ clean puzzles isolated the sole cause via single-parameter ablation: sequential execution (\texttt{nireq=1}) scored \textbf{$77.36\%$} ($1{,}531/1{,}979$, $74.87$ avg nodes across $4.40$ waves) at both $\delta_{\mathrm{fpu}}=0.20$ and $\delta_{\mathrm{fpu}}=0.25$, whereas flipping strictly to \texttt{use\_async\_overlap=True, async\_inflight=2} collapsed accuracy to \textbf{$58.67\%$} ($1{,}161/1{,}979$, $61.57$ avg nodes across $3.57$ waves; $58.16\%$ with $\delta_{\mathrm{fpu}}=0.25$)---an \textbf{$-18.69\%$} drop caused by 32 concurrent virtual-loss leaves dispersing visits before forcing replies back up. Larger batches ($B=32, 64$) suffer the same pathology, scoring $26.56\%$ and $0.00\%$ vs.\ $B=16$.
+  \item \textbf{Warm Pondered Trees Favor Static $B=16$ Double-Buffering:} Under $400$\,ms/move pondered play, opponent-turn pondering already pre-populates $785.7$ retained root visits on average, so $>80\%$ of waves already select $B=16$; switching compiled graphs disrupts \texttt{nireq=2} asynchronous double-buffering overlap and reduced Pure FP16 score against Stockfish~19 \texttt{UCI\_Elo 3000} from $40.0\%$ to $30.0\%$ ($3\text{W}\text{--}6\text{D}\text{--}11\text{L}$, 95\% CI $[14.55\%, 51.90\%]$ on the 20-game diagnostic slice). Production search therefore enables gear-shifting only when pondering is off or $\text{movetime} \le 150$\,ms.
+  \item \textbf{50-Node Async Double-Buffering Dispersion ($-18.69\%$):} Conversely, enabling \texttt{nireq=2} overlap under strict fixed-node budgets degrades shallow search. On $1{,}979$ clean puzzles (\texttt{10x128}, $50\text{n}$, $B=16$), sequential execution (\texttt{nireq=1}) scored $77.36\%$ ($1{,}531/1{,}979$, $74.87$ avg nodes across $4.40$ waves) at both $\delta_{\mathrm{fpu}}=0.20$ and $\delta_{\mathrm{fpu}}=0.25$, whereas enabling \texttt{nireq=2} reduced accuracy to $58.67\%$ ($1{,}161/1{,}979$, $61.57$ avg nodes across $3.57$ waves; $58.16\%$ at $\delta_{\mathrm{fpu}}=0.25$) because 32 concurrent virtual-loss leaves disperse visits across shallow breadth before forcing lines back up.
 \end{enumerate}
 
-% =========================================================================
-\section{Can Free CPU Heuristics Assist Neural MCTS? A 37.85\,ns Test of the Bitter Lesson}
+\subsection{No Observed Benefit from Idle-CPU SEE Prior Shaping}
 \label{sec:see}
-% =========================================================================
-
-Section~\ref{sec:formulation} established that C++23 vectorization leaves the Redwood Cove P-core idle for $91.44\%$ ($373.64$\,ms/move) of wall time awaiting NPU batches, while Section~\ref{sec:hlgauss_gear}'s async dispersion proof demonstrates that those idle cycles cannot be spent naively decoupling more in-flight virtual-loss waves on shallow trees. A natural systems hypothesis therefore emerges: \emph{can exact classical chess domain heuristics computed for free inside the idle CPU window improve PUCT move selection and eliminate short-horizon tactical blunders ($43.18\%$ of \texttt{v1.0.0} losses)?}
-
-To test this hypothesis rigorously without introducing search staleness, we implemented an exact C++23 bitboard Static Exchange Evaluator (\texttt{CBoard::see()}) leveraging our precomputed BMI2 PEXT slider tables to resolve full single-square recapture sequences including X-ray slider discovery, absolutely pinned defenders, en passant dual-square removal, promotion recaptures, and king-into-defended-square legality. Verified against \textbf{$56/56$} handcrafted tactical exchange unit tests, \texttt{CBoard::see()} executes in just \textbf{$37.85$\,ns/call ($0.0378\,\mu$s)}---adding negligible sub-microsecond overhead inside node expansion.
-
-We wired \texttt{CBoard::see()} into an explicit per-edge \texttt{fpu\_bias} slab inside \texttt{ChildSoAArena} (evaluated via a single AVX2 \texttt{\_mm256\_add\_ps} instruction in \texttt{select\_best\_child\_avx2}), modifying only unvisited children's First-Play Urgency while leaving visited $Q$-values strictly unbiased:
+Because host P-cores sit $91.44\%$ idle during NPU inference, we tested whether an exact classical chess heuristic executed during node expansion could assist PUCT without adding latency or staleness. Using our BMI2 PEXT slider tables, we implemented a full bitboard Static Exchange Evaluator (\texttt{CBoard::see()}) handling X-ray discovery, pinned defenders, en passant, and promotion recaptures; it passed $56/56$ tactical unit tests at $37.85$\,ns/call ($0.0378\,\mu$s) and was wired into an AVX2 per-edge FPU bias lane leaving visited $Q$-values unbiased:
 \begin{equation}
   {\small
   \begin{aligned}
@@ -301,40 +298,14 @@ We wired \texttt{CBoard::see()} into an explicit per-edge \texttt{fpu\_bias} sla
   \end{aligned}}
   \label{eq:see_fpu}
 \end{equation}
-The gating condition $P_\theta(s,a) < 0.15$ was deliberately engineered to protect high-prior positional sacrifices while suppressing low-prior material grabs (e.g., $\text{Q}\times\text{P}$ into a defended battery) during early search waves.
-
-\begin{table}[t]
-  \centering
-  \caption{\textbf{Controlled Ablation of 37.85\,ns Bitboard SEE Prior Shaping} (\texttt{10x192 FP16}, \texttt{research\_spikes.json}). Across puzzles and both Stockfish loss-anatomy suites, static exchange shaping degrades search quality.}
-  \label{tab:see_bitter_lesson}
-  \resizebox{\columnwidth}{!}{%
-  \begin{tabular}{@{}llccc@{}}
-    \toprule
-    \textbf{Benchmark Suite} & \textbf{Metric} & \textbf{SEE OFF} & \textbf{SEE ON} & \textbf{Delta} \\
-    \midrule
-    500 Clean Puzzles ($50\text{n}$) & Solve Rate (\%) & \textbf{78.80} (394) & 78.20 (391) & $-0.60\%$ \\
-    500 Clean Puzzles ($200\text{n}$) & Solve Rate (\%) & \textbf{82.20} (411) & 82.00 (410) & $-0.20\%$ \\
-    \midrule
-    Cat (c) Tactical ($n{=}19$, $50\text{n}$) & SF d14 Match / Drop & \textbf{8/19} / 126.95\,cp & 6/19 / 122.58\,cp & $-2$ matches \\
-    Cat (c) Tactical ($n{=}19$, $200\text{n}$) & Mean Drop / $\ge\!150$\,cp & \textbf{127.16\,cp} / \textbf{6} & 134.42\,cp / 7 & $+7.26$\,cp, $+1$\,bl \\
-    \midrule
-    Cat (a) Value ($n{=}19$, $50\text{n}$) & Mean Drop ($\ge\!150$\,cp) & \textbf{34.74\,cp} (1) & 38.42\,cp (1) & $+3.68$\,cp \\
-    Cat (a) Value ($n{=}19$, $200\text{n}$) & Mean Drop / SF Match & \textbf{33.63\,cp} / \textbf{15} & 38.79\,cp / 14 & $+5.16$\,cp, $-1$\,m \\
-    \bottomrule
-  \end{tabular}}
-\end{table}
+Across controlled ablations on \texttt{10x192-Scalar-FP16}, SEE prior shaping produced no measurable benefit: 500-puzzle solve rates shifted from $78.80\%$ ($394/500$) to $78.20\%$ ($391/500$) at $50\text{n}$ and from $82.20\%$ ($411/500$) to $82.00\%$ ($410/500$) at $200\text{n}$; on two small $n=19$ diagnostic loss subsets, mean centipawn drop moved from $127.16$ to $134.42$\,cp ($\ge 150$\,cp blunders $6 \to 7$) on tactical positions at $200\text{n}$ and from $33.63$ to $38.79$\,cp on value positions ($34.74 \to 38.42$\,cp at $50\text{n}$). These shifts ($3/500$ puzzles and $n=19$ diagnostic sets) fall within statistical noise and provide no evidence that 1-square static material exchange shaping improves upon a 346\,M-position neural prior. A separate opening root Top-4 guard ($P \ge 0.08$) also fell short of its $24/28$ pre-registered threshold ($22/28$). Consistent with the broader experience noted by Sutton~\cite{sutton2019bitter}, we leave both heuristic rules disabled by default.
 
 \begin{figure*}[t]
   \centering
   \includegraphics[width=\textwidth]{figures/fig3_qat_factorial_and_sprt.pdf}
-  \caption{\textbf{Causal Factorial Proof and 180-Game Pentanomial SPRT Championship.} (a) $2\times2$ factorial vs.\ Stockfish~19 \texttt{UCI\_Elo 3000} ($50$g/arm) isolating why frozen-trunk PTQ collapses ($33.0\%$ vs.\ $45.0\%$ FP16 ref) whereas joint Middle-Block QAT reverses quantization into $+2.0\%$ score, $+16.2\%$ NPS, and fewer endgame losses ($5$ vs.\ $7$). (b) Cumulative pentanomial SPRT log-likelihood ratio across 180 paired NPU games (\texttt{A2 Mid-2..7 QAT INT8} vs.\ \texttt{346M 10x192 FP16}), crossing \texttt{ACCEPT\_H1} ($+20$\,Elo) at Game~134 and finishing at $\mathrm{LLR} = +3.8313$ ($+56.5$\,Elo, $+19.6\%$ NPS).}
+  \caption{\textbf{Stockfish~19 Precision Ablation and 180-Game Combined Upgrade SPRT.} (a) 50-game Stockfish~19 \texttt{UCI\_Elo 3000} reference scores with 95\% Wilson CIs across precision and trunk configurations. (b) Cumulative pentanomial SPRT log-likelihood ratio over 180 paired NPU games comparing the combined \texttt{v1.1} upgrade (\texttt{10x192-MidQAT}) against \texttt{10x192-Scalar} FP16, crossing \texttt{ACCEPT\_H1} ($+20$\,Elo) at Game~134 and reaching $\mathrm{LLR} = +3.8313$ ($+56.5$\,Elo, $+19.6\%$ NPS).}
   \label{fig:qat_sprt}
 \end{figure*}
-
-\paragraph{Empirical Outcome and Mechanistic Diagnosis.}
-As documented in Table~\ref{tab:see_bitter_lesson}, enabling \texttt{use\_see\_prior\_shaping=True} consistently \emph{degraded} performance across all three suites despite zero measurable latency cost: 500-puzzle solve accuracy dropped at both $50\text{n}$ ($78.80\% \to 78.20\%$, losing $3$ puzzles in the $1800\text{--}2099$ band) and $200\text{n}$ ($82.20\% \to 82.00\%$); on Category~(c) tactical-horizon losses at $200\text{n}$, mean centipawn drop worsened from $127.16$ to $134.42$\,cp while severe $\ge 150$\,cp blunders rose from $6/19$ to $7/19$ (and live Stockfish depth-14 best-move matches at $50\text{n}$ dropped from $8/19$ to $6/19$); and on Category~(a) value-search losses, mean centipawn drop worsened at both $50\text{n}$ ($34.74 \to 38.42$\,cp) and $200\text{n}$ ($33.63 \to 38.79$\,cp).
-
-This negative result provides a clean, controlled validation of Sutton's \emph{Bitter Lesson}~\cite{sutton2019bitter} inside heterogeneous neural search. Mechanistically, a 1-square static exchange evaluator is structurally blind to multi-square tactical motifs---intermediate \emph{zwischenzug} checks, deflection sacrifices, mating nets, and overloaded defenders---whose nonlinear geometry is already implicitly encoded by a 346\,M-position policy network. Applying a $+0.05$ FPU boost for $\mathrm{SEE} \ge +100$\,cp baits PUCT into spending precious first-wave NPU slots verifying greedy poisoned captures, while applying $-0.15$ for $\mathrm{SEE} < -100$\,cp suppresses sound sacrificial initiations whose priors fall below $0.15$. A complementary heuristic ablation---an opening root Top-4 guard ($P \ge 0.08$)---similarly failed its pre-registered $24/28$ blunder-recovery gate ($22/28$) and was rejected. Both flags remain disabled by default (\texttt{False}): rather than injecting hand-crafted heuristics into idle P-core cycles, optimal edge-NPU performance comes from shrinking NPU inference latency (Sections~\ref{sec:qat}--\ref{sec:scaling}) and improving learned distributional evaluation (Section~\ref{sec:hlgauss_gear}).
 
 % =========================================================================
 \section{End-to-End Evaluation and Conclusion}
@@ -344,81 +315,84 @@ This negative result provides a clean, controlled validation of Sutton's \emph{B
 \begin{figure*}[t]
   \centering
   \includegraphics[width=\textwidth]{figures/fig4_puzzles_and_ladder.pdf}
-  \caption{\textbf{Tactical Puzzles, Co-Resident Gear-Shifting, and Stockfish~19 Benchmarks.} (a) Clean $1{,}979$ Lichess puzzle scaling for \texttt{v1.1.0} (\texttt{A2\_soup75} INT8) from $68.72\%$ ($0\text{n}$) to $95.65\%$ ($800\text{n}$), including the $2100+$ master bucket ($53.3\% \to 86.55\%$). (b) Co-resident $B\in\{4,8,16\}$ gear-shifting gains on 500 clean puzzles at $50$\,ms ($+8.0\%$) and $100$\,ms ($+7.0\%$). (c) Stockfish~19 calibration ladder ($150$g, mean implied \texttt{UCI\_Elo} $2{,}992$) and uncapped \texttt{go nodes 3500} crossover jump ($37.50\% \to 83.75\%$, $+46.25\%$). $^\ast$\texttt{v1.0.x} ladder used \texttt{OPENINGS\_50}; \texttt{v1.1.0} used disjoint unseen \texttt{openings\_320} slices.}
+  \caption{\textbf{Tactical Puzzles, Co-Resident Gear-Shifting, and Stockfish~19 Benchmarks.} (a) Clean $1{,}979$ Lichess puzzle scaling for \texttt{10x192-MidQAT-Soup} from $68.72\%$ ($0\text{n}$) to $95.65\%$ ($800\text{n}$), including the $2100+$ tier ($53.3\% \to 86.55\%$). (b) Co-resident $B\in\{4,8,16\}$ gear-shifting gains on 500 clean puzzles at $50$\,ms ($+8.0$\,pp) and $100$\,ms ($+7.0$\,pp). (c) Stockfish~19 calibration ladder ($150$g, mean implied \texttt{UCI\_Elo} $2{,}992$) and uncapped \texttt{go nodes 3500} comparison ($37.50\% \to 83.75\%$, reflecting added Syzygy tablebases alongside the \texttt{v1.1} upgrade). $^\ast$Baseline ladder used a separate 50-opening book; \texttt{v1.1} used unseen slices.}
   \label{fig:puzzles_ladder}
 \end{figure*}
 
 \subsection{Statistical Methodology: Pentanomial SPRT}
-To eliminate opening-color bias and reduce variance in paired head-to-head NPU matches, each opening position is played twice with reversed colors, yielding a pair score $s_k \in \{0, 0.25, 0.50, 0.75, 1.0\}$ aggregated into pentanomial counts $\mathbf{c} = (c_0, c_1, c_2, c_3, c_4)$ over $M = \sum_j c_j$ pairs. Following Fishtest's generalized pentanomial Sequential Probability Ratio Test (SPRT)~\cite{wald1945sprt,stockfish2025}, we form Jeffreys-smoothed probabilities $\hat{p}_j = (c_j + 0.5)/(M + 2.5)$ and solve via Newton iteration for exponentially tilted maximum-likelihood distributions $q^{(r)}_j \propto \hat{p}_j e^{\beta_r x_j}$ whose means match the logistic Elo hypotheses $\mu(q^{(r)}) = (1 + 10^{-\mathrm{Elo}_r/400})^{-1}$ for $\mathrm{Elo}_0 = 0$ and $\mathrm{Elo}_1 = +20$:
+Each head-to-head opening is played twice with reversed colors, yielding pair scores $s_k \in \{0, 0.25, 0.50, 0.75, 1.0\}$ summarized by pentanomial counts $\mathbf{c} = (c_0, c_1, c_2, c_3, c_4)$ over $M = \sum_j c_j$ pairs. Following Fishtest's generalized pentanomial Sequential Probability Ratio Test (SPRT)~\cite{wald1945sprt,stockfish2025}, Jeffreys-smoothed probabilities $\hat{p}_j = (c_j + 0.5)/(M + 2.5)$ are exponentially tilted via Newton iteration to $q^{(r)}_j \propto \hat{p}_j e^{\beta_r x_j}$ matching the logistic Elo means $\mu(q^{(r)}) = (1 + 10^{-\mathrm{Elo}_r/400})^{-1}$ for $\mathrm{Elo}_0 = 0$ and $\mathrm{Elo}_1 = +20$:
 \begin{equation}
   \mathrm{LLR}(\mathbf{c}) = \sum_{j=0}^{4} c_j \ln\!\frac{q^{(1)}_j}{q^{(0)}_j},
   \label{eq:sprt}
 \end{equation}
-with $\alpha = \beta = 0.05$ stopping bounds $\pm \ln\!\left(\frac{1-\beta}{\alpha}\right) = \pm 2.9444$.
+with $\alpha = \beta = 0.05$ bounds $\pm \ln\!\left(\frac{1-\beta}{\alpha}\right) = \pm 2.9444$. For every match score we also report the 95\% binomial Wilson confidence interval.
 
-\subsection{180-Game Paired NPU Championship SPRT}
-Table~\ref{tab:sprt180} and Figure~\ref{fig:qat_sprt}(b) report the 180-game paired head-to-head validation ($90$ disjoint opening pairs \texttt{openings\_320[75:165]}, $400$\,ms/move, static $B=16$, 5-piece Syzygy) comparing \texttt{A2 Mid-2..7 W8A8 QAT INT8} against the \texttt{v1.0.2 346M 10x192} Pure FP16 baseline. Across all three independent slices, \texttt{A2} won consistently ($54.0\%$, $59.0\%$, $60.0\%$), crossing \texttt{ACCEPT\_H1} at pair~67 (Game~134, $\mathrm{LLR}=+3.0048$) and concluding at \textbf{$58.06\%$ ($77\text{W}\text{--}55\text{D}\text{--}48\text{L}$, $+56.5$\,Elo, 95\% Wilson CI $[50.75\%, 65.02\%]$, $\mathrm{LLR} = +3.8313$)} while sustaining $+19.6\%$ higher real-time search throughput ($3{,}890.7$ vs.\ $3{,}253.9$\,NPS).
+\subsection{Paired NPU Head-to-Head Matches}
+Table~\ref{tab:sprt180} reports both the 180-game combined upgrade match (unseen opening slices A, B, and C; $400$\,ms/move, static $B=16$, unpondered, 5-piece Syzygy) and our single-variable and depth-scaling controls. Across 180 games, the combined \texttt{v1.1} upgrade (\texttt{10x192-MidQAT}: 40\,M Lc0/Stockfish data mix + \texttt{HL-Gauss-64/MLH} + Middle-Block W8A8 QAT) defeated \texttt{10x192-Scalar} FP16 by \textbf{$+56.5$\,Elo} ($58.06\%$, $77\text{W}\text{--}55\text{D}\text{--}48\text{L}$, 95\% Wilson CI $[50.75\%, 65.02\%]$ / $[+5.2, +107.7]$\,Elo; paired pentanomial 95\% CI $[53.97\%, 62.14\%]$ / $[+27.7, +86.1]$\,Elo; $\mathrm{LLR} = +3.8313 > +2.9444$, \texttt{ACCEPT\_H1}) while increasing unpondered throughput by $+19.6\%$ ($3{,}890.7$ vs.\ $3{,}253.9$\,NPS). Table~\ref{tab:sprt180} also lists the 100-game single-variable \texttt{10x192-MidQAT} (INT8) vs.\ \texttt{10x192-MidQAT} (FP16) control isolating INT8 execution on identical weights.
 
 \begin{table*}[t]
   \centering
-  \caption{\textbf{180-Game Paired NPU Championship SPRT} (\texttt{A2 Mid-2..7 QAT INT8} vs.\ \texttt{346M 10x192 FP16}, $400$\,ms/move, static $B=16$, 5-piece Syzygy) and secondary head-to-head NPU verifications.}
+  \caption{\textbf{Paired Intel NPU 3720 Head-to-Head Evaluation} ($400$\,ms/move, static $B=16$, unpondered, 5-piece Syzygy). All scores include 95\% binomial Wilson CIs.}
   \label{tab:sprt180}
   \resizebox{\textwidth}{!}{%
-  \begin{tabular}{@{}lccccccc@{}}
+  \begin{tabular}{@{}lcccccccc@{}}
     \toprule
-    \textbf{Matchup / Opening Slice} & \textbf{Games} & \textbf{Score (\%)} & \textbf{W--D--L} & \textbf{Elo Diff} & \textbf{Pentanomial} & \textbf{SPRT LLR} & \textbf{NPS (A / B)} \\
+    \textbf{Matchup / Opening Slice} & \textbf{Games} & \textbf{Score (\%)} & \textbf{95\% Wilson CI (\%)} & \textbf{W--D--L} & \textbf{Elo} & \textbf{Pentanomial} & \textbf{SPRT LLR} & \textbf{NPS (A / B)} \\
     \midrule
-    \texttt{A2} vs.\ \texttt{346M} \texttt{[75:100]} & 50 & 54.00 & 17--20--13 & $+27.9$ & $[1, 3, 13, 7, 1]$ & $+0.3501$ & 3,850.0 / 3,239.6 \\
-    \texttt{A2} vs.\ \texttt{346M} \texttt{[100:125]} & 50 & 59.00 & 22--15--13 & $+63.2$ & $[0, 1, 14, 10, 0]$ & $+1.7532^\star$ & 3,866.3 / 3,223.2 \\
-    \texttt{A2} vs.\ \texttt{346M} \texttt{[125:165]} & 80 & 60.00 & 38--20--22 & $+70.3$ & $[1, 2, 22, 10, 5]$ & $+3.8313^\star$ & 3,931.3 / 3,282.0 \\
+    \texttt{10x192-MidQAT} vs.\ \texttt{10x192-Scalar} (Slice A) & 50 & 54.00 & $[40.40, 67.03]$ & 17--20--13 & $+27.9$ & $[1, 3, 13, 7, 1]$ & $+0.3501$ & 3,850.0 / 3,239.6 \\
+    \texttt{10x192-MidQAT} vs.\ \texttt{10x192-Scalar} (Slice B) & 50 & 59.00 & $[45.20, 71.51]$ & 22--15--13 & $+63.2$ & $[0, 1, 14, 10, 0]$ & $+1.7532^\star$ & 3,866.3 / 3,223.2 \\
+    \texttt{10x192-MidQAT} vs.\ \texttt{10x192-Scalar} (Slice C) & 80 & 60.00 & $[49.05, 70.04]$ & 38--20--22 & $+70.4$ & $[1, 2, 22, 10, 5]$ & $+3.8313^\star$ & 3,931.3 / 3,282.0 \\
     \midrule
-    \textbf{Combined SPRT Pass (\texttt{[75:165]})} & \textbf{180} & \textbf{58.06} & \textbf{77--55--48} & \textbf{$+56.5$} & $\mathbf{[2, 6, 49, 27, 6]}$ & \textbf{$+3.8313$ (PASS)} & \textbf{3,890.7 / 3,253.9} \\
+    \textbf{Combined v1.1 Upgrade (Slices A--C)} & \textbf{180} & \textbf{58.06} & $\mathbf{[50.75, 65.02]}$ & \textbf{77--55--48} & \textbf{$+56.5$} & $\mathbf{[2, 6, 49, 27, 6]}$ & \textbf{$+3.8313$ (PASS)} & \textbf{3,890.7 / 3,253.9} \\
     \midrule
-    \texttt{A2\_soup75} vs.\ \texttt{A2\_base} \texttt{[75:100]} & 50 & 54.00 & 16--22--12 & $+27.9$ & $[0, 6, 11, 6, 2]$ & $+0.3411$ & 3,583.3 / 3,597.5 \\
-    \texttt{12x192 FP16} vs.\ \texttt{346M} \texttt{[75:100]} & 50 & 57.00 & 22--13--15 & $+48.9$ & $[1, 4, 12, 3, 5]$ & $+0.5301$ & 2,698.4 / 3,246.0 \\
-    \texttt{12x192 FP16} vs.\ \texttt{A2} \texttt{[75:100]} & 50 & 39.00 & 11--17--22 & $-77.7$ & $[2, 9, 12, 2, 0]$ & $-1.8170$ & 2,673.1 / 3,803.4 \\
-    \texttt{12x192 INT8} vs.\ \texttt{A2} \texttt{[75:100]} & 50 & 48.00 & 16--16--18 & $-13.9$ & $[0, 6, 16, 2, 1]$ & $-0.5799$ & 3,324.0 / 3,868.4 \\
+    \textbf{\texttt{10x192-MidQAT} INT8 vs.\ FP16 (Ctrl, A--B)} & \textbf{100} & \textbf{54.00} & $[44.26, 63.44]$ & \textbf{43--22--35} & \textbf{$+27.9$} & $[1, 4, 34, 8, 3]$ & $+0.9872$ & \textbf{3,821.2 / 3,225.0} \\
+    \texttt{10x192-MidQAT-Soup} vs.\ \texttt{10x192-MidQAT} (A) & 50 & 54.00 & $[40.40, 67.03]$ & 16--22--12 & $+27.9$ & $[0, 6, 11, 6, 2]$ & $+0.3411$ & 3,583.3 / 3,597.5 \\
+    \texttt{12x192} FP16 vs.\ \texttt{10x192-Scalar} FP16 (A) & 50 & 57.00 & $[43.27, 69.73]$ & 22--13--15 & $+48.9$ & $[1, 4, 12, 3, 5]$ & $+0.5301$ & 2,698.4 / 3,246.0 \\
+    \texttt{12x192} FP16 vs.\ \texttt{10x192-MidQAT} INT8 (A) & 50 & 39.00 & $[26.73, 52.84]$ & 11--17--22 & $-77.7$ & $[2, 9, 12, 2, 0]$ & $-1.8170$ & 2,673.1 / 3,803.4 \\
+    \texttt{12x192-MidQAT} vs.\ \texttt{10x192-MidQAT} (A) & 50 & 48.00 & $[34.80, 61.49]$ & 16--16--18 & $-13.9$ & $[0, 6, 16, 2, 1]$ & $-0.5799$ & 3,324.0 / 3,868.4 \\
     \bottomrule
-    \multicolumn{8}{@{}l@{}}{\scriptsize $^\star$Cumulative LLR across slices through Game~100 and Game~180. Combined 95\% Wilson CI: $[50.75\%, 65.02\%]$; SPRT bounds $\pm 2.9444$ ($\mathrm{Elo}_0{=}0, \mathrm{Elo}_1{=}20$).}
+    \multicolumn{9}{@{}l@{}}{\scriptsize $^\star$Cumulative LLR across slices through Game~100 and Game~180. Paired pentanomial 95\% CIs: 180g combined $[53.97\%, 62.14\%]$ ($[+27.7, +86.1]$\,Elo); 100g INT8-vs-FP16 control $[48.88\%, 59.12\%]$ ($[-7.8, +64.1]$\,Elo). SPRT bounds $\pm 2.9444$ ($\mathrm{Elo}_0{=}0, \mathrm{Elo}_1{=}20$).}
   \end{tabular}}
 \end{table*}
 
-\subsection{Stockfish 19 Ladder, Fixed-Node Crossover, and Clean Lichess Puzzles}
-Table~\ref{tab:sf_ladder} and Figure~\ref{fig:puzzles_ladder}(c) summarize external evaluation of the promoted \texttt{v1.1.0} flagship (\texttt{A2\_soup75} Mid-2..7 QAT INT8) against Stockfish~19 ($400$\,ms/move, Ponder ON, Syzygy ON, \texttt{OwnBook=False}) across $150$ unseen \texttt{openings\_320[0:75]} ladder games and $40$ uncapped fixed-node crossover games (\texttt{go nodes 3500}, \texttt{openings\_320[165:185]}). Across the three \texttt{UCI\_Elo} tiers ($2800$, $3000$, $3190$), \textsc{NeuraChess} scored $74.00\%$ (implied $2{,}981.7$), $42.00\%$ (implied $2{,}943.9$), and $31.00\%$ (implied $3{,}051.0$), yielding a combined $49.00\%$ ($38\text{W}\text{--}71\text{D}\text{--}41\text{L}$), \textbf{$3{,}987.9$ mean effective NPS}, and \textbf{$2{,}992.2$ mean implied \texttt{UCI\_Elo}}. Against uncapped Stockfish~19 restricted to \texttt{go nodes 3500}, \texttt{v1.1.0} surged from \texttt{v1.0.2}'s $37.50\%$ ($9\text{W}\text{--}12\text{D}\text{--}19\text{L}$) to \textbf{$83.75\%$ ($30\text{W}\text{--}7\text{D}\text{--}3\text{L}$, $+46.25\%$ jump)}.
+\subsection{Stockfish 19 Calibration, Fixed-Node Crossover, and Puzzles}
+Table~\ref{tab:sf_ladder} and Figure~\ref{fig:puzzles_ladder}(c) present external benchmarks for \texttt{10x192-MidQAT-Soup} against Stockfish~19 ($400$\,ms/move, Ponder ON, Syzygy ON, \texttt{OwnBook=False}) across $150$ unseen ladder games ($2800$, $3000$, and $3190$ \texttt{UCI\_Elo}) and $40$ uncapped fixed-node games (\texttt{go nodes 3500}). Across the 150-game ladder, \textsc{NeuraChess} scored $49.00\%$ ($38\text{W}\text{--}71\text{D}\text{--}41\text{L}$, 95\% CI $[41.13\%, 56.92\%]$) with a mean implied \texttt{UCI\_Elo} of \textbf{$2{,}992.2$}. Here mean effective speed reaches \textbf{$3{,}987.9$\,NPS} (compared to $3{,}890.7$\,NPS in unpondered self-play) because opponent-turn subtree reuse and transposition cache hits increase effective visits per wall-clock second.
+
+Against uncapped Stockfish~19 restricted to \texttt{go nodes 3500}, match score increased from $37.50\%$ ($9\text{W}\text{--}12\text{D}\text{--}19\text{L}$, 95\% CI $[24.22\%, 52.97\%]$) in \texttt{v1.0.2} to $83.75\%$ ($30\text{W}\text{--}7\text{D}\text{--}3\text{L}$, 95\% CI $[69.48\%, 92.11\%]$) in \texttt{v1.1.0}. This $+46.25$ percentage-point increase is substantially larger than the $+56.5$\,Elo head-to-head gain because \texttt{v1.0.2}'s $37.50\%$ run predated both 5-piece Syzygy tablebases and the pondered static-$B=16$ lock; Stockfish restricted to 3,500 nodes per move underperforms heavily in $\le 5$-piece endgames when facing exact tablebase probing.
 
 \begin{table*}[t]
   \centering
-  \caption{\textbf{Stockfish~19 Calibration Ladder (150g) and Uncapped \texttt{go nodes 3500} Crossover (40g)} for \texttt{v1.1.0} (\texttt{A2\_soup75} INT8, 400\,ms/move, Ponder + Syzygy, unseen \texttt{openings\_320} slices).}
+  \caption{\textbf{Stockfish~19 Calibration Ladder (150g) and Uncapped \texttt{go nodes 3500} Evaluation (40g)} for \texttt{10x192-MidQAT-Soup} (400\,ms/move, Ponder ON, Syzygy ON, unseen opening slices).}
   \label{tab:sf_ladder}
   \footnotesize
-  \setlength{\tabcolsep}{5.0pt}
+  \resizebox{\textwidth}{!}{%
   \begin{tabular}{@{}lcccccc@{}}
     \toprule
     \textbf{Stockfish 19 Tier / Engine} & \textbf{Games} & \textbf{Score (\%)} & \textbf{W--D--L} & \textbf{95\% Wilson CI (\%)} & \textbf{Eff.\ NPS} & \textbf{Implied \texttt{UCI\_Elo}} \\
     \midrule
-    \texttt{UCI\_Elo 2800} (\texttt{openings\_320[0:25]}) & 50 & 74.00 & 29--16--5 & $[60.45,\; 84.13]$ & 3,898.9 & 2,981.7 \\
-    \texttt{UCI\_Elo 3000} (\texttt{openings\_320[25:50]}) & 50 & 42.00 & 6--30--14 & $[29.37,\; 55.77]$ & 4,025.1 & 2,943.9 \\
-    \texttt{UCI\_Elo 3190} (\texttt{openings\_320[50:75]}) & 50 & 31.00 & 3--25--22 & $[19.93,\; 44.78]$ & 4,039.6 & 3,051.0 \\
+    \texttt{UCI\_Elo 2800} (Ladder Slice 1) & 50 & 74.00 & 29--16--5 & $[60.45,\; 84.13]$ & 3,898.9 & 2,981.7 \\
+    \texttt{UCI\_Elo 3000} (Ladder Slice 2) & 50 & 42.00 & 6--30--14 & $[29.37,\; 55.77]$ & 4,025.1 & 2,943.9 \\
+    \texttt{UCI\_Elo 3190} (Ladder Slice 3) & 50 & 31.00 & 3--25--22 & $[19.93,\; 44.78]$ & 4,039.6 & 3,051.0 \\
     \midrule
-    \textbf{Combined Ladder (\texttt{v1.1.0} \texttt{A2\_soup75})} & \textbf{150} & \textbf{49.00} & \textbf{38--71--41} & $[41.13,\; 56.92]$ & \textbf{3,987.9} & \textbf{2,992.2} \\
+    \textbf{Combined Ladder (\texttt{10x192-MidQAT-Soup})} & \textbf{150} & \textbf{49.00} & \textbf{38--71--41} & $[41.13,\; 56.92]$ & \textbf{3,987.9} & \textbf{2,992.2} \\
     \midrule
-    \texttt{go nodes 3500} (\texttt{v1.0.2} 346M FP16) & 40 & 37.50 & 9--12--19 & $[24.22,\; 52.97]$ & 3,264.6 & --- \\
-    \textbf{\texttt{go nodes 3500} (\texttt{v1.1.0} \texttt{A2\_soup75})} & \textbf{40} & \textbf{83.75} & \textbf{30--7--3} & $\mathbf{[69.48,\; 92.11]}$ & \textbf{3,771.0} & --- \\
+    \texttt{go nodes 3500} (\texttt{v1.0.2} Scalar FP16, no Syzygy) & 40 & 37.50 & 9--12--19 & $[24.22,\; 52.97]$ & 3,264.6 & --- \\
+    \textbf{\texttt{go nodes 3500} (\texttt{v1.1.0} MidQAT-Soup + Syzygy)} & \textbf{40} & \textbf{83.75} & \textbf{30--7--3} & $\mathbf{[69.48,\; 92.11]}$ & \textbf{3,771.0} & --- \\
     \bottomrule
-  \end{tabular}
+  \end{tabular}}
 \end{table*}
 
-Table~\ref{tab:puzzles} and Figure~\ref{fig:puzzles_ladder}(a) detail tactical scaling across all $1{,}979$ leakage-free Lichess puzzles (21 training-set overlaps strictly excluded prior to evaluation, Syzygy OFF). Scaling PUCT search from raw policy ($0\text{n}$) to $800\text{n}$ raises overall solve accuracy from $68.72\%$ to \textbf{$95.65\%$ ($1{,}893/1{,}979$)}, lifting the $2100+$ master tier by $+33.25$ percentage points ($53.30\% \to 86.55\%$).
+Table~\ref{tab:puzzles} and Figure~\ref{fig:puzzles_ladder}(a) report tactical accuracy across $1{,}979$ leakage-free Lichess puzzles (21 training overlaps excluded, Syzygy disabled). Scaling search from $0\text{n}$ to $800\text{n}$ raises solve accuracy from $68.72\%$ to $95.65\%$ ($1{,}893/1{,}979$), improving the $2100+$ tier from $53.30\%$ to $86.55\%$.
 
 \subsection{Conclusion and Future Directions}
-We have demonstrated that near-3,000-Elo neural MCTS is practical on a 3\,W consumer edge NPU when precision, scaling, distributional loss geometry, and multi-shape execution are co-designed around on-chip SRAM and sequential tree dependencies. Protecting boundary blocks (\texttt{0, 1, 8, 9}) and skip connections while training middle blocks (\texttt{2..7}) jointly under W8A8 QAT unlocks $+19.6\%$ throughput and $+56.5$\,Elo over FP16; scaling past ${\sim}8$\,M parameters crosses the CMX SRAM cliff and inverts Elo under equal wall-clock time; \texttt{HL-Gauss-64 + MLH} costs only $+0.19\%$ NPU latency; and exact classical SEE heuristics fail to assist neural priors even when CPU cycles are free. Promising future avenues include distilling a parallel single-pass \texttt{Conv73} action-value head $Q_\theta(s,a)$ for learned First-Play Urgency (already benchmarked at just $+0.087$\,ms / $+1.36\%$ NPU overhead) and integrating MLH-conditioned draw contempt with adaptive real-time clock management.
+Co-designing mixed-precision quantization, distributional value losses, and multi-shape graph batching around the $91.44\%$ NPU-wait asymmetry enables near-3,000-\texttt{UCI\_Elo} neural MCTS on a 3\,W laptop NPU. Protecting boundary blocks (\texttt{0, 1, 8, 9}) and skip additions during Middle-Block (\texttt{2..7}) W8A8 QAT unlocks ${\sim}16\text{--}20\%$ higher search speed without PTQ accuracy collapse; linear depth--latency scaling explains why \texttt{10x192-MidQAT} outperforms deeper \texttt{12x192} networks under fixed $400$\,ms limits; \texttt{HL-Gauss-64 + MLH} adds $+0.19\%$ latency; and idle-CPU SEE shaping shows no measurable benefit. Future work includes distilling a parallel single-pass \texttt{Conv73} action-value head $Q_\theta(s,a)$ for learned FPU (benchmarked at $+0.087$\,ms / $+1.36\%$ NPU latency) and conditioning draw contempt on predicted moves left.
 
 \paragraph{Reproducibility and Artifact Availability.}
-All C++23/Python source code, the 81-test verification suite (including canonical CPW Perft checks and the 2,000-position differential fuzzer), all raw JSON match and evaluation logs (\texttt{eval\_results/}), figure-generation scripts (\texttt{paper/generate\_figures.py}), and all 12 SHA-256-verified FP16 and Middle-Block QAT INT8 OpenVINO IRs are openly available under the GPL-3.0 license at \url{https://github.com/Musheer360/NeuraChess} (release tag \texttt{v1.1.0}). Live real-time Intel NPU~3720 games are publicly archived and playable at \url{https://lichess.org/@/NeuraChess-AI}.
+All C++23/Python source code, the 81-test verification suite (CPW Perft and 2,000-position differential fuzzer), raw JSON evaluation logs (\texttt{eval\_results/}), figure-generation scripts (\texttt{paper/generate\_figures.py}), and all 12 SHA-256-verified FP16 and Middle-Block QAT INT8 OpenVINO IRs are openly available under GPL-3.0 at \url{https://github.com/Musheer360/NeuraChess} (release tag \texttt{v1.1.0}). Live real-time NPU games are archived at \url{https://lichess.org/@/NeuraChess-AI}.
 
 \begin{table}[!h]
   \centering
-  \caption{\textbf{Clean Lichess Tactical Puzzle Scaling ($n=1{,}979$, \texttt{v1.1.0} \texttt{A2\_soup75} INT8, Syzygy OFF).} Solve rate (\%) across rating buckets and PUCT node budgets.}
+  \caption{\textbf{Clean Lichess Tactical Puzzle Scaling ($n=1{,}979$, \texttt{10x192-MidQAT-Soup}, Syzygy OFF).} Solve rate (\%) across rating tiers and PUCT node budgets.}
   \label{tab:puzzles}
   \resizebox{\columnwidth}{!}{%
   \begin{tabular}{@{}lccccccc@{}}
@@ -451,14 +425,14 @@ The C++23 \texttt{fast\_tree} backend is compiled via bundled Zig with \texttt{-
   \item \textbf{BMI2 PEXT Bitboards \& Polyglot Zobrist Hashing:} Header-only move generation uses \texttt{\_pext\_u64} magic tables (\texttt{rook\_pext[102400]}, \texttt{bishop\_pext[5248]}) and incremental 128-bit Zobrist keys following the strict Polyglot convention (XORing \texttt{ep\_square} \emph{only} when a legal en-passant capture exists), verified on all six canonical CPW Perft suites and a 2,000-position fixed-seed differential fuzzer against \texttt{python-chess} with zero discrepancies.
   \item \textbf{Zero-Copy NPU Staging \& P-Core Pinning:} A single C-ABI call (\texttt{ft\_select\_and\_pack\_native}) writes $(B,18,8,8)$ leaf planes directly into caller-owned memory wrapped in \texttt{ov.Tensor(..., shared\_memory=True)}. Worker threads pin to Redwood Cove P-cores (\texttt{0xc03}) with Windows HighQoS hints (\texttt{THREAD\_POWER\_THROTTLING\_EXECUTION\_SPEED=3}) to prevent E-core scheduling jitter, while compiled OpenVINO \texttt{.blob} artifacts cache on disk for $<1.5$\,s warm restarts.
   \item \textbf{Subtree Reuse, 64\,MB NN Cache, \& Exact Mate Solver:} Valid subtrees persist across opponent moves while clearing path-dependent repetition/50-move tags; a 64\,MB \texttt{CanonicalNNCache} short-circuits transpositions ($70.83\%$, $+154.1$\,Elo at $200$\,ms/move in pilot ablations); bottom-up exact mate propagation prioritizes shortest \texttt{mate\_plies} over PUCT visit count.
-  \item \textbf{5-Piece Syzygy WDL/DTZ Integration \& Zeroing Fix:} Probing 5-piece Syzygy WDL tables~\cite{syzygy2013} internally and DTZ at the root cut losses from $10$ to $3$ on identical paired openings (\texttt{OPENINGS\_50[:10]}, \texttt{max\_plies=220}, 20 games vs.\ Stockfish~19 \texttt{UCI\_Elo 3000}, \texttt{phase4\_syzygy\_sf3000\_20g.json}), raising \texttt{Hybrid\_Mid27} from $25.0\%$ ($0\text{W}\text{--}10\text{D}\text{--}10\text{L}$) to \textbf{$47.5\%$ ($2\text{W}\text{--}15\text{D}\text{--}3\text{L}$, $3{,}812.2$\,NPS, $+22.5\%$)}. In live play, ranking winning root moves by \texttt{(-dtz\_plies, is\_zeroing)} caused 15-move waiting-check shuffles before pushing passed pawns; reordering the key to \texttt{(tier, no\_rep2, is\_zeroing, -dtz\_plies)} enforces immediate captures/pawn pushes while respecting $\text{halfmove} + |\mathrm{DTZ}| \le 100$.
+  \item \textbf{5-Piece Syzygy WDL/DTZ Integration \& Zeroing Fix:} Probing 5-piece Syzygy WDL tables~\cite{syzygy2013} internally and DTZ at the root reduced losses from $10$ to $3$ on identical paired openings (\texttt{OPENINGS\_50[:10]}, \texttt{max\_plies=220}, 20 games vs.\ Stockfish~19 \texttt{UCI\_Elo 3000}, \texttt{phase4\_syzygy\_sf3000\_20g.json}), raising score from $25.0\%$ ($0\text{W}\text{--}10\text{D}\text{--}10\text{L}$, 95\% CI $[11.19\%, 46.87\%]$) to $47.5\%$ ($2\text{W}\text{--}15\text{D}\text{--}3\text{L}$, 95\% CI $[27.85\%, 67.95\%]$, $3{,}812.2$\,NPS). In live games, ranking winning root moves by \texttt{(-dtz\_plies, is\_zeroing)} caused 15-move waiting-check shuffles before advancing passed pawns; reordering the key to \texttt{(tier, no\_rep2, is\_zeroing, -dtz\_plies)} enforces immediate captures and pawn pushes while respecting $\text{halfmove} + |\mathrm{DTZ}| \le 100$.
 \end{itemize}
 
 \subsection{Time-Pressure Awareness and Real-Time UCI Search Control}
 \label{app:clock}
-Because board-plane neural networks have no awareness of wall-clock pressure, live Lichess bullet/blitz deployment against $2400+$ bots exposed four control bugs causing ``laid-back'' play and clock bleeding, all resolved in the UCI controller:
+Because board-plane neural networks have no awareness of wall-clock pressure, live Lichess bullet and blitz play against $2400+$ bots exposed four control bugs causing slow move pacing under fast controls, all resolved in the UCI controller:
 \begin{enumerate}
-  \item \textbf{Spurious Ponder Cold-Start Inflation:} The legacy flat rule $t = \min(0.04\,R + 0.80\,I,\; 0.25\,R)$ applied a $1.30\times$ cold-start multiplier whenever \texttt{retained\_visits < 100}. Under external UCI \texttt{go ponder} hosts (\texttt{lichess-bot}), internal telemetry read \texttt{retained\_visits = 0}, inflating \emph{every move} by $1.30\times$ (${\sim}4.0$\,s early in $1+1$ bullet and $>1.3$\,s/move even at $8.8$\,s left).
+  \item \textbf{Spurious Ponder Cold-Start Inflation:} The legacy flat rule $t = \min(0.04\,R + 0.80\,I,\; 0.25\,R)$ applied a $1.30\times$ cold-start multiplier whenever \texttt{retained\_visits < 100}. Under external UCI \texttt{go ponder} hosts (\texttt{lichess-bot}), internal telemetry read \texttt{retained\_visits = 0}, inflating every move by $1.30\times$ (${\sim}4.0$\,s early in $1+1$ bullet and $>1.3$\,s/move at $8.8$\,s left).
   \item \textbf{Four-Gear Adaptive Clock Allocator:} We introduced a regime-aware allocator over effective remaining clock $R_e = \max(25\,\mathrm{ms},\; R - O)$ (default overhead $O = 150$\,ms) and increment $I$:
   \begin{equation}
     {\scriptsize
@@ -472,19 +446,22 @@ Because board-plane neural networks have no awareness of wall-clock pressure, li
     \end{cases}}
     \label{eq:clock}
   \end{equation}
-  where $H(\mathrm{ply}) \in \{38, 32, 28\}$ tightens across game phase under ceiling $C_{\mathrm{bul}} = \min(0.055\,R_e + 0.35\,I,\; 2200 + 0.30\,I)$ (reducing initial $1+1$ moves from $4{,}160$\,ms to $2{,}179$\,ms). Moderate ($6\text{--}15$\,s) and severe ($2\text{--}6$\,s) gears stay below $+1$\,s increment ($880$\,ms at $10$\,s; $560$\,ms at $4$\,s, banking $+440$\,ms/move), critical scrambles ($<2$\,s) snap at $\le 160$\,ms, external \texttt{go ponder} suppresses false cold-start inflation, and an \textbf{opponent flag-pressure multiplier} ($t \leftarrow 0.70\,t$) fires when $R_{\mathrm{opp}} < 8\,\mathrm{s}$ and $R_e \ge \max(4\,\mathrm{s},\, 1.8\,R_{\mathrm{opp}})$.
-  \item \textbf{MCTS Visit-Dominance Early Stopping:} Instant returns handle single legal moves, mate-in-1, and root Syzygy DTZ hits; every 8 batches ($128$ visits), root search terminates early on proven exact-solver wins, \emph{uncatchable leads} ($N_{(1)} - N_{(2)} > 1.10\,\widehat{\mathrm{NPS}}\,t_{\mathrm{rem}}$ with $Q_{(1)} \ge Q_{(2)} - 0.02$), \emph{dominant moves} ($N_{(1)} \ge 0.72\,N_{\mathrm{tot}}$, $N_{(1)} \ge 3.5\,N_{(2)}$ after $33\%$ budget), or \emph{clear consensus} ($N_{(1)} \ge 0.58\,N_{\mathrm{tot}}$, $N_{(1)} \ge 2.2\,N_{(2)}$, $Q_{(1)} \ge Q_{(2)} + 0.01$ after $52\%$ budget).
+  where $H(\mathrm{ply}) \in \{38, 32, 28\}$ tightens across game phase under ceiling $C_{\mathrm{bul}} = \min(0.055\,R_e + 0.35\,I,\; 2200 + 0.30\,I)$ (reducing initial $1+1$ moves from $4{,}160$\,ms to $2{,}179$\,ms). Moderate ($6\text{--}15$\,s) and severe ($2\text{--}6$\,s) gears stay below $+1$\,s increment ($880$\,ms at $10$\,s; $560$\,ms at $4$\,s), critical scrambles ($<2$\,s) snap at $\le 160$\,ms, external \texttt{go ponder} suppresses false cold-start inflation, and an opponent flag-pressure multiplier ($t \leftarrow 0.70\,t$) fires when $R_{\mathrm{opp}} < 8\,\mathrm{s}$ and $R_e \ge \max(4\,\mathrm{s},\, 1.8\,R_{\mathrm{opp}})$.
+  \item \textbf{MCTS Visit-Dominance Early Stopping:} Instant returns handle single legal moves, mate-in-1, and root Syzygy DTZ hits; every 8 batches ($128$ visits), root search terminates early on proven exact-solver wins, uncatchable leads ($N_{(1)} - N_{(2)} > 1.10\,\widehat{\mathrm{NPS}}\,t_{\mathrm{rem}}$ with $Q_{(1)} \ge Q_{(2)} - 0.02$), dominant moves ($N_{(1)} \ge 0.72\,N_{\mathrm{tot}}$, $N_{(1)} \ge 3.5\,N_{(2)}$ after $33\%$ budget), or clear consensus ($N_{(1)} \ge 0.58\,N_{\mathrm{tot}}$, $N_{(1)} \ge 2.2\,N_{(2)}$, $Q_{(1)} \ge Q_{(2)} + 0.01$ after $52\%$ budget).
   \item \textbf{Ponder Cache-Wave Retry \& Post-\texttt{ponderhit} Scaling:} Adding empty-wave cache retries fixed premature ponder exits on transposition-heavy lines, and post-\texttt{ponderhit} scaling shrinks post-hit think time to $18\%$ (or $45\%$) when $\ge 3\times$ (or $\ge 1.4\times$) budget nodes were already pondered.
 \end{enumerate}
-Verified by $12/12$ deterministic unit tests in \texttt{test\_uci\_time\_manager.py}, live rated $1+1$ bullet validation against $2414\text{--}2543$ Lichess bots went undefeated \textbf{$2\text{W}\text{--}5\text{D}\text{--}0\text{L}$ ($4.5/7$, provisional \texttt{2536?} Bullet)}, finishing every game with \textbf{$29.9$\,s--$76.7$\,s} remaining (including a 257-ply draw with $36.4$\,s left).
+Verified by $12/12$ deterministic unit tests (\texttt{test\_uci\_time\_manager.py}), live rated $1+1$ bullet validation against $2414\text{--}2543$ Lichess bots finished $2\text{W}\text{--}5\text{D}\text{--}0\text{L}$ ($4.5/7$, provisional \texttt{2536?} Bullet), ending every game with $29.9$\,s--$76.7$\,s remaining (including a 257-ply draw with $36.4$\,s left).
 
-\subsection{Three-Tier Decoupled Cloud Spot FinOps Pipeline}
+\subsection{Three-Tier Decoupled Cloud Spot FinOps Pipeline and Opening Slice Provenance}
 \label{app:finops}
-Training \texttt{Job~A} ($40$\,M positions, \texttt{10x192}) and \texttt{Job~B} ($300$\,M positions, \texttt{12x192}) under a strict personal budget ($<\$75$) used a decoupled three-tier AWS SageMaker Managed Spot architecture (\texttt{us-east-1}):
+Training the 40\,M \texttt{10x192-MidQAT} fine-tune and the 300\,M \texttt{12x192-MidQAT} expansion under a personal budget ($<\$75$) used a decoupled three-tier AWS SageMaker Managed Spot pipeline (\texttt{us-east-1}):
 \begin{enumerate}
-  \item \textbf{Tier 1 --- C++23 CPU Harvesters:} A zero-dependency C++23 \texttt{lc0\_v6\_converter} achieved \textbf{$445{,}067$ written pos/s} locally ($0$ illegal moves, max policy probability sum error $1.38 \times 10^{-7}$, max 18-plane error $5.96 \times 10^{-8}$ over 500 parity boards). Across two \texttt{ml.c5.4xlarge} Spot instances ($32$ vCPUs), harvesters streamed at $134{,}732$ agg.\ pos/s to upload $60 \times 2\text{M}$ blended shards ($70\%$ Lc0 T80 top-8 policy + MLH / $30\%$ Stockfish, $19.74$\,GB) to S3 for \textbf{${\sim}\$0.14$}.
-  \item \textbf{Tier 2 --- Prefetched BF16 Spot GPU Workers:} Workers on \texttt{ml.g6e.xlarge} (L40S 48\,GB Spot) and \texttt{ml.g5.2xlarge} (A10G 24\,GB Spot) used BF16 AMP, \texttt{channels\_last}, \texttt{torch.compile}, and double-buffered S3 prefetching, sustaining $63{,}331$\,pos/s (\texttt{A1}), $9{,}904$\,pos/s (\texttt{A2} fake-quantized QAT), and $33{,}269$\,pos/s ($280$\,M BF16) + $25{,}687$\,pos/s ($20$\,M QAT) for \texttt{Job~B 12x192}.
-  \item \textbf{Tier 3 --- Automated IAM FinOps Guardrails:} An independent watchdog (\texttt{NeuraChessGuard}) enforces hard spend limits (IAM deny-all freeze at $\$75$, job termination at $\$82$). Conservative cumulative cloud spend across all project stages totaled \textbf{$\$63.59$} (${\sim}\$16.6$ Phase~4 delta over $\$47.02$ prior spend), with IAM re-frozen immediately upon artifact download.
+  \item \textbf{Tier 1 --- C++23 CPU Harvesters:} A zero-dependency C++23 \texttt{lc0\_v6\_converter} achieved $445{,}067$ written pos/s locally ($0$ illegal moves, max policy probability sum error $1.38 \times 10^{-7}$, max 18-plane error $5.96 \times 10^{-8}$ over 500 parity boards). Across two \texttt{ml.c5.4xlarge} Spot instances ($32$ vCPUs), harvesters streamed at $134{,}732$ agg.\ pos/s to upload $60 \times 2\text{M}$ blended shards ($70\%$ Lc0 T80 top-8 policy + MLH / $30\%$ Stockfish, $19.74$\,GB) to S3 for ${\sim}\$0.14$.
+  \item \textbf{Tier 2 --- Prefetched BF16 Spot GPU Workers:} Workers on \texttt{ml.g6e.xlarge} (L40S 48\,GB Spot) and \texttt{ml.g5.2xlarge} (A10G 24\,GB Spot) used BF16 AMP, \texttt{channels\_last}, \texttt{torch.compile}, and double-buffered S3 prefetching, sustaining $63{,}331$\,pos/s (\texttt{10x192-Frozen}), $9{,}904$\,pos/s (\texttt{10x192-MidQAT} fake-quantized), and $33{,}269$\,pos/s ($280$\,M BF16) + $25{,}687$\,pos/s ($20$\,M QAT) for \texttt{12x192-MidQAT}.
+  \item \textbf{Tier 3 --- Automated IAM FinOps Guardrails:} An independent watchdog (\texttt{NeuraChessGuard}) enforces hard spend limits (IAM deny-all freeze at $\$75$, job termination at $\$82$). Conservative cumulative cloud spend across all stages totaled $\$63.59$ (${\sim}\$16.6$ delta for the \texttt{v1.1} runs over $\$47.02$ prior spend), with IAM re-frozen upon artifact download.
 \end{enumerate}
+
+\paragraph{Artifact and Opening-Slice Mapping.}
+In \texttt{eval\_results/}, unseen opening slices correspond to disjoint ranges of \texttt{openings\_\allowbreak 320.json}: Ladder Slices 1/2/3 map to \texttt{[0:25]}, \texttt{[25:50]}, and \texttt{[50:75]} (\texttt{v1\_1\_\allowbreak stockfish\_\allowbreak ladder\_\allowbreak 150g.json}); H2H Slices A/B/C map to \texttt{[75:100]}, \texttt{[100:125]}, and \texttt{[125:165]} (\texttt{phase4\_h2h\_\allowbreak a2int8\_\allowbreak vs\_346m\_\allowbreak 180g\_combined.json} and \texttt{phase4\_h2h\_\allowbreak a2\_qat\_\allowbreak int8\_vs\_\allowbreak a2\_fp16\_100g.json}); and fixed-node \texttt{go nodes 3500} maps to \texttt{[165:185]} (\texttt{v1\_1\_sf\_\allowbreak nodes3500\_40g.json}). Layerwise quantization, gear-shifting, and SEE diagnostics are archived in \texttt{research\_\allowbreak spikes.json}, \texttt{research\_\allowbreak spikes\_\allowbreak phase2.json}, and \texttt{research\_\allowbreak spikes\_\allowbreak phase3.json}.
 
 \end{document}
