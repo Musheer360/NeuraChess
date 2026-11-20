@@ -1538,7 +1538,7 @@ def run_job_b(args: argparse.Namespace, device: torch.device, s3_client, dirs: d
             except Exception as e:
                 print(f"  [Checkpoint Warning] {e}", flush=True)
 
-    # S3-first high-bandwidth double-buffered shard prefetcher (with seamless live-stream fallback)
+    # S3-first high-bandwidth double-buffered shard prefetcher (with live-stream fallback)
     pool_q: queue.Queue = queue.Queue(maxsize=4)
     stop_prod = threading.Event()
     s3_pref = args.s3_shard_prefix.strip("/")
@@ -1756,7 +1756,7 @@ def _mean_150k_val_mse(ev: dict) -> float:
 
 
 def run_job_c_10x192_mastery(args: argparse.Namespace, device: torch.device, s3_client, dirs: dict) -> None:
-    """400M-Position 10x192 Mastery Pipeline (360M unquantized BF16 + 40M Middle-2..7 W8A8 QAT)."""
+    """400M-Position 10x192 Pipeline (360M unquantized BF16 + 40M Middle-2..7 W8A8 QAT)."""
     tmp_dir: Path = dirs["tmp"]
     model_dir: Path = dirs["model"]
     ckpt_dir: Path = dirs["ckpt"]
@@ -1936,7 +1936,7 @@ def run_job_c_10x192_mastery(args: argparse.Namespace, device: torch.device, s3_
             cx = unpack_v1_tensor_to_inputs_and_meta(torch.from_numpy(mv1[:500].copy()))[0].numpy().astype(np.float32)
             calib_inputs = [cx[i : i + 1] for i in range(len(cx))]
 
-    # -------------------- Stage 1: 360M Unquantized BF16 Mastery --------------------
+    # -------------------- Stage 1: 360M Unquantized BF16 Training --------------------
     if not stage1_done:
         fwd_m10: nn.Module = m10
         if device.type == "cuda" and os.name != "nt":
@@ -1978,7 +1978,7 @@ def run_job_c_10x192_mastery(args: argparse.Namespace, device: torch.device, s3_
         # Reserve 40 min before hard MaxRuntimeInSeconds for Stage 1 exports + Stage 2 40M QAT + final eval
         s1_deadline = t0_job + max(600, args.max_runtime_sec - 2400)
         print(
-            f"\n=== [Job C Stage 1] Unquantized BF16 10x192 Mastery "
+            f"\n=== [Job C Stage 1] Unquantized BF16 10x192 Training "
             f"({stage1_pos:,} pos, B={args.batch_size}, cosine LR 8e-5 -> 4e-6) ===",
             flush=True,
         )

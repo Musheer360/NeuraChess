@@ -2,7 +2,7 @@
 
 NeuraChess is a neural chess engine targeting Intel Core Ultra **Intel AI Boost NPU** acceleration through OpenVINO, paired with an AVX2/BMI2 C++23 Structure-of-Arrays (SoA) batched PUCT search tree (`fast_tree`).
 
-Instead of relying on traditional alpha-beta hand-crafted heuristics, NeuraChess trains 18-plane Squeeze-and-Excitation residual networks (`ChessSEResNet`) with a parameter-efficient 73-plane spatial policy head (`Conv73`, mapping directly to the 4,672 AlphaZero move encodings) on packed bitboard datasets, folds BatchNorm affine parameters statically into FP16 OpenVINO IR weights, and executes asynchronous CPU tree traversal alongside batched NPU inference (`B=16`).
+NeuraChess trains 18-plane Squeeze-and-Excitation residual networks (`ChessSEResNet`) with a 73-plane spatial policy head (`Conv73`, mapping directly to the 4,672 AlphaZero move encodings) on packed bitboard datasets, folds BatchNorm affine parameters statically into FP16/INT8 OpenVINO IR weights, and runs CPU tree traversal alongside batched NPU inference (`B=16`).
 
 ---
 
@@ -11,23 +11,23 @@ Instead of relying on traditional alpha-beta hand-crafted heuristics, NeuraChess
 | Release | Model / Role | Cumulative Data | Raw NPU `B=16` | Real-Time Play (`400 ms/move`, Syzygy) | Clean Lichess Puzzles (`n=1,979`) |
 | --- | --- | ---: | ---: | --- | --- |
 | [`v1.0.2`](https://github.com/Musheer360/NeuraChess/releases/tag/v1.0.0) | `10x192-Scalar` (Pure FP16 Baseline) | 346M | `6.39 ms` | `3,275` eff. NPS; `37.50%` vs SF19 `3,500`n | `71.45%` / `79.38%` / `84.03%` / `95.96%`* |
-| **[`v1.1.0`](https://github.com/Musheer360/NeuraChess/releases/tag/v1.1.0)** | **`10x192-QAT-786M` (Default Real-Time Match Flagship)** | **786M** | **`5.34 ms`** | **`3,006.3` implied SF19 `UCI_Elo`** (`50.67%`, `46W–60D–44L`, `150g`), **`4,013.3` eff. NPS**, **`+107.6` Elo** (`65.0%`) vs `v1.0.2` FP16 | `67.00%` / `77.01%` / `83.63%` / `95.35%` |
+| **[`v1.1.0`](https://github.com/Musheer360/NeuraChess/releases/tag/v1.1.0)** | **`10x192-QAT-786M` (Default Real-Time Match Model)** | **786M** | **`5.34 ms`** | **`3,006.3` implied SF19 `UCI_Elo`** (`50.67%`, `46W–60D–44L`, `150g`), **`4,013.3` eff. NPS**, **`+107.6` Elo** (`65.0%`) vs `v1.0.2` FP16 | `67.00%` / `77.01%` / `83.63%` / `95.35%` |
 | **[`v1.2.0`](https://github.com/Musheer360/NeuraChess/releases/tag/v1.2.0)** | **`10x192-Q-1.00B` (Action-Value $Q$-FPU & Uncertainty Release)** | **1.00B** | **`5.57 ms`** (Lean 3-Out) | **`0.04578`** 150K GPU MSE (`-4.5%`); `+7.0` Elo (`51.0%`) single-variable $Q$-FPU control; `50.0%` natural parity vs `v1.1.0` | `67.96%` / `76.81%` / **`85.19%`** / **`95.76%`** (`2100+`: **`87.31%`**) |
 
-*(Research paper: [`paper/neurachess_npu_paper.pdf`](paper/neurachess_npu_paper.pdf) — "Mixed-Precision Neural MCTS and Multi-Shape Batching on a 3W Edge NPU"; live rated NPU games: [`lichess.org/@/NeuraChess-AI`](https://lichess.org/@/NeuraChess-AI). \*`v1.0.2` puzzle row ran on an un-decontaminated 2,000-puzzle pool; `v1.1.0` & `v1.2.0` use the strict leakage-free 1,979-puzzle benchmark.)*
+*(Research paper: [`paper/neurachess_npu_paper.pdf`](paper/neurachess_npu_paper.pdf), "Mixed-Precision Neural MCTS and Multi-Shape Batching on a 3W Edge NPU"; live rated NPU games: [`lichess.org/@/NeuraChess-AI`](https://lichess.org/@/NeuraChess-AI). \*`v1.0.2` puzzle row ran on an un-decontaminated 2,000-puzzle pool; `v1.1.0` & `v1.2.0` use the leakage-free 1,979-puzzle benchmark.)*
 
 ## Key Highlights
 
-- **`v1.1.0` Default Real-Time Match Flagship (`10x192-QAT-786M`, Middle `2..7` W8A8 QAT INT8):**
+- **`v1.1.0` Default Real-Time Match Model (`10x192-QAT-786M`, Middle `2..7` W8A8 QAT INT8):**
   - Combines sensitivity-guided Middle-Block (`2..7`) W8A8 QAT, 64-bin `HL-Gauss` distributional value supervision, and balanced 50/50 Lc0 T80 + Stockfish Multi-PV scaling to `786M` positions (`5.34 ms` raw `B=16` on Intel AI Boost NPU 3720).
   - Beats `v1.0.2` Pure FP16 by **`+107.6` Elo** (`65.00%`, `54W–22D–24L`, `0` double losses across 50 pairs, SPRT `ACCEPT_H1` **`LLR = +3.5739`**, `3,851.0` vs `3,251.9` unpondered NPS).
   - Scores **`50.67%`** (`46W–60D–44L`, 95% CI `[42.75%, 58.55%]`) across the **150-game Stockfish 19 `UCI_Elo` 2800 / 3000 / 3190 ladder** (**`3,006.3` mean implied `UCI_Elo`**, **`4,013.3` effective pondered NPS**), plus **`83.75%`** (`30W–7D–3L`) against uncapped Stockfish 19 at `go nodes 3500`.
 - **`v1.2.0` 1.00-Billion-Position Research Release (`10x192-Q-1.00B`, Action-Value $Q$-FPU & Uncertainty):**
   - Scales `10x192` to **1.00 Billion cumulative positions** with a parallel single-pass `Conv73` action-value head $Q_\theta(s,a)$ supervised in $\mathrm{atanh}$ logit space and gathered zero-copy in C++23 strictly over legal moves.
-  - Cuts unified 150K GPU Value MSE by **`-4.5%`** (`0.04794` $\to$ **`0.04578`**) and sets all-time clean Lichess puzzle records of **`85.19%`** (`1,686/1,979`) at `200n` and **`95.76%`** (`1,895/1,979`, `2100+` **`87.31%`**) at `800n` (`+1.11`–`+1.56 pp` from $Q$-FPU).
-  - Adds **`+0.0001 ms`** graph-folded 64-bin distributional uncertainty ($\sigma_V$, boosting 500 clean `200n` puzzles by `+2.00 pp` when median-centered at `0.35`) and Moves-Left (`MLH`) tie-breaking (**`-9.5` plies** faster average win conversion at `50.0%` H2H parity).
-- **C++23 `fast_tree` Search (`src/neurachess/engine/fast_tree`):** Zero-allocation cache-aligned SoA bitboard node arena with AVX2/BMI2 legal move generation (81/81 unit tests including CPW Perft & 2,000-position differential fuzzer), 5-piece Syzygy WDL/DTZ tablebase probing, Polyglot legal-EP 64-bit Zobrist canonical transposition neural cache (`64 MB`), safe subtree reuse, and exact minimax mate-distance propagation.
-- **Empirical Rigor:** Every architectural choice (`Conv73` vs dense policy, CNN vs transformer latency on NPU 3720, `B=16` vs `B=32`/`64`, FP16 vs PTQ/QAT W8A8, `10x192` vs `12x192` Elo inversion, `346M -> 786M -> 1.00B` scaling, and Stockfish 19 calibration) is documented with 95% Wilson CIs in [`paper/neurachess_npu_paper.pdf`](paper/neurachess_npu_paper.pdf) and [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
+  - Cuts unified 150K GPU Value MSE by **`-4.5%`** (`0.04794` $\to$ **`0.04578`**) and reaches **`85.19%`** (`1,686/1,979`) at `200n` and **`95.76%`** (`1,895/1,979`, `2100+` **`87.31%`**) at `800n` on the clean Lichess puzzle suite (`+1.11`–`+1.56 pp` from $Q$-FPU).
+  - Adds **`+0.0001 ms`** graph-folded 64-bin distributional uncertainty ($\sigma_V$, raising 500 clean `200n` puzzles by `+2.00 pp` when median-centered at `0.35`) and Moves-Left (`MLH`) tie-breaking (**`-9.5` plies** faster average win conversion at `50.0%` H2H parity).
+- **C++23 `fast_tree` Search (`src/neurachess/engine/fast_tree`):** Zero-allocation cache-aligned SoA bitboard node arena with AVX2/BMI2 legal move generation (81/81 unit tests including CPW Perft & 2,000-position differential fuzzer), 5-piece Syzygy WDL/DTZ tablebase probing, Polyglot legal-EP 64-bit Zobrist canonical transposition neural cache (`64 MB`), subtree reuse, and exact minimax mate-distance propagation.
+- **Empirical Documentation:** Architectural and search ablations (`Conv73` vs dense policy, CNN vs transformer latency on NPU 3720, `B=16` vs `B=32`/`64`, FP16 vs PTQ/QAT W8A8, `10x192` vs `12x192`, `346M -> 786M -> 1.00B` scaling, and Stockfish 19 calibration) are logged with 95% Wilson CIs in [`paper/neurachess_npu_paper.pdf`](paper/neurachess_npu_paper.pdf) and [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
 
 ---
 
@@ -41,7 +41,7 @@ Instead of relying on traditional alpha-beta hand-crafted heuristics, NeuraChess
                                     |
                                     v
 +-----------------------------------------------------------------------+
-|       Search Orchestrator (src/neurachess/search/npu_batched_puct.py) |
+|       Search Controller (src/neurachess/search/npu_batched_puct.py)   |
 |  - Dynamic UCI time & PonderManager (search/ponder_manager.py)        |
 |  - Exact minimax solver (mate_plies tracking, draw-safe propagation)  |
 |  - 64 MB Zobrist canonical NN cache (FPU=0.20, c_puct=1.5, T=1.0)     |
@@ -205,7 +205,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 *(All `v1.1.0` Stockfish 19 matches ran at `400 ms/move`, static `B=16`, `--ponder`, `--fpu-reduction 0.20`, `--max-plies 150 --adjudicate-material`, and 5-piece Syzygy tablebases on `openings_320`; note archived [`phase4_sf3000_openings320_apples_50g.json`](eval_results/phase4_sf3000_openings320_apples_50g.json) scoring `33.0%` was `Hybrid_Mid27 PTQ (no QAT)`, not `v1.0.2 Pure FP16`. All dataset splits contain 50,000 positions except `test_in_region_v2` with 49,998 and the 5,000-position `test_far_50k` NPU INT8 eval. Cross-entropy masks illegal move logits to `-10000.0`.)*
 
-**Scope & Caveat:** Stockfish `UCI_Elo` reflects Stockfish's internal calibrated node/time limiter rather than human tournament ratings or external CCRL pools, and individual 50-game rungs carry wide 95% Wilson intervals (`~±95 Elo` binomial half-width, ~190 Elo CI width at `n=50`). All `v1.0.0` Stockfish 19 matches above reflect `OwnBook=False` under fixed `400 ms/move` without Syzygy or `v1.0.2` cold-start `wtime`/`btime` buffering.
+**Scope & Caveat:** Stockfish `UCI_Elo` reflects Stockfish's internal calibrated node/time limiter, not human tournament ratings or external CCRL pools, and individual 50-game rungs carry wide 95% Wilson intervals (`~±95 Elo` binomial half-width, ~190 Elo CI width at `n=50`). All `v1.0.0` Stockfish 19 matches above reflect `OwnBook=False` under fixed `400 ms/move` without Syzygy or `v1.0.2` cold-start `wtime`/`btime` buffering.
 
 ---
 

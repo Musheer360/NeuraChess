@@ -31,7 +31,7 @@ NeuraChess uses the AlphaZero canonical **4,672-action encoding** (`64` source s
 - **Canonical Action Flip:** Black moves reflect vertically (`sq ^ 56`) so all policy heads learn White-oriented source/target geometry.
 
 **Conv73 vs Dense Policy Head:**
-Rather than flattening `C x 8 x 8 -> 4,672` with a giant fully connected projection (~9.5M parameters on `6x128` alone), `ChessSEResNet(policy_head="conv73")` emits a single `1x1` convolution from `C -> 73` channels followed by `(B, 73, 8, 8) -> permute(0, 2, 3, 1) -> reshape(B, 4672)`. This cut `6x128` parameter count by **5.39x** (`11.55M -> 2.14M`) and improved `B=16` NPU throughput by **+17.8%** (`5,080.7 -> 5,985.2 pos/s`).
+Instead of flattening `C x 8 x 8 -> 4,672` with a ~9.5M-parameter fully connected projection (on `6x128` alone), `ChessSEResNet(policy_head="conv73")` emits a single `1x1` convolution from `C -> 73` channels followed by `(B, 73, 8, 8) -> permute(0, 2, 3, 1) -> reshape(B, 4672)`. This cut `6x128` parameter count by **5.39x** (`11.55M -> 2.14M`) and improved `B=16` NPU throughput by **+17.8%** (`5,080.7 -> 5,985.2 pos/s`).
 
 ---
 
@@ -73,7 +73,7 @@ To saturate batched NPU execution without Python `chess.Board` allocation bottle
 
 ## 5. Runtime Auto-Tuner & Core Pinning (`src/neurachess/engine/npu_autotuner.py`)
 
-At startup, `NPUAutoTuner` can probe OpenVINO runtime scheduling, pin worker threads to performance CPU cores (avoiding cross-CCX/E-core jitter on hybrid Intel Core Ultra processors) when HighQoS affinity is enabled, and calibrate batch-16 throughput against device thermal/power states.
+At startup, `NPUAutoTuner` measures OpenVINO runtime scheduling, pins worker threads to performance CPU cores (avoiding cross-CCX/E-core jitter on hybrid Intel Core Ultra processors) when HighQoS affinity is enabled, and calibrates batch-16 throughput against device thermal/power states.
 
 ---
 

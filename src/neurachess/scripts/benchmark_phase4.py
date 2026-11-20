@@ -1,4 +1,4 @@
-"""Phase 4 Benchmarks: Syzygy Downloader, Beast NPU Backbones (B=1/4/8/16), & Cloud FinOps Audit."""
+"""Phase 4 Benchmarks: Syzygy Downloader, Expanded NPU Backbones (B=1/4/8/16), & Cloud FinOps Audit."""
 
 from __future__ import annotations
 
@@ -331,7 +331,7 @@ def _benchmark_single_beast_worker(spec: dict, private_root: Path, out_json: Pat
 def run_step2_beast_benchmarks(private_root: Path) -> dict:
     assert_ac_power()
     print("\n" + "=" * 96, flush=True)
-    print("PHASE 4 STEP 2: BEAST MIDDLE-INT8 HYBRID NPU BACKBONES (B=1/4/8/16, LATENCY, NPU_TURBO=YES)", flush=True)
+    print("PHASE 4 STEP 2: EXPANDED MIDDLE-INT8 HYBRID NPU BACKBONES (B=1/4/8/16, LATENCY, NPU_TURBO=YES)", flush=True)
     print("=" * 96, flush=True)
 
     results = []

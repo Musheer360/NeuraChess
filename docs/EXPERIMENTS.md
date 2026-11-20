@@ -80,7 +80,7 @@ Across the three 50k evaluation splits, `Full 346M 10x192` lowers legal-masked c
 
 3. **Pondering A/B vs Stockfish 19 `UCI_Elo 2800` (`400 ms/move`, 50 games each):**
    - `Ponder ON`: **62.00%** (`31.0/50`, CI `[48.15%, 74.14%]`), `785.7` mean starting retained nodes from opponent-turn pondering (`2,896.5` ponder NPS, `45.07%` top-1 / `74.78%` top-3 opponent-move ponder hit rate).
-   - `Ponder OFF`: **64.00%** (`32.0/50`, CI `[50.14%, 75.86%]`), `305.6` retained nodes from prior own search. Within statistical noise at 50 games; UCI exposes `Ponder` as an explicit runtime toggle.
+   - `Ponder OFF`: **64.00%** (`32.0/50`, CI `[50.14%, 75.86%]`), `305.6` retained nodes from prior own search. Within statistical noise at 50 games; UCI provides `Ponder` as an explicit runtime toggle.
 
 4. **Opening Root Top-K Guard (`use_opening_root_guard`, Rejected):**
    Gating opening root expansion to raw Policy Top-4 + `prior >= 0.08` recovered only **22 / 28** opening blunder positions (below the pre-registered `24 / 28` threshold; both arms scored `100 / 100` on Mate-in-1/2 and `291 / 300` on Mate-in-3). Per decision rule, `use_opening_root_guard` remains `False` by default.
@@ -88,7 +88,7 @@ Across the three 50k evaluation splits, `Full 346M 10x192` lowers legal-masked c
 5. **Root-Cause Diagnosis of Archived `Cont 346M 10x128` 50-Node Dip (`58.16%` -> `77.36%`):**
    Comparing exact archived benchmark configs showed why only `Cont 346M 10x128` dipped at `50n` (`58.16%`, `200n=74.89%`) while `6x128` (`70.54%`) and `Full 346M 10x192` (`79.38%`) did not: both `6x128` and `10x192` ran sequentially with `nireq=1` (`use_async_overlap=False`), whereas the archived `10x128` run used Step-3 autotuned `nireq=2` (`use_async_overlap=True, async_inflight=2`) with `fpu_reduction=0.25`. Controlled single-parameter ablation on the 1,979 clean puzzles (`50n`, `batch_size=16`) isolated the cause:
    - Sequential production defaults (`use_async_overlap=False, async_inflight=1, fpu_reduction=0.20`): **77.36%** (`1,531 / 1,979`, `avg_nodes=74.87`, `4.40` batches, `40.09s`), rising to **82.82%** at `200n` (`1,639 / 1,979`, `99.69s`).
-   - Sequential control with `fpu_reduction=0.25` (`use_async_overlap=False, async_inflight=1`): **77.36%** (`1,531 / 1,979`, `avg_nodes=74.85`, `4.40` batches, `39.56s`) — zero regression from `fpu_reduction=0.25`.
+   - Sequential control with `fpu_reduction=0.25` (`use_async_overlap=False, async_inflight=1`): **77.36%** (`1,531 / 1,979`, `avg_nodes=74.85`, `4.40` batches, `39.56s`), zero regression from `fpu_reduction=0.25`.
    - Single-parameter flip to async double-buffering (`use_async_overlap=True, async_inflight=2, fpu_reduction=0.20`): **58.67%** (`1,161 / 1,979`, `avg_nodes=61.57`, `3.57` batches, `33.03s`).
    - Archived config (`use_async_overlap=True, async_inflight=2, fpu_reduction=0.25`): **58.16%** (`1,151 / 1,979`, `avg_nodes=61.57`, `3.57` batches, `33.01s`), reproducing the published figure exactly.
 
@@ -147,9 +147,9 @@ All 44 lost games from the 150-game Stockfish 19 calibration (`2800 / 3000 / 319
 Building on the local NPU discovery that keeping sensitive boundary layers (`stem, blocks 0,1,N-2,N-1, SE gates, heads`) in FP16 while quantizing middle blocks (`res_2..7` on `10x192`, `res_2..9` on `12x192`) recovers PTQ value degradation, two SageMaker Spot runs trained with `HL-Gauss-64` distributional value + `MLH` auxiliary head on 60 blended shards:
 
 - **`Job A` (`A2` `10x192 Mid-2..7 QAT`, 40M positions):** Reached **`1.4589`** `far_test` Policy CE (`51.58%` Top-1 / `80.74%` Top-3 / `2.5658` HL-Gauss CE / `95.54%` Decisive Sign). In a **180-game paired H2H SPRT** (`openings_320[75:165]`, `400 ms/move`, static `B=16`, Syzygy), `A2_base` beat **`v1.0.2` Pure FP16 (`neurachess-10x192-fp16`)** by **`+56.5` Elo** (**`58.06%`**, `77W-55D-48L`, Wilson 95% CI `[50.75%, 65.02%]`, pentanomial `[2, 6, 49, 27, 6]`, SPRT `ACCEPT_H1` **`LLR = +3.8313 > 2.9444`**) at **`3,890.7` vs `3,253.9` NPS (`+19.6%`)** ([`phase4_h2h_a2int8_vs_346m_180g_combined.json`](../eval_results/phase4_h2h_a2int8_vs_346m_180g_combined.json)).
-- **`Job B` (`12x192 Mid-2..9 QAT`, 300M positions):** Function-preserving `10x192 -> 12x192` expansion verified **`0.000e+00`** Step-0 policy drift, trained `280M` FP/BF16 + `20M` Stage-3 QAT, and reached **`1.4474`** `far_test` Policy CE (`51.18%` Top-1 / `80.49%` Top-3 / `0.05950` Val MSE / `95.74%` Decisive Sign). However, in `400 ms/move` NPU matches vs `A2_base`, the deeper `12x192` lost **`39.00%`** (`2,673.1` vs `3,803.4` NPS) in `ema_09995` FP16 and **`48.00%`** (`16W-16D-18L`, `3,324.0` vs `3,868.4` NPS) in `Mid-2..9` INT8 ([`phase4_h2h_jobB_qat_int8_vs_a2int8_50g.json`](../eval_results/phase4_h2h_jobB_qat_int8_vs_a2int8_50g.json)). We ship `neurachess-12x192-qat-int8` as an optional deeper architecture alongside the faster `10x192` flagship.
+- **`Job B` (`12x192 Mid-2..9 QAT`, 300M positions):** Function-preserving `10x192 -> 12x192` expansion verified **`0.000e+00`** Step-0 policy drift, trained `280M` FP/BF16 + `20M` Stage-3 QAT, and reached **`1.4474`** `far_test` Policy CE (`51.18%` Top-1 / `80.49%` Top-3 / `0.05950` Val MSE / `95.74%` Decisive Sign). However, in `400 ms/move` NPU matches vs `A2_base`, the deeper `12x192` lost **`39.00%`** (`2,673.1` vs `3,803.4` NPS) in `ema_09995` FP16 and **`48.00%`** (`16W-16D-18L`, `3,324.0` vs `3,868.4` NPS) in `Mid-2..9` INT8 ([`phase4_h2h_jobB_qat_int8_vs_a2int8_50g.json`](../eval_results/phase4_h2h_jobB_qat_int8_vs_a2int8_50g.json)). We ship `neurachess-12x192-qat-int8` as an optional deeper architecture alongside the faster `10x192` default model.
 
-### 6.2 Local Zero-Retraining Synthesis (`v1.1.0` Default: `A2_soup75`)
+### 6.2 Local Zero-Retraining Synthesis (`v1.1.0` Initial Default: `A2_soup75`)
 Evaluating candidate improvements sequentially on Intel NPU 3720 across `5,000` `test_far_50k.bin` positions and all `1,979` clean Lichess puzzles (`eval_results/v1_1_step1_synthesis.json`):
 
 | Variant | `test_far` Top-1 / CE / MSE | Clean `1,979` `0n` | Clean `1,979` `200n` | Raw `B=16` (`pos/s`) | Verdict |
@@ -157,7 +157,7 @@ Evaluating candidate improvements sequentially on Intel NPU 3720 across `5,000` 
 | `A2_base` (S3 export) | `51.40%` / `1.4879` / `0.05697` | `68.17%` (`1,349`) | `82.67%` (`1,636`) | `2,890.2` | Baseline (`+56.5` Elo vs `346M`) |
 | `A2_recalib` (`v2` NNCF calib) | `51.30%` / **`1.4874`** / **`0.05691`** | `68.62%` (`1,358`) | `82.77%` (`1,638`) | **`3,000.8`** | Clean `gpu_unpack` calib gain |
 | `A2_detrunc` (`val_hl_z * 1.038`) | `51.30%` / `1.4874` / `0.05766` | `68.62%` (`1,358`) | `82.67%` (`1,636`) | `3,000.4` | Rejected (MSE & `200n` regressed) |
-| **`A2_soup75` (`0.75*A2 + 0.25*346M`)** | `50.78%` / `1.4911` / `0.05725` | **`68.72%`** (`1,360`) | **`83.07%`** (`1,644`) | `2,989.8` | **Promoted (`v1.1.0` Flagship)** |
+| **`A2_soup75` (`0.75*A2 + 0.25*346M`)** | `50.78%` / `1.4911` / `0.05725` | **`68.72%`** (`1,360`) | **`83.07%`** (`1,644`) | `2,989.8` | **Promoted (`v1.1.0` 386M Default)** |
 | `A2_pol_graft` (`346M` `pol_73`) | `50.88%` / `1.4900` / **`0.05691`** | `68.17%` (`1,349`) | `83.02%` (`1,643`) | `2,980.2` | Highest `2100+` `200n` (`66.75%`) |
 
 - **Head-to-Head Verification (`50` games, `openings_320[75:100]`, `400 ms/move`, static `B=16`, Syzygy):** `A2_soup75` beat `A2_base` **`54.00%`** (`16W-22D-12L`, Wilson 95% CI `[40.40%, 67.03%]`, pentanomial `[0, 6, 11, 6, 2]`, `0` double-losses) ([`v1_1_h2h_soup75_vs_a2base_50g.json`](../eval_results/v1_1_h2h_soup75_vs_a2base_50g.json)).
@@ -166,10 +166,10 @@ Evaluating candidate improvements sequentially on Intel NPU 3720 across `5,000` 
 *(Provenance Note: Archived [`phase4_sf3000_openings320_apples_50g.json`](../eval_results/phase4_sf3000_openings320_apples_50g.json) scoring `33.0%` was `Hybrid_Mid27 PTQ (no QAT)`, not `v1.0.2 Pure FP16`.)*
 
 - **Clean `1,979` Lichess Puzzles ([`v1_1_puzzles_clean1979.json`](../eval_results/v1_1_puzzles_clean1979.json)):** `0n`: **`68.72%`** (`1,360/1,979`), `50n`: **`78.27%`** (`1,549`, `3,064.2` NPS), `200n`: **`83.07%`** (`1,644`, `3,133.5` NPS), `800n`: **`95.65%`** (`1,893/1,979`, `3,387.1` NPS; `2100+`: `86.55%`).
-- **Stockfish 19 Calibration Ladder (`openings_320[0:75]`, `400 ms/move`, `--ponder`, `fpu_reduction=0.20`, `--max-plies 150 --adjudicate-material`, Syzygy — [`v1_1_stockfish_ladder_150g.json`](../eval_results/v1_1_stockfish_ladder_150g.json)):**
-  - `UCI_Elo 2800` (`[0:25]`, `50g`): **`74.00%`** (`29W-16D-5L`, CI `[60.45%, 84.13%]`, `3,898.9` eff NPS, implied `2981.7`) — up from `v1.0.0`'s `62.00%` (`OPENINGS_50`).
+- **Stockfish 19 Calibration Ladder (`openings_320[0:75]`, `400 ms/move`, `--ponder`, `fpu_reduction=0.20`, `--max-plies 150 --adjudicate-material`, Syzygy, [`v1_1_stockfish_ladder_150g.json`](../eval_results/v1_1_stockfish_ladder_150g.json)):**
+  - `UCI_Elo 2800` (`[0:25]`, `50g`): **`74.00%`** (`29W-16D-5L`, CI `[60.45%, 84.13%]`, `3,898.9` eff NPS, implied `2981.7`), up from `v1.0.0`'s `62.00%` (`OPENINGS_50`).
   - `UCI_Elo 3000` (`[25:50]`, `50g`): **`42.00%`** (`6W-30D-14L`, CI `[29.37%, 55.77%]`, **`4,025.1` eff NPS**), cutting losses down to `14`.
   - `UCI_Elo 3190` (`[50:75]`, `50g`): **`31.00%`** (`3W-25D-22L`, CI `[19.93%, 44.78%]`, **`4,039.6` eff NPS**, implied `3051.0`).
   - **Combined `150g`:** **`49.00%`** (`38W-71D-41L`), **`3,987.9` mean effective NPS**, **`2992.2`** mean implied Elo.
-- **Fixed-Node Uncapped Stockfish 19 Crossover (`go nodes 3500`, `openings_320[165:185]`, `40g`, `400 ms/move`, `--ponder`, Syzygy — [`v1_1_sf_nodes3500_40g.json`](../eval_results/v1_1_sf_nodes3500_40g.json)):**
-  - **`83.75%`** (**`30W-7D-3L`**, Wilson 95% CI **`[69.48%, 92.11%]`**, `3,771.0` eff NPS) — surging from `v1.0.2`'s **`37.50%`** (`9W-12D-19L`).
+- **Fixed-Node Uncapped Stockfish 19 Crossover (`go nodes 3500`, `openings_320[165:185]`, `40g`, `400 ms/move`, `--ponder`, Syzygy, [`v1_1_sf_nodes3500_40g.json`](../eval_results/v1_1_sf_nodes3500_40g.json)):**
+  - **`83.75%`** (**`30W-7D-3L`**, Wilson 95% CI **`[69.48%, 92.11%]`**, `3,771.0` eff NPS), up from `v1.0.2`'s **`37.50%`** (`9W-12D-19L`).

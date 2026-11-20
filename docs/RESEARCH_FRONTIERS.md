@@ -1,6 +1,6 @@
 # NeuraChess Research Frontiers & Architectural Audit (`v1.0.2` -> `v1.1`)
 
-This document audits the current **`NeuraChess v1.0.2`** codebase (`Full 346M 10x192 FP16`, C++23 AVX2/BMI2 `fast_tree`) against five next-generation research directions tailored to heterogeneous **Intel Core Ultra (P-core + Intel AI Boost NPU 3720)** execution.
+This document audits the **`NeuraChess v1.0.2`** codebase (`Full 346M 10x192 FP16`, C++23 AVX2/BMI2 `fast_tree`) against five candidate research directions for heterogeneous **Intel Core Ultra (P-core + Intel AI Boost NPU 3720)** execution.
 
 ---
 
@@ -18,7 +18,7 @@ Empirical telemetry from `v1.0.0`/`v1.0.2` establishes two structural bottleneck
 2. **Hardware Asymmetric Idle Telemetry (`10x192` FP16, `400 ms/move`, `B=16` Sequential):**
    - C++23 `fast_tree` reduced host CPU active time to **`34.97 ms/move`** (`8.56%` CPU busy duty cycle: `5.23 ms` pre-loop, `16.57 ms` AVX2 selection, `2.74 ms` dispatch, `10.43 ms` backup).
    - For **`373.64 ms/move` (`91.44%` of wall time)**, the Redwood Cove P-core thread sits idle blocked on OpenVINO NPU inference (`~6.46–6.84 ms` per `B=16` batch).
-   - Simply overlapping `nireq=2` async NPU batches (`use_async_overlap=True`) hurt fixed-node tactical accuracy by **`-18.69%`** on `10x128` 50n puzzles (`77.36% -> 58.67%`) due to virtual-loss selection staleness and shallower tree waves. Therefore, idle P-core cycles must be spent **inside each node/wave** (zero-staleness CPU micro-tactics or exact leaf shaping) rather than decoupling NPU queues.
+   - Overlapping `nireq=2` async NPU batches (`use_async_overlap=True`) hurt fixed-node tactical accuracy by **`-18.69%`** on `10x128` 50n puzzles (`77.36% -> 58.67%`) due to virtual-loss selection staleness and shallower tree waves. Idle P-core cycles must therefore be spent **inside each node/wave** (zero-staleness CPU micro-tactics or exact leaf shaping) instead of decoupling NPU queues.
 
 ---
 
@@ -36,7 +36,7 @@ Empirical telemetry from `v1.0.0`/`v1.0.2` establishes two structural bottleneck
   - If a capture wins material cleanly (`SEE >= +100 cp`), apply a small FPU boost (`fpu_bias = +0.05`), accelerating tactical threat discovery in the first 1–2 waves.
 
 ### (c) Expected Impact on Failures (`43.18%` Value/Search, `43.18%` Tactical Horizon)
-- **Tactical Horizon (`43.18%`):** High direct impact at shallow node budgets (`50–200n`) and early search waves—immediately suppresses foolish `QxP`-into-pawn/battery captures with low policy priors (`< 0.15`) and prioritizes `SEE >= +100` tactical captures for first-wave NPU verification.
+- **Tactical Horizon (`43.18%`):** Direct impact at shallow node budgets (`50–200n`) and early search waves: suppresses unsound `QxP`-into-pawn/battery captures with low policy priors (`< 0.15`) and prioritizes `SEE >= +100` tactical captures for first-wave NPU verification.
 - **Value/Search (`43.18%`):** Moderate positive secondary impact by shifting fixed-budget `NPU` batch slots away from refutable recapture blunders toward sound positional/tactical candidates in Policy Top-3 (though multi-move quiet tactical forks or non-capture blunders still require deeper lookahead or better value heads).
 
 ### (d) Exact Implementation Cost
@@ -54,7 +54,7 @@ Empirical telemetry from `v1.0.0`/`v1.0.2` establishes two structural bottleneck
 
 ### (b) What Is Genuinely Novel
 - Keep **`B=1`, `B=4`, `B=8`, and `B=16`** OpenVINO graphs compiled **simultaneously co-resident** on Intel NPU 3720 (`Total NPU alloc + host RSS ~160–215 MB` total across all 4 graphs).
-- Exploit the steep sub-linear latency curve of NPU 3720 (verified hardware numbers: `B=1` `0.81 ms`, `B=4` `1.94 ms`, `B=8` `3.46 ms`, `B=16` `6.84 ms`): `B=4` delivers **3.53x faster sequential turnaround latency** at `88.2%` of `B=16` throughput (`2,062 pos/s`), while `B=8` delivers **1.98x faster turnaround** at `98.8%` of `B=16` throughput (`2,310` vs `2,338 pos/s`).
+- Exploit the sub-linear latency curve of NPU 3720 (verified hardware numbers: `B=1` `0.81 ms`, `B=4` `1.94 ms`, `B=8` `3.46 ms`, `B=16` `6.84 ms`): `B=4` achieves **3.53x faster sequential turnaround latency** at `88.2%` of `B=16` throughput (`2,062 pos/s`), while `B=8` achieves **1.98x faster turnaround** at `98.8%` of `B=16` throughput (`2,310` vs `2,338 pos/s`).
 - Implement **entropy / tactical state-gated dynamic batch selection** in `fast_tree`:
   - **Low gear (`B=4` or `B=8`):** When the root/active subtree is **in check**, **few legal/forcing moves exist**, **policy entropy is low** (`H(P) < tau`), or `select_and_pack_native` encounters high collision/underfill (`n_eval <= 4` or `<= 8`), dispatch the `B=4`/`B=8` graph instead of burning `6.84 ms` on virtual-loss-diluted or padded `B=16` batches.
   - **High gear (`B=16`):** In broad, high-entropy middlegame positions with high leaf diversity (`n_eval > 8`), use `B=16` for peak raw NPS.
@@ -72,7 +72,7 @@ Empirical telemetry from `v1.0.0`/`v1.0.2` establishes two structural bottleneck
 ## 3. Layerwise Sensitivity-Guided Hybrid Quantization (`Blocks 2..7` INT8 + `Blocks 0,1,8,9` FP16)
 
 ### (a) What Is Already Implemented in `NeuraChess v1.0.2`
-- **All-or-Nothing Quantization (`src/neurachess/models/quantize_nncf.py` & `scripts/export_openvino.py`):** Exposes NNCF `compress_weights` (`W8A16_ASYM`) and uniform `nncf.quantize(..., fast_bias_correction=True)` without per-block sensitivity selection.
+- **All-or-Nothing Quantization (`src/neurachess/models/quantize_nncf.py` & `scripts/export_openvino.py`):** Supports NNCF `compress_weights` (`W8A16_ASYM`) and uniform `nncf.quantize(..., fast_bias_correction=True)` without per-block sensitivity selection.
 - **Documented Negative Results (`docs/EXPERIMENTS.md` §4):**
   - `B1_W8A8_Res3x3` (quantizing all 10 blocks `res_0..res_9` 3x3 convs + residual stream while ignoring stem/SE/heads): **90.96%** Top-1 agreement vs FP16, `Mean KL = 0.02198`, **`Max Value Diff = 0.9751`** (almost full `[-1, +1]` inversion!), failing the `>= 98.5%` gate.
   - `B2_W8A8_StemRes`: `91.18%` agreement, `Max Value Diff = 0.99182`.
@@ -105,8 +105,8 @@ Empirical telemetry from `v1.0.0`/`v1.0.2` establishes two structural bottleneck
 - **Replacing Blind FPU in `fast_tree`:** Instead of setting FPU identically for every unvisited child at a node (`Q_parent - c_fpu * sqrt(visited_mass)`), initialize each edge `(s, a)` with `fpu_i = mix(scalar_fpu, Q_theta(s, a))` directly inside `ChildSoAArena` (reusing the exact same `fpu_bias` lane added in Direction 1!). Wait-free **1-ply tactical lookahead across all legal moves in a single NPU pass**, costing 0 extra NPU inferences!
 
 ### (c) Expected Impact on Failures (`43.18%` Value/Search, `43.18%` Tactical Horizon)
-- **Tactical Horizon (`43.18%`):** **Very High impact** — if Policy Net mistakenly ranks a poisoned capture or tactical blunder #1/#2 (`prior > 0.15`), a learned `Q(s, a)` head directly sees the refutation evaluation (`Q(s, a_bad) = -0.80` vs `Q(s, a_best) = +0.10`) *before* spending tree visits, preventing tactical traps even under strict `50n` budgets.
-- **Value/Search (`43.18%`):** **High direct impact** — cures the "Top-3 prior exists, but PUCT wastes visits exploring wrong candidate or miscalibrated FPU fails to switch moves cleanly" failure mode cleanly in Category (a).
+- **Tactical Horizon (`43.18%`):** High expected impact: if the policy network ranks a poisoned capture or tactical blunder #1/#2 (`prior > 0.15`), a learned `Q(s, a)` head estimates the refutation value (`Q(s, a_bad) = -0.80` vs `Q(s, a_best) = +0.10`) before spending tree visits, reducing tactical traps even under `50n` budgets.
+- **Value/Search (`43.18%`):** Direct expected impact: addresses cases where a Top-3 prior exists but PUCT spends visits on an inferior candidate due to scalar FPU.
 
 ### (d) Exact Implementation Cost
 - **Training Cost:** Requires training/fine-tuning a new checkpoint with the 2nd `Conv73` head (~$100–$300 cloud GPU fine-tune over sidecar-equipped 346M/subset shards, NOT executed in this `$0` local spike).
@@ -126,7 +126,7 @@ Empirical telemetry from `v1.0.0`/`v1.0.2` establishes two structural bottleneck
 
 ### (c) Expected Impact on Failures (`43.18%` Value/Search, `43.18%` Tactical Horizon)
 - **Value/Search (`43.18%`):** **High impact** on sharp tactical positions where Stockfish eval flips discontinuously between `+200 cp` and `-400 cp` across minor subtleties: categorical HL-Gauss cross-entropy produces cleaner gradients and higher sensitivity to sharp tactical swings without scalar MSE mean-collapse. MLH directly targets the remaining `2.27%` endgame grind and forcing mate conversion speed.
-- **Tactical Horizon (`43.18%`):** **Low-to-moderate indirect impact** — improves static leaf calibration, though single-position evaluation still requires search depth (`Spike 2`) and capture/tactical urgency (`Spike 1`, `Direction 4`) to look past quiet horizon tactics.
+- **Tactical Horizon (`43.18%`):** Low-to-moderate indirect impact: improves static leaf calibration, though single-position evaluation still requires search depth (`Spike 2`) and tactical urgency (`Spike 1`, `Direction 4`) to look past quiet horizon tactics.
 
 ### (d) Exact Implementation Cost
 - **Training Cost:** Requires retraining or warm-start head distillation on the 346M Lichess shards + game-length labels (`> $0`, deferred past local NPU spikes).
@@ -150,17 +150,17 @@ Empirical telemetry from `v1.0.0`/`v1.0.2` establishes two structural bottleneck
 
 All raw measurements are archived in [`eval_results/research_spikes.json`](../eval_results/research_spikes.json) (`$0` cloud spend):
 
-1. **Spike 1 — C++23 Bitboard SEE (`use_see_prior_shaping`):**
+1. **Spike 1: C++23 Bitboard SEE (`use_see_prior_shaping`):**
    - `CBoard::see()` verified **56 / 56** tactical exchange positions at **`37.85 ns/call`** (`0.038 us`).
    - **Negative Result on FPU Shaping Rule:** Enabling `use_see_prior_shaping=True` (`-0.15` FPU penalty on `SEE < -100, P < 0.15`; `+0.05` FPU boost on `SEE >= +100`) slightly regressed 500 stratified Lichess puzzles (**`78.20%` vs `78.80%`** at `50n`; **`82.00%` vs `82.20%`** at `200n`), increased 200n Category (c) `>= 150 cp` blunders (`6/19 -> 7/19`, mean drop `127.16 -> 134.42 cp`), and increased Category (a) mean drop (`33.63 -> 38.79 cp`). Flag stays **`False`**.
 
-2. **Spike 2 — Dual-Shape NPU Gear-Shifting (`B=1, 4, 8, 16` Co-Resident):**
+2. **Spike 2: Dual-Shape NPU Gear-Shifting (`B=1, 4, 8, 16` Co-Resident):**
    - Co-resident footprint: **`59.09 MB`** NPU alloc / **`172.38 MB`** host delta RSS across all 4 graphs; turnaround latencies **`0.737 ms`** (`B=1`, `1,357 pos/s`), **`1.887 ms`** (`B=4`, `2,120 pos/s`), **`3.379 ms`** (`B=8`, `2,367 pos/s`), **`6.282 ms`** (`B=16`, `2,547 pos/s`).
    - At `400 ms/move`, Mate-in-3 (`n=100`) held **`97/100 (97.00%)`** with `30.7%` fewer batches (`11.68 -> 8.10`), higher `avg_ply` (`1.739 -> 2.192`), and global max ply `14 -> 15`. On Category (c) (`n=19`), wave count jumped **`2.54x`** (`67.32 -> 171.11` batches/move), `avg_ply` rose (`6.465 -> 6.703`), and `>= 150 cp` blunders fell (`5/19 -> 4/19`), though over-aggressive `B=4` triggering (`3,069 / 3,251` batches = `94.4%`) lowered total evaluated nodes (`1,187.58 -> 838.53`) and `SF_best` matches (`11/19 -> 10/19`). Needs tighter entropy/check thresholds before enabling by default (`use_dynamic_batch_shift=False`).
 
-3. **Spike 3 — Block-Wise Quantization Sensitivity Profile (NPU 3720):**
+3. **Spike 3: Block-Wise Quantization Sensitivity Profile (NPU 3720):**
    - Single-block scan (`500` calib) pinpointed the two failure sources in prior uniform W8A8: **`Block 9`** alone causes **`0.013042`** policy KL (vs `0.000462–0.001436` for blocks `0–8`), and **`Block 1`** alone triggers the **`0.92645`** `Max Value Diff` outlier spike.
-   - Keeping blocks `0, 1, 8, 9` and residual skip adds `.*_out_.*` in FP16 (`Hybrid_Middle_2_to_7_ConvOnly`, `2,000` calib) raised 5,000-pos Far-Test Top-1 agreement from **`90.96%`** (Full PTQ) / **`92.52%`** (QAT) to **`95.52%`**, cut Mean Policy KL **4.5x** (`0.021977 -> 0.004891`), cut Max Value Diff **41.6%** (`0.97510 -> 0.56921`), and delivered **`2,997.1`** added visits/s (**`+16.2%`** vs FP16 `2,578.8`)—yet still fell short of the historical `>= 98.5%` Top-1 gate.
+   - Keeping blocks `0, 1, 8, 9` and residual skip adds `.*_out_.*` in FP16 (`Hybrid_Middle_2_to_7_ConvOnly`, `2,000` calib) raised 5,000-pos Far-Test Top-1 agreement from **`90.96%`** (Full PTQ) / **`92.52%`** (QAT) to **`95.52%`**, cut Mean Policy KL **4.5x** (`0.021977 -> 0.004891`), cut Max Value Diff **41.6%** (`0.97510 -> 0.56921`), and reached **`2,997.1`** added visits/s (**`+16.2%`** vs FP16 `2,578.8`), though still below the historical `>= 98.5%` Top-1 gate.
 
 ---
 
@@ -168,7 +168,7 @@ All raw measurements are archived in [`eval_results/research_spikes.json`](../ev
 
 All raw Phase 2 telemetry is recorded in [`eval_results/research_spikes_phase2.json`](../eval_results/research_spikes_phase2.json). `use_see_prior_shaping=False` remains the default production setting ("Bitter Lesson": learned 346M priors outperform static SEE shaping).
 
-### 1. Spike 2 Refinement — Strict Collision-Bounded & Cold-Start Gear-Shifting
+### 1. Spike 2 Refinement: Collision-Bounded & Cold-Start Gear-Shifting
 Replaced all entropy / concentration triggers in [fast_tree.cpp](../src/neurachess/engine/fast_tree/fast_tree.cpp) (`ft_select_dynamic_native`, `ft_pack_inflight_batch_native`) with three strict triggers:
 - **(a) Cold-Start Ramp (`reason=1`):** `root.visit_count < 16` → `B=4`
 - **(b) Narrow Root (`reason=2`):** root is in check or `<= 5` legal moves → `B=4`
@@ -186,8 +186,8 @@ Replaced all entropy / concentration triggers in [fast_tree.cpp](../src/neurache
 | 500 Puzzles @ `200 ms` | `gear_shift_v2_collision_cold` | **`478/500 (95.60%)`** | — | — | `207,190` (`414.4`) | **`5.86 / 10.60`** | `58.51% / 6.03% / 35.45%` |
 
 **Diagnosis:**
-- **Ultra-short / forced-tactics regime wins decisively:** Cold-start `B=4` waves lift `50 ms` puzzle accuracy by **`+9.00%`** (`405 -> 450 / 500`) and push average search depth from `2.21` to `3.76` plies (`4.33 -> 7.58` max ply), and still improve `200 ms` solve rate from `94.20%` to **`95.60%`**.
-- **Why `B=16` landed at `69.50%` (Cat c) / `58.51%` (200 ms puzzles) instead of `>= 80%`:** Rule (b) (`reason=2`) locks any root-in-check position at `B=4` permanently across the entire 400 ms search (`198/1413 = 14.01%` batches from a single check FEN #17 in Cat (c), `197/1414 = 13.93%` from FEN #6 in Cat (a), and `3,026/16,343 = 18.52%` in 200 ms puzzles). Across the 18 non-check FENs in Cat (c), `B=16` share was `80.8%`. Furthermore, `gear_shift_v2` runs synchronous `zc_cur[0].infer()`, forfeiting the ~6% double-buffering throughput gain of `baseline_b16_prod_db`. Future v1.1 optimization should gate Narrow Root `in_check` to `root.visit_count < 32` and retain async double-buffering on steady `B=16` waves.
+- **Ultra-short / forced-tactics regime:** Cold-start `B=4` waves lift `50 ms` puzzle accuracy by **`+9.00%`** (`405 -> 450 / 500`) and push average search depth from `2.21` to `3.76` plies (`4.33 -> 7.58` max ply), and still improve `200 ms` solve rate from `94.20%` to **`95.60%`**.
+- **Why `B=16` landed at `69.50%` (Cat c) / `58.51%` (200 ms puzzles) instead of `>= 80%`:** Rule (b) (`reason=2`) locks any root-in-check position at `B=4` permanently across the entire 400 ms search (`198/1413 = 14.01%` batches from a single check FEN #17 in Cat (c), `197/1414 = 13.93%` from FEN #6 in Cat (a), and `3,026/16,343 = 18.52%` in 200 ms puzzles). Across the 18 non-check FENs in Cat (c), `B=16` share was `80.8%`. Also, `gear_shift_v2` runs synchronous `zc_cur[0].infer()`, forfeiting the ~6% double-buffering throughput gain of `baseline_b16_prod_db`. Future v1.1 optimization should gate Narrow Root `in_check` to `root.visit_count < 32` and retain async double-buffering on steady `B=16` waves.
 
 ---
 
@@ -200,7 +200,7 @@ Evaluated against actual Stockfish ground-truth labels on `5,000` `test_far_50k.
 | `Hybrid_Middle_2_to_7_ConvOnly` (`15.33 MB` IR) | `[2,3,4,5,6,7]` | **`50.54%`** | `1.6215` | **`0.06085`** | `95.52% / 0.004891 / 0.56921` | **`447/500 (89.40%)`**, **`139,248n`**, **`3,212.8 nps`** | `413/500 (82.60%)` | **`3,098.5`** (`+19.7%`) |
 | `Hybrid_Safe4_2356_ConvOnly` (`19.13 MB` IR) | `[2,3,5,6]` | **`50.54%`** | `1.6190` | `0.06143` | `96.40% / 0.003075 / 0.54297` | `441/500 (88.20%)`, `132,160n`, `3,016.1 nps` | **`414/500 (82.80%)`** | `2,920.7` (`+12.9%`) |
 
-**Key Conclusion:** Ground-truth evaluation overturns the FP16-agreement proxy objection: **`Hybrid_Middle_2_to_7_ConvOnly`** matches or slightly beats `V0_Pure_FP16` on actual Stockfish Top-1 (`50.54%` vs `50.46%`), Top-3 (`79.54%` vs `79.44%`), Decisive Sign (`93.67%` vs `93.49%`), and Value MSE (`0.06085` vs `0.06117`), while delivering **`+19.7%` higher added NPS (`3,098.5` vs `2,588.0`)** and solving **`+19` more clean puzzles (`85.60% -> 89.40%`)** at fixed `100 ms/puzzle` (`139,248` vs `118,665` total nodes, `mean_max_ply 7.07 -> 8.04`).
+**Key Conclusion:** Ground-truth evaluation overturns the FP16-agreement proxy objection: **`Hybrid_Middle_2_to_7_ConvOnly`** matches or slightly beats `V0_Pure_FP16` on actual Stockfish Top-1 (`50.54%` vs `50.46%`), Top-3 (`79.54%` vs `79.44%`), Decisive Sign (`93.67%` vs `93.49%`), and Value MSE (`0.06085` vs `0.06117`), with **`+19.7%` higher added NPS (`3,098.5` vs `2,588.0`)** and **`+19` more clean puzzles solved (`85.60% -> 89.40%`)** at fixed `100 ms/puzzle` (`139,248` vs `118,665` total nodes, `mean_max_ply 7.07 -> 8.04`).
 
 ---
 
@@ -215,9 +215,9 @@ Compiled & benchmarked experimental heads (`B=16`, `LATENCY`, `NPU_TURBO=True`, 
 | `dual_conv73_policy_q_only` | `13.13 MB` | `Policy [16,4672], Q [16,4672]` | `6.437 ms` | `6.321 / 6.600 ms` | `+0.050 ms (+0.79%)` | `2,485.8 pos/s` |
 
 **Training Data Readiness (Verified Local Disk + Read-Only S3 Audit):**
-- **HL-Gauss-64 Value Head:** **Ready (`eval_cp` present in all 107B v1 & 691B v2 shards)** — `1M` `691B` v2 positions (`v2_shards_1m/shard_{000,001}.bin`, `659.0 MiB` total) exist both locally and at `s3://neurachess-spot-162290422654-us-east-1/data/shards/`, plus `107B` v1 eval sets & local training samples (`sample_shard_{000,040}.bin`, `overnight_shards/`, `train_300k.bin`). Note `s3://.../data/shards_s1/` has `0` objects (`0 Bytes`).
-- **Moves-Left Head (MLH):** **Not in position shards** — fixed 107B/691B records have no remaining game-length/ply labels; requires PGN or self-play trajectory extraction.
-- **Conv73 Action-Value $Q(s,a)$ Head:** **Requires MultiPV sidecar generation** — **zero `.sidecar.bin` files** exist locally or in `s3://neurachess-spot-162290422654-us-east-1/`. Supervising all legal moves per position requires running Stockfish MultiPV sidecar generation or MCTS leaf-value distillation.
+- **HL-Gauss-64 Value Head:** **Ready (`eval_cp` present in all 107B v1 & 691B v2 shards):** `1M` `691B` v2 positions (`v2_shards_1m/shard_{000,001}.bin`, `659.0 MiB` total) exist both locally and at `s3://neurachess-spot-162290422654-us-east-1/data/shards/`, plus `107B` v1 eval sets & local training samples (`sample_shard_{000,040}.bin`, `overnight_shards/`, `train_300k.bin`). Note `s3://.../data/shards_s1/` has `0` objects (`0 Bytes`).
+- **Moves-Left Head (MLH):** **Not in position shards:** fixed 107B/691B records have no remaining game-length/ply labels; requires PGN or self-play trajectory extraction.
+- **Conv73 Action-Value $Q(s,a)$ Head:** **Requires MultiPV sidecar generation:** **zero `.sidecar.bin` files** exist locally or in `s3://neurachess-spot-162290422654-us-east-1/`. Supervising all legal moves per position requires running Stockfish MultiPV sidecar generation or MCTS leaf-value distillation.
 
 ---
 
@@ -264,9 +264,9 @@ Using [`train_hl_gauss_value.py`](../src/neurachess/training/train_hl_gauss_valu
 ---
 
 ### 3. Validation Matches (`400 ms/move`, AC Power)
-- **Step 3A — `60`-Game H2H (`OPENINGS_50[:30]`, `use_ponder=False`):**
+- **Step 3A (`60`-Game H2H, `OPENINGS_50[:30]`, `use_ponder=False`):**
   - `Hybrid_Mid27_ConvOnly + gear_shift_v3` vs `v1.0.2 (V0_Pure_FP16, B=16)`: **`35.5 / 60` (`59.17%`, `W=21 D=29 L=10`)**, Wilson 95% CI `[46.55%, 70.68%]`, Pentanomial `[2, 1, 14, 10, 3]`, SPRT LLR `+0.9349` (`[0, 20]` Elo bounds), **`4,092.4 NPS`** vs **`3,314.4 NPS`** (`+23.5%`). Passed the `>= 53.0%` gate.
-- **Step 3B — `50`-Game vs Stockfish 19 `UCI_Elo 3000` (`OPENINGS_50[:25]`, `use_ponder=True`, `max_plies=220`):**
+- **Step 3B (`50`-Game vs Stockfish 19 `UCI_Elo 3000`, `OPENINGS_50[:25]`, `use_ponder=True`, `max_plies=220`):**
   - `Hybrid_Mid27_ConvOnly + gear_shift_v3`: **`15.0 / 50` (`30.00%`, `W=3 D=24 L=23`)**, Wilson 95% CI `[19.10%, 43.75%]`, **`effective_nps = 4,108.0`** (vs historical `49.00%`, `24.5/50` in `step4_stockfish_ladder_final.json`).
 - **Opening-Suite Control Check (`20` games, `OPENINGS_50[:10]`, `400 ms/move`, `use_ponder=True` vs SF 19 `UCI_Elo 3000`):**
   - `v1.0.2` (`V0_Pure_FP16`, `B=16`) scored **`5.5 / 20` (`27.50%`, `W=0 D=11 L=9`, `3,340.8 NPS`)** on the exact same first 10 `OPENINGS_50` pairs where Phase 3 scored **`5.0 / 20` (`25.00%`, `W=0 D=10 L=10`)**. This isolates the `30.0%` vs `49.0%` difference primarily to `OPENINGS_50` GM mainline openings + `220`-ply play vs `step4`'s randomized `openings_320[75:100]` (`max_plies=150` + material adjudication), while Phase 3 demonstrated **`+59.17%` H2H (`+64.5` Elo)** over `v1.0.2` and `+8.0% / +7.0%` gains on `50/100 ms` tactics.
