@@ -270,9 +270,9 @@
 
   <header>
     <div class="brand">
-      <span style="font-size: 1.8rem;">♟️</span>
+      <span style="font-size: 1.8rem;">&#9823;</span>
       <h1>NeuraChess Live Arena</h1>
-      <span class="badge-npu">⚡ NPU Accelerated</span>
+      <span class="badge-npu">NPU Accelerated</span>
     </div>
     <div style="font-size: 0.85rem; color: var(--text-muted);">
       Hardware: <strong>Intel(R) AI Boost NPU</strong> vs <strong>Intel Core Ultra CPU</strong>
@@ -285,7 +285,7 @@
       <!-- Player 2 (Black - CPU) -->
       <div class="player-card" id="card-black">
         <div class="player-info">
-          <div class="player-avatar">🖥️</div>
+          <div class="player-avatar" style="font-size: 0.85rem; font-weight: 700;">SF</div>
           <div>
             <div class="player-name">Stockfish 19</div>
             <div class="player-hardware">Intel Core Ultra 5 125U (CPU)</div>
@@ -303,9 +303,9 @@
       <!-- Player 1 (White - NPU) -->
       <div class="player-card active" id="card-white">
         <div class="player-info">
-          <div class="player-avatar">🧠</div>
+          <div class="player-avatar" style="font-size: 0.85rem; font-weight: 700;">NC</div>
           <div>
-            <div class="player-name">NeuraChess v2.0</div>
+            <div class="player-name">NeuraChess</div>
             <div class="player-hardware">
               <span id="npu-badge" style="background:#1f6feb;color:#fff;padding:2px 6px;border-radius:4px;font-weight:700;font-size:0.7rem;">NPU 3720 ONLY</span>
               <span id="npu-status" style="margin-left:6px;color:#3fb950;font-weight:600;">IDLE</span>
@@ -336,12 +336,12 @@
         </div>
 
         <div class="control-row">
-          <label for="npu-think-time">NPU Sustained Think Time (Max Saturation):</label>
+          <label for="npu-think-time">NPU Think Time:</label>
           <select id="npu-think-time" onchange="updateSettings()">
             <option value="200">200 ms (Rapid)</option>
             <option value="600" selected>600 ms (Sustained ~4,000 pos)</option>
-            <option value="1200">1,200 ms (Max NPU ~8,000 pos)</option>
-            <option value="2000">2,000 ms (Extreme NPU Saturation)</option>
+            <option value="1200">1,200 ms (~8,000 pos)</option>
+            <option value="2000">2,000 ms (Extended)</option>
           </select>
         </div>
 
@@ -352,7 +352,7 @@
             <option value="3" selected>Skill Level 3 (Club ~1450)</option>
             <option value="5">Skill Level 5 (Intermediate ~1650)</option>
             <option value="10">Skill Level 10 (Advanced ~1900)</option>
-            <option value="20">Skill Level 20 (Grandmaster Max)</option>
+            <option value="20">Skill Level 20 (Max)</option>
           </select>
         </div>
 
@@ -361,7 +361,7 @@
           <select id="move-delay" onchange="updateSettings()">
             <option value="0.3">Fast (0.3s)</option>
             <option value="0.8" selected>Normal (0.8s)</option>
-            <option value="1.5">Cinematic (1.5s)</option>
+            <option value="1.5">Slow (1.5s)</option>
           </select>
         </div>
       </div>
@@ -473,7 +473,7 @@
       const npuStatus = document.getElementById('npu-status');
       if (npuStatus) {
         if (state.npu_active) {
-          npuStatus.innerText = '⚡ ACTIVE (NPU COMPUTING)';
+          npuStatus.innerText = 'ACTIVE (NPU COMPUTING)';
           npuStatus.style.color = '#58a6ff';
         } else {
           npuStatus.innerText = 'IDLE';
@@ -500,10 +500,10 @@
       const statusEl = document.getElementById('status-text');
       if (state.game_over) {
         statusEl.className = 'status-banner winner';
-        statusEl.innerText = `🏆 ${state.termination}`;
+        statusEl.innerText = `${state.termination}`;
       } else if (state.is_running) {
         statusEl.className = 'status-banner';
-        const actor = state.turn === 'white' ? '🧠 NeuraChess calculating on Intel AI Boost NPU...' : '🖥️ Stockfish calculating on CPU...';
+        const actor = state.turn === 'white' ? 'NeuraChess calculating on Intel AI Boost NPU...' : 'Stockfish calculating on CPU...';
         statusEl.innerText = `Move ${state.move_number}: ${actor}`;
       }
 

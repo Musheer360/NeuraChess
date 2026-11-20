@@ -16,7 +16,7 @@ NeuraChess trains 18-plane Squeeze-and-Excitation residual networks (`ChessSERes
 
 *(Research paper: [`paper/neurachess_npu_paper.pdf`](paper/neurachess_npu_paper.pdf), "Mixed-Precision Neural MCTS and Multi-Shape Batching on a 3W Edge NPU"; live rated NPU games: [`lichess.org/@/NeuraChess-AI`](https://lichess.org/@/NeuraChess-AI). \*`v1.0.2` puzzle row ran on an un-decontaminated 2,000-puzzle pool; `v1.1.0` & `v1.2.0` use the leakage-free 1,979-puzzle benchmark.)*
 
-## Key Highlights
+## Summary
 
 - **`v1.1.0` Default Real-Time Match Model (`10x192-QAT-786M`, Middle `2..7` W8A8 QAT INT8):**
   - Combines sensitivity-guided Middle-Block (`2..7`) W8A8 QAT, 64-bin `HL-Gauss` distributional value supervision, and balanced 50/50 Lc0 T80 + Stockfish Multi-PV scaling to `786M` positions (`5.34 ms` raw `B=16` on Intel AI Boost NPU 3720).
@@ -27,7 +27,7 @@ NeuraChess trains 18-plane Squeeze-and-Excitation residual networks (`ChessSERes
   - Cuts unified 150K GPU Value MSE by **`-4.5%`** (`0.04794` $\to$ **`0.04578`**) and reaches **`85.19%`** (`1,686/1,979`) at `200n` and **`95.76%`** (`1,895/1,979`, `2100+` **`87.31%`**) at `800n` on the clean Lichess puzzle suite (`+1.11`–`+1.56 pp` from $Q$-FPU).
   - Adds **`+0.0001 ms`** graph-folded 64-bin distributional uncertainty ($\sigma_V$, raising 500 clean `200n` puzzles by `+2.00 pp` when median-centered at `0.35`) and Moves-Left (`MLH`) tie-breaking (**`-9.5` plies** faster average win conversion at `50.0%` H2H parity).
 - **C++23 `fast_tree` Search (`src/neurachess/engine/fast_tree`):** Zero-allocation cache-aligned SoA bitboard node arena with AVX2/BMI2 legal move generation (81/81 unit tests including CPW Perft & 2,000-position differential fuzzer), 5-piece Syzygy WDL/DTZ tablebase probing, Polyglot legal-EP 64-bit Zobrist canonical transposition neural cache (`64 MB`), subtree reuse, and exact minimax mate-distance propagation.
-- **Empirical Documentation:** Architectural and search ablations (`Conv73` vs dense policy, CNN vs transformer latency on NPU 3720, `B=16` vs `B=32`/`64`, FP16 vs PTQ/QAT W8A8, `10x192` vs `12x192`, `346M -> 786M -> 1.00B` scaling, and Stockfish 19 calibration) are logged with 95% Wilson CIs in [`paper/neurachess_npu_paper.pdf`](paper/neurachess_npu_paper.pdf) and [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
+- **Documentation and Logs:** Architectural and search ablations (`Conv73` vs dense policy, CNN vs transformer latency on NPU 3720, `B=16` vs `B=32`/`64`, FP16 vs PTQ/QAT W8A8, `10x192` vs `12x192`, `346M -> 786M -> 1.00B` scaling, and Stockfish 19 calibration) are logged with 95% Wilson CIs in [`paper/neurachess_npu_paper.pdf`](paper/neurachess_npu_paper.pdf) and [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md).
 
 ---
 

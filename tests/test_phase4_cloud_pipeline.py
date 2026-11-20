@@ -1,4 +1,4 @@
-"""Comprehensive tests for Phase 4 Cloud Spot data converters, models, QAT, expansion, and OV/NNCF export."""
+"""Unit tests for Phase 4 Cloud Spot data converters, models, QAT, expansion, and OV/NNCF export."""
 
 from __future__ import annotations
 

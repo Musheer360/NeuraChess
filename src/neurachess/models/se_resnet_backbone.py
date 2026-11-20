@@ -303,7 +303,7 @@ def build_openvino_research_head_variant(
     se_reduction: int = 4,
     weights_dict: dict[str, np.ndarray] | None = None,
 ) -> ov.Model:
-    """Construct experimental Next-Gen head graphs on top of the SE-ResNet backbone for NPU latency benchmarking."""
+    """Construct experimental multi-head graphs on top of the SE-ResNet backbone for NPU latency benchmarking."""
     inp, x, policy_logits, model_tag, get_w, maybe_add_bias, maybe_add_dense_bias = _build_se_resnet_core(
         batch_size=batch_size,
         num_blocks=num_blocks,
