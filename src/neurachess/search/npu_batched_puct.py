@@ -321,6 +321,12 @@ class NPUBatchedPUCTSearch:
         use_ponder: bool = False,
         batch_models: dict[int, NPUModel] | None = None,
         syzygy_path: str | Path | None = None,
+        use_uncertainty_cpuct: bool = False,
+        uncertainty_kappa: float = 1.25,
+        uncertainty_center: float = 0.18,
+        use_mlh_tiebreak: bool = False,
+        use_q_fpu: bool = False,
+        q_fpu_lambda: float = 0.25,
     ):
         self.encoder_layout = encoder_layout
         self.batch_size = batch_size
@@ -328,6 +334,12 @@ class NPUBatchedPUCTSearch:
         self.t_root = float(t_root)
         self.use_opening_root_guard = bool(use_opening_root_guard)
         self.use_see_prior_shaping = bool(use_see_prior_shaping)
+        self.use_uncertainty_cpuct = bool(use_uncertainty_cpuct)
+        self.uncertainty_kappa = float(uncertainty_kappa)
+        self.uncertainty_center = float(uncertainty_center)
+        self.use_mlh_tiebreak = bool(use_mlh_tiebreak)
+        self.use_q_fpu = bool(use_q_fpu)
+        self.q_fpu_lambda = float(q_fpu_lambda)
         self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
         self.use_ponder = bool(use_ponder)
         self.batch_models = dict(batch_models) if batch_models else None
@@ -377,6 +389,12 @@ class NPUBatchedPUCTSearch:
                 use_ponder=self.use_ponder,
                 batch_models=self.batch_models,
                 syzygy_path=syzygy_path,
+                use_uncertainty_cpuct=self.use_uncertainty_cpuct,
+                uncertainty_kappa=self.uncertainty_kappa,
+                uncertainty_center=self.uncertainty_center,
+                use_mlh_tiebreak=self.use_mlh_tiebreak,
+                use_q_fpu=self.use_q_fpu,
+                q_fpu_lambda=self.q_fpu_lambda,
             )
             self._syzygy = self._fast_backend._syzygy
         else:
@@ -421,6 +439,12 @@ class NPUBatchedPUCTSearch:
         use_dynamic_batch_shift: bool | None = None,
         use_ponder: bool | None = None,
         syzygy_path: str | Path | None = None,
+        use_uncertainty_cpuct: bool | None = None,
+        uncertainty_kappa: float | None = None,
+        uncertainty_center: float | None = None,
+        use_mlh_tiebreak: bool | None = None,
+        use_q_fpu: bool | None = None,
+        q_fpu_lambda: float | None = None,
     ):
         if c_puct is not None:
             self.c_puct = float(c_puct)
@@ -436,6 +460,18 @@ class NPUBatchedPUCTSearch:
             self.use_opening_root_guard = bool(use_opening_root_guard)
         if use_see_prior_shaping is not None:
             self.use_see_prior_shaping = bool(use_see_prior_shaping)
+        if use_uncertainty_cpuct is not None:
+            self.use_uncertainty_cpuct = bool(use_uncertainty_cpuct)
+        if uncertainty_kappa is not None:
+            self.uncertainty_kappa = float(uncertainty_kappa)
+        if uncertainty_center is not None:
+            self.uncertainty_center = float(uncertainty_center)
+        if use_mlh_tiebreak is not None:
+            self.use_mlh_tiebreak = bool(use_mlh_tiebreak)
+        if use_q_fpu is not None:
+            self.use_q_fpu = bool(use_q_fpu)
+        if q_fpu_lambda is not None:
+            self.q_fpu_lambda = float(q_fpu_lambda)
         if use_dynamic_batch_shift is not None:
             self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
         if use_ponder is not None:
@@ -452,6 +488,12 @@ class NPUBatchedPUCTSearch:
                 use_dynamic_batch_shift=use_dynamic_batch_shift,
                 use_ponder=use_ponder,
                 syzygy_path=syzygy_path,
+                use_uncertainty_cpuct=use_uncertainty_cpuct,
+                uncertainty_kappa=uncertainty_kappa,
+                uncertainty_center=uncertainty_center,
+                use_mlh_tiebreak=use_mlh_tiebreak,
+                use_q_fpu=use_q_fpu,
+                q_fpu_lambda=q_fpu_lambda,
             )
             self._syzygy = self._fast_backend._syzygy
         elif syzygy_path is not None:

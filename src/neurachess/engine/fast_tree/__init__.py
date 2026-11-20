@@ -192,6 +192,26 @@ def get_lib() -> ctypes.CDLL:
     ]
     lib.ft_expand_root_from_cache.restype = ctypes.c_int32
 
+    lib.ft_expand_node_with_logits_ext.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int32,
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.c_double,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_uint16),
+        ctypes.POINTER(ctypes.c_uint16),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int32,
+        ctypes.c_float,
+        ctypes.c_int32,
+        ctypes.c_float,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int32,
+        ctypes.c_int32,
+    ]
+    lib.ft_expand_node_with_logits_ext.restype = ctypes.c_double
+
     lib.ft_expand_node_with_logits.argtypes = [
         ctypes.c_void_p,
         ctypes.c_int32,
@@ -401,6 +421,19 @@ def get_lib() -> ctypes.CDLL:
     lib.ft_record_seen_root_native.argtypes = [ctypes.c_void_p]
     lib.ft_record_seen_root_native.restype = ctypes.c_int32
 
+    lib.ft_expand_root_native_ext.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_double,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int32,
+        ctypes.c_float,
+        ctypes.c_int32,
+        ctypes.c_float,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int32,
+    ]
+    lib.ft_expand_root_native_ext.restype = ctypes.c_double
+
     lib.ft_expand_root_native.argtypes = [
         ctypes.c_void_p,
         ctypes.c_double,
@@ -440,6 +473,22 @@ def get_lib() -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_float),
     ]
     lib.ft_pack_inflight_batch_native.restype = None
+
+    lib.ft_backup_batch_native_ext.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+    ]
+    lib.ft_backup_batch_native_ext.restype = None
 
     lib.ft_backup_batch_native.argtypes = [
         ctypes.c_void_p,
@@ -496,6 +545,15 @@ def get_lib() -> ctypes.CDLL:
 
     lib.ft_tree_set_see_prior_shaping.argtypes = [ctypes.c_void_p, ctypes.c_int32]
     lib.ft_tree_set_see_prior_shaping.restype = None
+
+    lib.ft_tree_set_uncertainty_cpuct.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_double, ctypes.c_double]
+    lib.ft_tree_set_uncertainty_cpuct.restype = None
+
+    lib.ft_tree_set_mlh_tiebreak.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.ft_tree_set_mlh_tiebreak.restype = None
+
+    lib.ft_tree_set_q_fpu.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_double]
+    lib.ft_tree_set_q_fpu.restype = None
 
     lib.ft_tree_set_syzygy_cb.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32]
     lib.ft_tree_set_syzygy_cb.restype = None
@@ -793,6 +851,12 @@ class FastTreeSearchBackend:
         use_ponder: bool = False,
         batch_models: dict[int, object] | None = None,
         syzygy_path: str | Path | None = None,
+        use_uncertainty_cpuct: bool = False,
+        uncertainty_kappa: float = 1.25,
+        uncertainty_center: float = 0.18,
+        use_mlh_tiebreak: bool = False,
+        use_q_fpu: bool = False,
+        q_fpu_lambda: float = 0.25,
     ):
         self.lib = get_lib()
         pin_current_thread_to_pcores()
@@ -802,6 +866,12 @@ class FastTreeSearchBackend:
         self.t_root = float(t_root)
         self.use_opening_root_guard = bool(use_opening_root_guard)
         self.use_see_prior_shaping = bool(use_see_prior_shaping)
+        self.use_uncertainty_cpuct = bool(use_uncertainty_cpuct)
+        self.uncertainty_kappa = float(uncertainty_kappa)
+        self.uncertainty_center = float(uncertainty_center)
+        self.use_mlh_tiebreak = bool(use_mlh_tiebreak)
+        self.use_q_fpu = bool(use_q_fpu)
+        self.q_fpu_lambda = float(q_fpu_lambda)
         self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
         self.use_ponder = bool(use_ponder)
         self._batch_models = dict(batch_models) if batch_models else {}
@@ -828,10 +898,7 @@ class FastTreeSearchBackend:
             ctypes.c_double(root_fpu_reduction),
             ctypes.c_int32(1 if use_exact_solver else 0),
         )
-        self.lib.ft_tree_set_see_prior_shaping(
-            self._tree_ptr,
-            ctypes.c_int32(1 if self.use_see_prior_shaping else 0),
-        )
+        self._sync_search_modifiers_to_tree()
         self._attach_syzygy_to_tree()
 
         self._boards: dict[int, chess.Board] = {}
@@ -900,6 +967,29 @@ class FastTreeSearchBackend:
                 logger.debug("FastTree destroy failed during cleanup", exc_info=True)
             self._tree_ptr = None
 
+    def _sync_search_modifiers_to_tree(self) -> None:
+        if not getattr(self, "_tree_ptr", None):
+            return
+        self.lib.ft_tree_set_see_prior_shaping(
+            self._tree_ptr,
+            ctypes.c_int32(1 if self.use_see_prior_shaping else 0),
+        )
+        self.lib.ft_tree_set_uncertainty_cpuct(
+            self._tree_ptr,
+            ctypes.c_int32(1 if self.use_uncertainty_cpuct else 0),
+            ctypes.c_double(self.uncertainty_kappa),
+            ctypes.c_double(self.uncertainty_center),
+        )
+        self.lib.ft_tree_set_mlh_tiebreak(
+            self._tree_ptr,
+            ctypes.c_int32(1 if self.use_mlh_tiebreak else 0),
+        )
+        self.lib.ft_tree_set_q_fpu(
+            self._tree_ptr,
+            ctypes.c_int32(1 if self.use_q_fpu else 0),
+            ctypes.c_double(self.q_fpu_lambda),
+        )
+
     def reconfigure(
         self,
         c_puct: float | None = None,
@@ -912,6 +1002,12 @@ class FastTreeSearchBackend:
         use_dynamic_batch_shift: bool | None = None,
         use_ponder: bool | None = None,
         syzygy_path: str | Path | None = None,
+        use_uncertainty_cpuct: bool | None = None,
+        uncertainty_kappa: float | None = None,
+        uncertainty_center: float | None = None,
+        use_mlh_tiebreak: bool | None = None,
+        use_q_fpu: bool | None = None,
+        q_fpu_lambda: float | None = None,
     ):
         if c_puct is not None:
             self.c_puct = float(c_puct)
@@ -927,6 +1023,18 @@ class FastTreeSearchBackend:
             self.use_opening_root_guard = bool(use_opening_root_guard)
         if use_see_prior_shaping is not None:
             self.use_see_prior_shaping = bool(use_see_prior_shaping)
+        if use_uncertainty_cpuct is not None:
+            self.use_uncertainty_cpuct = bool(use_uncertainty_cpuct)
+        if uncertainty_kappa is not None:
+            self.uncertainty_kappa = float(uncertainty_kappa)
+        if uncertainty_center is not None:
+            self.uncertainty_center = float(uncertainty_center)
+        if use_mlh_tiebreak is not None:
+            self.use_mlh_tiebreak = bool(use_mlh_tiebreak)
+        if use_q_fpu is not None:
+            self.use_q_fpu = bool(use_q_fpu)
+        if q_fpu_lambda is not None:
+            self.q_fpu_lambda = float(q_fpu_lambda)
         if use_dynamic_batch_shift is not None:
             self.use_dynamic_batch_shift = bool(use_dynamic_batch_shift)
         if use_ponder is not None:
@@ -949,10 +1057,7 @@ class FastTreeSearchBackend:
             ctypes.c_double(self.root_fpu_reduction),
             ctypes.c_int32(1 if self.use_exact_solver else 0),
         )
-        self.lib.ft_tree_set_see_prior_shaping(
-            self._tree_ptr,
-            ctypes.c_int32(1 if self.use_see_prior_shaping else 0),
-        )
+        self._sync_search_modifiers_to_tree()
         self._attach_syzygy_to_tree()
         self.clear_state()
 
@@ -1020,7 +1125,8 @@ class FastTreeSearchBackend:
         """
         Extracts and caches stable C pointers directly into OpenVINO `InferRequest`'s
         64-byte aligned unified host input & output tensors, eliminating all NumPy copies
-        and Python dict allocations on dispatch and output retrieval.
+        and Python dict allocations on dispatch and output retrieval (including optional
+        auxiliary outputs: `val_sigma`, `moves_left`, and `action_q`).
         """
         rid = id(req)
         entry = self._zc_req_cache.get(rid)
@@ -1046,7 +1152,59 @@ class FastTreeSearchBackend:
                 out0_ptr = out0_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
                 out1_ptr = out1_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
                 val_cols = int(out1_arr.shape[1]) if out1_arr.ndim == 2 else 1
-                entry = (req, in_ptr, out0_ptr, out1_ptr, val_cols, in_arr, out0_arr, out1_arr)
+
+                sigma_ptr = None
+                mlh_ptr = None
+                q_ptr = None
+                sigma_arr = None
+                mlh_arr = None
+                q_arr = None
+
+                model_outs = getattr(req, "model_outputs", None)
+                if model_outs is not None and len(model_outs) > 2:
+                    for oi in range(2, len(model_outs)):
+                        port = model_outs[oi]
+                        names = set()
+                        try:
+                            names.update(port.get_names())
+                        except Exception:
+                            pass
+                        try:
+                            names.add(port.get_any_name())
+                        except Exception:
+                            pass
+                        try:
+                            names.add(port.get_node().get_friendly_name())
+                        except Exception:
+                            pass
+                        ot = req.get_output_tensor(oi)
+                        oa = ot.data
+                        if oa.dtype != np.float32 or not oa.flags["C_CONTIGUOUS"]:
+                            continue
+                        optr = oa.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                        if any("val_sigma" in s for s in names):
+                            sigma_ptr, sigma_arr = optr, oa
+                        elif any("moves_left" in s or "mlh" in s for s in names):
+                            mlh_ptr, mlh_arr = optr, oa
+                        elif any("action_q" in s or "q_73" in s for s in names) or (oa.ndim == 2 and oa.shape[1] == 4672):
+                            q_ptr, q_arr = optr, oa
+
+                entry = (
+                    req,
+                    in_ptr,
+                    out0_ptr,
+                    out1_ptr,
+                    val_cols,
+                    in_arr,
+                    out0_arr,
+                    out1_arr,
+                    sigma_ptr,
+                    mlh_ptr,
+                    q_ptr,
+                    sigma_arr,
+                    mlh_arr,
+                    q_arr,
+                )
                 self._zc_req_cache[rid] = entry
                 return entry
         except (RuntimeError, AttributeError, TypeError, ValueError):
@@ -1192,14 +1350,20 @@ class FastTreeSearchBackend:
         val_cols: int,
         max_depth: int,
         prof: dict,
+        sigma_ptr=None,
+        mlh_ptr=None,
+        q_ptr=None,
     ):
         store_cache = 1 if (self.use_nn_cache or self.use_tree_reuse) else 0
-        self.lib.ft_backup_batch_native(
+        self.lib.ft_backup_batch_native_ext(
             self._tree_ptr,
             handle,
             logits_ptr,
             vals_ptr,
             val_cols,
+            sigma_ptr,
+            mlh_ptr,
+            q_ptr,
             max_depth,
             store_cache,
             ctypes.byref(self._c_i32_a),
@@ -1614,18 +1778,37 @@ class FastTreeSearchBackend:
 
         self.lib.ft_destroy_inflight_batch(handle)
 
-    def _infer_root_native_zero_copy(self, root_model, board_tensor: np.ndarray | None) -> tuple[float, ctypes.POINTER(ctypes.c_float) | None, np.ndarray | None]:
+    def _infer_root_native_zero_copy(self, root_model, board_tensor: np.ndarray | None):
         """Runs root (B=1) inference using zero-copy OpenVINO tensor staging when supported."""
         zc_root = self._bind_zero_copy_req(getattr(root_model, "infer_request", None))
         if zc_root is not None:
-            req_r, r_in_ptr, r_out0_ptr, r_out1_ptr, r_val_cols, _, r_out0_arr, r_out1_arr = zc_root
+            (
+                req_r,
+                r_in_ptr,
+                r_out0_ptr,
+                _r_out1_ptr,
+                r_val_cols,
+                _,
+                r_out0_arr,
+                r_out1_arr,
+                r_sig_ptr,
+                r_mlh_ptr,
+                r_q_ptr,
+                r_sig_arr,
+                r_mlh_arr,
+                _r_q_arr,
+            ) = zc_root
             self.lib.ft_encode_root_native(self._tree_ptr, r_in_ptr)
             req_r.infer()
             v0 = r_out1_arr[0]
             root_v = float(v0[0] - v0[2]) if (r_val_cols == 3) else float(v0[0])
+            has_sig = 1 if (r_sig_ptr is not None and r_sig_arr is not None) else 0
+            sig_val = float(r_sig_arr.flat[0]) if has_sig else 0.18
+            has_mlh = 1 if (r_mlh_ptr is not None and r_mlh_arr is not None) else 0
+            mlh_val = float(r_mlh_arr.flat[0]) if has_mlh else 60.0
             if self.t_root != 1.0 and self.t_root > 0:
                 r_out0_arr[:] /= self.t_root
-            return root_v, r_out0_ptr, None
+            return root_v, r_out0_ptr, None, has_sig, sig_val, has_mlh, mlh_val, r_q_ptr
 
         if board_tensor is None:
             tmp_arr = np.empty((NUM_PLANES, 8, 8), dtype=np.float32)
@@ -1643,7 +1826,7 @@ class FastTreeSearchBackend:
         logits_r = np.ascontiguousarray(p_logits_root[0], dtype=np.float32)
         if self.t_root != 1.0 and self.t_root > 0:
             logits_r = logits_r / self.t_root
-        return root_v, logits_r.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), logits_r
+        return root_v, logits_r.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), logits_r, 0, 0.18, 0, 60.0, None
 
     def _select_best_move_from_root_snapshot(
         self,
@@ -1779,6 +1962,41 @@ class FastTreeSearchBackend:
                 "mate_moves": None,
             }
 
+        def _wait_ponder_decision_and_return(mv_uci: str, ev: float, nodes_c: int, mate_m: int | None = None) -> dict:
+            if default_movetime_ms is not None:
+                while not stop_event.is_set() and not ponderhit_event.is_set():
+                    stop_event.wait(0.005)
+            is_b = board.turn == chess.BLACK
+            act_i = uci_to_action(mv_uci, canonical_flip=is_b)
+            self.last_root_visits = {act_i: 1}
+            return {
+                "ponder_nodes": nodes_c,
+                "best_uci": mv_uci,
+                "ponder_uci": None,
+                "root_visits": 1,
+                "best_eval": ev,
+                "pv": [mv_uci],
+                "depth": 1,
+                "seldepth": 1,
+                "mate_moves": mate_m,
+            }
+
+        if len(root_legals) == 1:
+            return _wait_ponder_decision_and_return(root_legals[0].uci(), 0.0, 1)
+
+        for m in root_legals:
+            board.push(m)
+            if board.is_checkmate():
+                board.pop()
+                return _wait_ponder_decision_and_return(m.uci(), 1.0, len(root_legals), mate_m=1)
+            board.pop()
+
+        if self._syzygy is not None:
+            tb_res = self._syzygy.probe_root_dtz_move(board)
+            if tb_res is not None:
+                tb_mv, tb_val, _ = tb_res
+                return _wait_ponder_decision_and_return(tb_mv.uci(), tb_val, 1)
+
         self.lib.ft_tree_reset_stats(self._tree_ptr)
         prof = {"novel_npu_evals": 0, "wasted_dup_key_evals": 0}
         ponder_nodes = 0
@@ -1853,14 +2071,21 @@ class FastTreeSearchBackend:
                 root_v = float(self._c_root_val.value)
                 ponder_nodes += 1
             else:
-                root_v, r_logits_ptr, _keep_r = self._infer_root_native_zero_copy(root_model, None)
+                root_v, r_logits_ptr, _keep_r, r_hsig, r_sig, r_hmlh, r_mlh, r_q_ptr = self._infer_root_native_zero_copy(root_model, None)
                 ponder_nodes += 1
                 self.lib.ft_record_seen_root_native(self._tree_ptr)
-                self.lib.ft_expand_root_native(
-                    self._tree_ptr,
-                    ctypes.c_double(root_v),
-                    r_logits_ptr,
-                    1 if (self.use_nn_cache or self.use_tree_reuse) else 0,
+                root_v = float(
+                    self.lib.ft_expand_root_native_ext(
+                        self._tree_ptr,
+                        ctypes.c_double(root_v),
+                        r_logits_ptr,
+                        ctypes.c_int32(r_hsig),
+                        ctypes.c_float(r_sig),
+                        ctypes.c_int32(r_hmlh),
+                        ctypes.c_float(r_mlh),
+                        r_q_ptr,
+                        1 if (self.use_nn_cache or self.use_tree_reuse) else 0,
+                    )
                 )
             if self.use_fpu_reduction:
                 self.lib.ft_tree_set_root_fpu_visit(self._tree_ptr, ctypes.c_double(root_v))
@@ -1871,16 +2096,92 @@ class FastTreeSearchBackend:
         has_async = hasattr(batch_model, "infer_request_async") and hasattr(batch_model.infer_request, "start_async")
         _pc = time.perf_counter
         search_deadline = float("inf")
+        ponderhit_t0: float | None = None
+        mt_eff_ms = 600.0
+        prev_cache_exp_p = 0
+        prev_term_bkp_p = 0
+        empty_term_waves_p = 0
+        ponder_batches = 0
+
+        def _should_retry_empty_wave_p() -> bool:
+            nonlocal prev_cache_exp_p, prev_term_bkp_p, empty_term_waves_p
+            if _should_stop():
+                return False
+            self.lib.ft_get_stats(
+                self._tree_ptr,
+                ctypes.byref(self._st_i64[0]),
+                ctypes.byref(self._st_i64[1]),
+                ctypes.byref(self._st_i64[2]),
+                ctypes.byref(self._st_i64[3]),
+                ctypes.byref(self._st_i64[4]),
+                ctypes.byref(self._st_i64[5]),
+                ctypes.byref(self._st_i32[0]),
+                ctypes.byref(self._st_i32[1]),
+            )
+            cur_tb = int(self._st_i64[0].value)
+            cur_ce = int(self._st_i64[4].value)
+            if cur_ce > prev_cache_exp_p:
+                prev_cache_exp_p = cur_ce
+                return True
+            if cur_tb > prev_term_bkp_p and empty_term_waves_p < 8:
+                prev_term_bkp_p = cur_tb
+                empty_term_waves_p += 1
+                return True
+            return False
+
+        def _ponder_post_hit_early_stop() -> bool:
+            if ponderhit_t0 is None or ponder_batches == 0 or (ponder_batches & 7) != 0:
+                return False
+            now_p = _pc()
+            elapsed_hit = now_p - ponderhit_t0
+            budget_hit = mt_eff_ms / 1000.0
+            if elapsed_hit < max(0.06, budget_hit * 0.30):
+                return False
+            rch = self._get_children_snapshot(0)
+            if len(rch) <= 1:
+                return True
+            if self.use_exact_solver and any(c["is_solved"] and c["solved_val"] <= -1.0 for c in rch):
+                return True
+            tot_v = sum(c["visits"] for c in rch)
+            if tot_v < 192:
+                return False
+            s_ch = sorted(rch, key=lambda c: c["visits"], reverse=True)
+            v1, v2 = s_ch[0]["visits"], s_ch[1]["visits"]
+            q1, q2 = -s_ch[0]["q"], -s_ch[1]["q"]
+            if v1 >= 0.72 * tot_v and v1 >= 3.5 * max(1, v2) and q1 >= q2:
+                return True
+            if elapsed_hit >= budget_hit * 0.52 and v1 >= 0.58 * tot_v and v1 >= 2.2 * max(1, v2) and q1 >= q2 + 0.01:
+                return True
+            return False
 
         def _should_stop() -> bool:
-            nonlocal search_deadline
+            nonlocal search_deadline, ponderhit_t0, mt_eff_ms
             if stop_event.is_set():
                 return True
             if ponderhit_event.is_set():
                 if search_deadline == float("inf"):
-                    mt = default_movetime_ms if (default_movetime_ms and default_movetime_ms > 0) else 600
-                    search_deadline = _pc() + (mt / 1000.0)
-                if _pc() >= search_deadline:
+                    ponderhit_t0 = _pc()
+                    mt = float(default_movetime_ms if (default_movetime_ms and default_movetime_ms > 0) else 600)
+                    self.lib.ft_get_stats(
+                        self._tree_ptr,
+                        ctypes.byref(self._st_i64[0]),
+                        ctypes.byref(self._st_i64[1]),
+                        ctypes.byref(self._st_i64[2]),
+                        ctypes.byref(self._st_i64[3]),
+                        ctypes.byref(self._st_i64[4]),
+                        ctypes.byref(self._st_i64[5]),
+                        ctypes.byref(self._st_i32[0]),
+                        ctypes.byref(self._st_i32[1]),
+                    )
+                    already = ponder_nodes + int(self._st_i64[4].value)
+                    if already >= max(600.0, mt * 3.0):
+                        mt_eff_ms = max(30.0, mt * 0.18)
+                    elif already >= max(250.0, mt * 1.4):
+                        mt_eff_ms = max(45.0, mt * 0.45)
+                    else:
+                        mt_eff_ms = mt
+                    search_deadline = ponderhit_t0 + (mt_eff_ms / 1000.0)
+                if _pc() >= search_deadline or _ponder_post_hit_early_stop():
                     return True
             return False
 
@@ -1889,72 +2190,87 @@ class FastTreeSearchBackend:
             zc_reqs = [self._bind_zero_copy_req(requests[0]), self._bind_zero_copy_req(requests[1])]
             in_flight_p: dict[int, tuple[ctypes.c_void_p, int]] = {}
 
-            if not _should_stop():
-                zc0 = zc_reqs[0]
-                h0, bt0, nev0, _ = self.select_and_pack_native(
-                    max_depth=max_depth,
-                    use_pending=False,
-                    target_in_ptr=zc0[1] if zc0 is not None else None,
-                )
-                if nev0 > 0:
-                    if zc0 is not None:
-                        requests[0].start_async()
-                    else:
-                        requests[0].start_async({"board_state": bt0})
-                    in_flight_p[0] = (h0, nev0)
-                else:
+            while not _should_stop():
+                while not _should_stop():
+                    zc0 = zc_reqs[0]
+                    h0, bt0, nev0, _ = self.select_and_pack_native(
+                        max_depth=max_depth,
+                        use_pending=False,
+                        target_in_ptr=zc0[1] if zc0 is not None else None,
+                    )
+                    if nev0 > 0:
+                        if zc0 is not None:
+                            requests[0].start_async()
+                        else:
+                            requests[0].start_async({"board_state": bt0})
+                        in_flight_p[0] = (h0, nev0)
+                        break
                     self.lib.ft_destroy_inflight_batch(h0)
+                    if not _should_retry_empty_wave_p():
+                        break
 
-            buf_idx = 0
-            while len(in_flight_p) > 0:
-                stopping = _should_stop()
-                next_buf = 1 - buf_idx
+                buf_idx = 0
+                while len(in_flight_p) > 0:
+                    stopping = _should_stop()
+                    next_buf = 1 - buf_idx
 
-                if not stopping and next_buf not in in_flight_p:
-                    zcn = zc_reqs[next_buf]
-                    hn, btn, nevn, _ = self.select_and_pack_native(
-                        max_depth=max_depth,
-                        use_pending=False,
-                        target_in_ptr=zcn[1] if zcn is not None else None,
-                    )
-                    if nevn > 0:
-                        if zcn is not None:
-                            requests[next_buf].start_async()
+                    if not stopping and next_buf not in in_flight_p:
+                        zcn = zc_reqs[next_buf]
+                        hn, btn, nevn, _ = self.select_and_pack_native(
+                            max_depth=max_depth,
+                            use_pending=False,
+                            target_in_ptr=zcn[1] if zcn is not None else None,
+                        )
+                        if nevn > 0:
+                            if zcn is not None:
+                                requests[next_buf].start_async()
+                            else:
+                                requests[next_buf].start_async({"board_state": btn})
+                            in_flight_p[next_buf] = (hn, nevn)
                         else:
-                            requests[next_buf].start_async({"board_state": btn})
-                        in_flight_p[next_buf] = (hn, nevn)
-                    else:
-                        self.lib.ft_destroy_inflight_batch(hn)
+                            self.lib.ft_destroy_inflight_batch(hn)
 
-                if buf_idx in in_flight_p:
-                    curr_req = requests[buf_idx]
-                    curr_req.wait()
-                    curr_h, _ = in_flight_p.pop(buf_idx)
-                    ponder_nodes += self.batch_size
-                    zcc = zc_reqs[buf_idx]
-                    if zcc is not None:
-                        self.backup_batch_native_ptrs(curr_h, zcc[2], zcc[3], zcc[4], max_depth, prof)
-                    else:
-                        outputs = list(curr_req.results.values())
-                        self.backup_batch_native(curr_h, outputs[0], outputs[1], max_depth, prof)
-
-                if len(in_flight_p) == 0 and not _should_stop():
-                    zcr = zc_reqs[next_buf]
-                    hr, btr, nevr, _ = self.select_and_pack_native(
-                        max_depth=max_depth,
-                        use_pending=False,
-                        target_in_ptr=zcr[1] if zcr is not None else None,
-                    )
-                    if nevr > 0:
-                        if zcr is not None:
-                            requests[next_buf].start_async()
+                    if buf_idx in in_flight_p:
+                        curr_req = requests[buf_idx]
+                        curr_req.wait()
+                        curr_h, _ = in_flight_p.pop(buf_idx)
+                        ponder_nodes += self.batch_size
+                        ponder_batches += 1
+                        zcc = zc_reqs[buf_idx]
+                        if zcc is not None:
+                            self.backup_batch_native_ptrs(curr_h, zcc[2], zcc[3], zcc[4], max_depth, prof, sigma_ptr=zcc[8], mlh_ptr=zcc[9], q_ptr=zcc[10])
                         else:
-                            requests[next_buf].start_async({"board_state": btr})
-                        in_flight_p[next_buf] = (hr, nevr)
-                    else:
-                        self.lib.ft_destroy_inflight_batch(hr)
+                            outputs = list(curr_req.results.values())
+                            self.backup_batch_native(curr_h, outputs[0], outputs[1], max_depth, prof)
 
-                buf_idx = next_buf
+                    if len(in_flight_p) == 0:
+                        while not _should_stop():
+                            zcr = zc_reqs[next_buf]
+                            hr, btr, nevr, _ = self.select_and_pack_native(
+                                max_depth=max_depth,
+                                use_pending=False,
+                                target_in_ptr=zcr[1] if zcr is not None else None,
+                            )
+                            if nevr > 0:
+                                if zcr is not None:
+                                    requests[next_buf].start_async()
+                                else:
+                                    requests[next_buf].start_async({"board_state": btr})
+                                in_flight_p[next_buf] = (hr, nevr)
+                                break
+                            self.lib.ft_destroy_inflight_batch(hr)
+                            if not _should_retry_empty_wave_p():
+                                break
+
+                    buf_idx = next_buf
+
+                # Tree temporarily saturated while still pondering: wait for stop or ponderhit
+                if not _should_stop():
+                    if ponderhit_event.is_set():
+                        break
+                    while not stop_event.is_set() and not ponderhit_event.is_set():
+                        stop_event.wait(0.005)
+                    empty_term_waves_p = 0
         else:
             zc_sync = self._bind_zero_copy_req(getattr(batch_model, "infer_request", None))
             while not _should_stop():
@@ -1965,11 +2281,19 @@ class FastTreeSearchBackend:
                 )
                 if nevs == 0:
                     self.lib.ft_destroy_inflight_batch(hs)
-                    break
+                    if _should_retry_empty_wave_p():
+                        continue
+                    if ponderhit_event.is_set() or stop_event.is_set():
+                        break
+                    while not stop_event.is_set() and not ponderhit_event.is_set():
+                        stop_event.wait(0.005)
+                    empty_term_waves_p = 0
+                    continue
                 ponder_nodes += self.batch_size
+                ponder_batches += 1
                 if zc_sync is not None:
                     zc_sync[0].infer()
-                    self.backup_batch_native_ptrs(hs, zc_sync[2], zc_sync[3], zc_sync[4], max_depth, prof)
+                    self.backup_batch_native_ptrs(hs, zc_sync[2], zc_sync[3], zc_sync[4], max_depth, prof, sigma_ptr=zc_sync[8], mlh_ptr=zc_sync[9], q_ptr=zc_sync[10])
                 else:
                     p_logits_batch, val_batch = batch_model.infer(bt)
                     self.backup_batch_native(hs, p_logits_batch, val_batch, max_depth, prof)
@@ -2218,18 +2542,25 @@ class FastTreeSearchBackend:
                 nodes_evaluated += 1
             else:
                 if use_native:
-                    root_v, r_logits_ptr, _keep_r = self._infer_root_native_zero_copy(root_model, board_tensor)
+                    root_v, r_logits_ptr, _keep_r, r_hsig, r_sig, r_hmlh, r_mlh, r_q_ptr = self._infer_root_native_zero_copy(root_model, board_tensor)
                     nodes_evaluated += 1
                     prof["root_npu_evals"] += 1
                     if self.lib.ft_record_seen_root_native(self._tree_ptr):
                         prof["novel_npu_evals"] += 1
                     else:
                         prof["wasted_dup_key_evals"] += 1
-                    self.lib.ft_expand_root_native(
-                        self._tree_ptr,
-                        ctypes.c_double(root_v),
-                        r_logits_ptr,
-                        1 if (self.use_nn_cache or self.use_tree_reuse) else 0,
+                    root_v = float(
+                        self.lib.ft_expand_root_native_ext(
+                            self._tree_ptr,
+                            ctypes.c_double(root_v),
+                            r_logits_ptr,
+                            ctypes.c_int32(r_hsig),
+                            ctypes.c_float(r_sig),
+                            ctypes.c_int32(r_hmlh),
+                            ctypes.c_float(r_mlh),
+                            r_q_ptr,
+                            1 if (self.use_nn_cache or self.use_tree_reuse) else 0,
+                        )
                     )
                 else:
                     p_logits_root, v_root_out = root_model.infer(board_tensor)
@@ -2297,6 +2628,52 @@ class FastTreeSearchBackend:
                 return True
             return False
 
+        def _should_early_stop_root() -> bool:
+            if max_nodes is not None or movetime_ms < 200 or os.environ.get("NEURACHESS_NO_EARLY_STOP") == "1":
+                return False
+            batches_done = prof["batches"]
+            if batches_done == 0 or (batches_done & 7) != 0:
+                return False
+            now_s = _pc()
+            rem_s = t_deadline - now_s
+            if rem_s <= 0.015:
+                return True
+            rch = self._get_children_snapshot(0)
+            if len(rch) <= 1:
+                return True
+            if self.use_exact_solver and any(c["is_solved"] and c["solved_val"] <= -1.0 for c in rch):
+                prof["early_stop_reason"] = "solved_win"
+                return True
+            elapsed_s = now_s - t_start
+            budget_s = movetime_ms / 1000.0
+            if elapsed_s < max(0.10, budget_s * 0.30):
+                return False
+            tot_v = sum(c["visits"] for c in rch)
+            if tot_v < 160:
+                return False
+            s_ch = sorted(rch, key=lambda c: c["visits"], reverse=True)
+            v1, v2 = s_ch[0]["visits"], s_ch[1]["visits"]
+            q1, q2 = -s_ch[0]["q"], -s_ch[1]["q"]
+            nps_est = max(250.0, (nodes_evaluated + prev_cache_exp) / max(1e-3, elapsed_s))
+            rem_visits = rem_s * nps_est * 1.10
+            if (v1 - v2) > rem_visits and q1 >= q2 - 0.02:
+                prof["early_stop_reason"] = "uncatchable_lead"
+                return True
+            if elapsed_s >= budget_s * 0.33 and tot_v >= 224 and v1 >= 0.72 * tot_v and v1 >= 3.5 * max(1, v2) and q1 >= q2:
+                prof["early_stop_reason"] = "dominant_move"
+                return True
+            if elapsed_s >= budget_s * 0.52 and tot_v >= 352 and v1 >= 0.58 * tot_v and v1 >= 2.2 * max(1, v2) and q1 >= q2 + 0.01:
+                prof["early_stop_reason"] = "clear_consensus"
+                return True
+            return False
+
+        def _time_or_early_up(extra_nodes: int = 0) -> bool:
+            if _pc() >= t_deadline:
+                return True
+            if max_nodes is not None and (nodes_evaluated + extra_nodes) >= max_nodes:
+                return True
+            return _should_early_stop_root()
+
         if use_native:
             # Lock static B=16 (nireq=2) when pondering with movetime > 150ms; allow gear_shift_v3 when not pondering or <= 150ms
             allow_gear_shift = (not self.use_ponder) or (int(movetime_ms) <= 150)
@@ -2346,7 +2723,7 @@ class FastTreeSearchBackend:
                         t_bk = _pc()
                         prof["wait_s"] += t_bk - t_inf0
                         _record_gear_wave(cb, rc, nev_s, mply_s)
-                        self.backup_batch_native_ptrs(hs_s, zc_s[2], zc_s[3], zc_s[4], max_depth, prof)
+                        self.backup_batch_native_ptrs(hs_s, zc_s[2], zc_s[3], zc_s[4], max_depth, prof, sigma_ptr=zc_s[8], mlh_ptr=zc_s[9], q_ptr=zc_s[10])
                     else:
                         pl_s, vb_s = cm_s.infer(bt_s)
                         t_bk = _pc()
@@ -2364,7 +2741,7 @@ class FastTreeSearchBackend:
                     _record_gear_wave(16, rc_i, nev_i, mply_i)
                     zcc = b16_zcs[slot_i]
                     if zcc is not None:
-                        self.backup_batch_native_ptrs(hs_i, zcc[2], zcc[3], zcc[4], max_depth, prof)
+                        self.backup_batch_native_ptrs(hs_i, zcc[2], zcc[3], zcc[4], max_depth, prof, sigma_ptr=zcc[8], mlh_ptr=zcc[9], q_ptr=zcc[10])
                     else:
                         outs = list(b16_reqs[slot_i].results.values())
                         self.backup_batch_native(hs_i, outs[0], outs[1], max_depth, prof)
@@ -2391,7 +2768,7 @@ class FastTreeSearchBackend:
 
                 while True:
                     if inflight_16 is None:
-                        if _pc() >= t_deadline or (max_nodes is not None and nodes_evaluated >= max_nodes):
+                        if _time_or_early_up():
                             break
                         t0 = _pc()
                         hs, rec_b, reason_code, nev_s, mply_s = self.select_dynamic_native(
@@ -2423,9 +2800,7 @@ class FastTreeSearchBackend:
                         # Async nireq=2 overlap: select + pack next wave while inflight_16 executes on NPU
                         next_inflight = None
                         next_sync = None
-                        time_up_next = (_pc() >= t_deadline) or (
-                            max_nodes is not None and (nodes_evaluated + 16) >= max_nodes
-                        )
+                        time_up_next = _time_or_early_up(16)
                         if not time_up_next:
                             t0 = _pc()
                             hn, rec_bn, r_bn, nev_n, mply_n = self.select_dynamic_native(
@@ -2455,7 +2830,7 @@ class FastTreeSearchBackend:
 
                         if next_sync is not None:
                             hsn, btn, cbn, rbn, nevn, mplyn, zcn, cmn = next_sync
-                            if (_pc() >= t_deadline) or (max_nodes is not None and nodes_evaluated >= max_nodes):
+                            if _time_or_early_up():
                                 self.lib.ft_revert_batch_vl_and_clear_pending(self._tree_ptr, hsn)
                                 self.lib.ft_destroy_inflight_batch(hsn)
                             else:
@@ -2478,9 +2853,7 @@ class FastTreeSearchBackend:
 
                 while True:
                     while free:
-                        time_up = (_pc() >= t_deadline) or (
-                            max_nodes is not None and nodes_evaluated + len(inflight) * self.batch_size >= max_nodes
-                        )
+                        time_up = _time_or_early_up(len(inflight) * self.batch_size)
                         if time_up:
                             break
                         r_cand = free[-1]
@@ -2518,7 +2891,7 @@ class FastTreeSearchBackend:
                         max_depth_reached = curr_mply
                     zcc = zc_reqs[r]
                     if zcc is not None:
-                        self.backup_batch_native_ptrs(curr_h, zcc[2], zcc[3], zcc[4], max_depth, prof)
+                        self.backup_batch_native_ptrs(curr_h, zcc[2], zcc[3], zcc[4], max_depth, prof, sigma_ptr=zcc[8], mlh_ptr=zcc[9], q_ptr=zcc[10])
                     else:
                         outputs = list(reqs[r].results.values())
                         self.backup_batch_native(curr_h, outputs[0], outputs[1], max_depth, prof)
@@ -2555,7 +2928,7 @@ class FastTreeSearchBackend:
 
                 buf_idx = 0
                 while len(in_flight_n) > 0:
-                    time_up = (_pc() >= t_deadline) or (max_nodes is not None and nodes_evaluated >= max_nodes)
+                    time_up = _time_or_early_up()
                     next_buf = 1 - buf_idx
 
                     if not time_up and next_buf not in in_flight_n:
@@ -2594,41 +2967,40 @@ class FastTreeSearchBackend:
 
                     zcc = zc_reqs[buf_idx]
                     if zcc is not None:
-                        self.backup_batch_native_ptrs(curr_h, zcc[2], zcc[3], zcc[4], max_depth, prof)
+                        self.backup_batch_native_ptrs(curr_h, zcc[2], zcc[3], zcc[4], max_depth, prof, sigma_ptr=zcc[8], mlh_ptr=zcc[9], q_ptr=zcc[10])
                     else:
                         outputs = list(curr_req.results.values())
                         self.backup_batch_native(curr_h, outputs[0], outputs[1], max_depth, prof)
                     prof["backup_s"] += _pc() - t1
 
-                    if len(in_flight_n) == 0 and not (
-                        (_pc() >= t_deadline) or (max_nodes is not None and nodes_evaluated >= max_nodes)
-                    ):
-                        zcr = zc_reqs[next_buf]
-                        t0 = _pc()
-                        hr, btr, nev_re, mply_re = self.select_and_pack_native(
-                            max_depth=max_depth,
-                            use_pending=False,
-                            target_in_ptr=zcr[1] if zcr is not None else None,
-                        )
-                        t1_p = _pc()
-                        prof["select_s"] += t1_p - t0
-                        if nev_re > 0:
-                            if zcr is not None:
-                                requests[next_buf].start_async()
-                            else:
-                                requests[next_buf].start_async({"board_state": btr})
-                            prof["dispatch_s"] += _pc() - t1_p
-                            in_flight_n[next_buf] = (hr, nev_re, mply_re)
-                        else:
+                    if len(in_flight_n) == 0:
+                        while not _time_or_early_up():
+                            zcr = zc_reqs[next_buf]
+                            t0 = _pc()
+                            hr, btr, nev_re, mply_re = self.select_and_pack_native(
+                                max_depth=max_depth,
+                                use_pending=False,
+                                target_in_ptr=zcr[1] if zcr is not None else None,
+                            )
+                            t1_p = _pc()
+                            prof["select_s"] += t1_p - t0
+                            if nev_re > 0:
+                                if zcr is not None:
+                                    requests[next_buf].start_async()
+                                else:
+                                    requests[next_buf].start_async({"board_state": btr})
+                                prof["dispatch_s"] += _pc() - t1_p
+                                in_flight_n[next_buf] = (hr, nev_re, mply_re)
+                                break
                             self.lib.ft_destroy_inflight_batch(hr)
+                            if not _should_retry_empty_wave():
+                                break
 
                     buf_idx = next_buf
             else:
                 zc_sync = self._bind_zero_copy_req(getattr(batch_model, "infer_request", None))
                 prof["zero_copy_staging"] = zc_sync is not None
-                while _pc() < t_deadline:
-                    if max_nodes is not None and nodes_evaluated >= max_nodes:
-                        break
+                while not _time_or_early_up():
                     t0 = _pc()
                     hs, bt, nev_s, mply_s = self.select_and_pack_native(
                         max_depth=max_depth,
@@ -2639,6 +3011,8 @@ class FastTreeSearchBackend:
                     prof["select_s"] += t1 - t0
                     if nev_s == 0:
                         self.lib.ft_destroy_inflight_batch(hs)
+                        if _should_retry_empty_wave():
+                            continue
                         break
                     if mply_s > max_depth_reached:
                         max_depth_reached = mply_s
@@ -2650,7 +3024,7 @@ class FastTreeSearchBackend:
                         prof["batches"] += 1
                         prof["slots"] += self.batch_size
                         prof["unique_leaves"] += nev_s
-                        self.backup_batch_native_ptrs(hs, zc_sync[2], zc_sync[3], zc_sync[4], max_depth, prof)
+                        self.backup_batch_native_ptrs(hs, zc_sync[2], zc_sync[3], zc_sync[4], max_depth, prof, sigma_ptr=zc_sync[8], mlh_ptr=zc_sync[9], q_ptr=zc_sync[10])
                     else:
                         p_logits_batch, val_batch = batch_model.infer(bt)
                         t3 = _pc()

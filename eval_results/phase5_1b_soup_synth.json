@@ -1,0 +1,95 @@
+{
+  "power": {
+    "power_plugged": true,
+    "battery_pct": 100.0
+  },
+  "candidates": [
+    {
+      "name": "1B_qat_mid2_7_4head",
+      "xml": "weights\\phase5_job_d\\qat_mid2_7\\10x192_1B_qhead_qat_mid2_7_int8.xml",
+      "b16_median_ms": 5.6654,
+      "far5k_val_mse": 0.05489,
+      "far5k_sign_pct": 95.83,
+      "far5k_unmasked_top1_pct": 50.96,
+      "puzzles_0n_solved": 1344,
+      "puzzles_0n_pct": 67.91,
+      "puzzles_0n_2100_pct": 52.03,
+      "far5k_q_best_mse": 0.09658,
+      "far5k_q_v_corr": 0.9326
+    },
+    {
+      "name": "1B_ema9995_nncf_4head",
+      "xml": "weights\\phase5_job_d\\synth\\1B_ema9995_nncf_4head_hybrid_int8.xml",
+      "b16_median_ms": 5.8239,
+      "far5k_val_mse": 0.05069,
+      "far5k_sign_pct": 95.92,
+      "far5k_unmasked_top1_pct": 51.24,
+      "puzzles_0n_solved": 1330,
+      "puzzles_0n_pct": 67.21,
+      "puzzles_0n_2100_pct": 51.78,
+      "far5k_q_best_mse": 0.09006,
+      "far5k_q_v_corr": 0.9359,
+      "alpha_ema09995": 1.0
+    },
+    {
+      "name": "1B_soup65_ema_qat_4head",
+      "xml": "weights\\phase5_job_d\\synth\\1B_soup65_ema_qat_4head_hybrid_int8.xml",
+      "b16_median_ms": 5.713,
+      "far5k_val_mse": 0.05116,
+      "far5k_sign_pct": 96.05,
+      "far5k_unmasked_top1_pct": 50.8,
+      "puzzles_0n_solved": 1337,
+      "puzzles_0n_pct": 67.56,
+      "puzzles_0n_2100_pct": 52.28,
+      "far5k_q_best_mse": 0.09137,
+      "far5k_q_v_corr": 0.9352,
+      "alpha_ema09995": 0.65
+    },
+    {
+      "name": "1B_soup50_ema_qat_4head",
+      "xml": "weights\\phase5_job_d\\synth\\1B_soup50_ema_qat_4head_hybrid_int8.xml",
+      "b16_median_ms": 5.6965,
+      "far5k_val_mse": 0.05183,
+      "far5k_sign_pct": 96.05,
+      "far5k_unmasked_top1_pct": 50.82,
+      "puzzles_0n_solved": 1338,
+      "puzzles_0n_pct": 67.61,
+      "puzzles_0n_2100_pct": 52.54,
+      "far5k_q_best_mse": 0.09187,
+      "far5k_q_v_corr": 0.935,
+      "alpha_ema09995": 0.5
+    },
+    {
+      "name": "1B_soup35_ema_qat_4head",
+      "xml": "weights\\phase5_job_d\\synth\\1B_soup35_ema_qat_4head_hybrid_int8.xml",
+      "b16_median_ms": 5.6858,
+      "far5k_val_mse": 0.05252,
+      "far5k_sign_pct": 96.02,
+      "far5k_unmasked_top1_pct": 51.38,
+      "puzzles_0n_solved": 1345,
+      "puzzles_0n_pct": 67.96,
+      "puzzles_0n_2100_pct": 52.28,
+      "far5k_q_best_mse": 0.09305,
+      "far5k_q_v_corr": 0.9346,
+      "alpha_ema09995": 0.35
+    }
+  ],
+  "best_by_far5k_mse": "1B_ema9995_nncf_4head",
+  "best_soup_3head_xml": "weights\\phase5_job_d\\synth\\1B_ema9995_nncf_3head_hybrid_int8.xml",
+  "best_soup_200n_3head": {
+    "solved": 1653,
+    "total": 1979,
+    "pct": 83.53,
+    "2100_pct": 64.97,
+    "nps": 3062.8,
+    "time_s": 122.35
+  },
+  "best_soup_200n_4head_qfpu040": {
+    "solved": 1684,
+    "total": 1979,
+    "pct": 85.09,
+    "2100_pct": 65.23,
+    "nps": 3010.5,
+    "time_s": 124.4
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "power": {
+    "power_plugged": true,
+    "battery_pct": 100.0
+  },
+  "match1_summary": {
+    "score_pct": 51.0,
+    "wins": 40,
+    "draws": 22,
+    "losses": 38,
+    "q_won_match1": true
+  },
+  "mode": "lean3out_q",
+  "export_q_head": true,
+  "use_q_fpu": true,
+  "q_fpu_lambda": 0.4,
+  "candidates": [
+    {
+      "name": "1B_qat_mid2_7_lean3out_q",
+      "xml": "weights\\phase5_job_d\\lean_match2\\1B_qat_mid2_7_lean3out_q_hybrid_int8.xml",
+      "cache_dir": "weights\\phase5_job_d\\ov_cache\\lean_match2\\1B_qat_mid2_7_lean3out_q",
+      "outputs": [
+        "policy_logits",
+        "value",
+        "action_q"
+      ],
+      "b16_median_ms": 5.6412,
+      "b16_raw_pos_s": 2836.3,
+      "far5k_val_mse": 0.05494,
+      "far5k_sign_pct": 95.89,
+      "far5k_unmasked_top1_pct": 50.98,
+      "puzzles_0n_solved": 1352,
+      "puzzles_0n_pct": 68.32,
+      "puzzles_0n_2100_pct": 52.79,
+      "puzzles_200n_solved": 1680,
+      "puzzles_200n_pct": 84.89,
+      "puzzles_200n_2100_pct": 67.01,
+      "puzzles_200n_nps": 3056.6,
+      "puzzles_200n_time_s": 122.49,
+      "far5k_q_best_mse": 0.09652,
+      "far5k_q_v_corr": 0.9325,
+      "npz": "weights\\phase5_job_d\\lean_match2\\1B_qat_mid2_7_lean3out_q.npz"
+    },
+    {
+      "name": "1B_soup35_ema_qat_lean3out_q",
+      "xml": "weights\\phase5_job_d\\lean_match2\\1B_soup35_ema_qat_lean3out_q_hybrid_int8.xml",
+      "cache_dir": "weights\\phase5_job_d\\ov_cache\\lean_match2\\1B_soup35_ema_qat_lean3out_q",
+      "outputs": [
+        "policy_logits",
+        "value",
+        "action_q"
+      ],
+      "b16_median_ms": 5.569,
+      "b16_raw_pos_s": 2873.0,
+      "far5k_val_mse": 0.05252,
+      "far5k_sign_pct": 96.02,
+      "far5k_unmasked_top1_pct": 51.38,
+      "puzzles_0n_solved": 1345,
+      "puzzles_0n_pct": 67.96,
+      "puzzles_0n_2100_pct": 52.28,
+      "puzzles_200n_solved": 1686,
+      "puzzles_200n_pct": 85.19,
+      "puzzles_200n_2100_pct": 66.75,
+      "puzzles_200n_nps": 3069.5,
+      "puzzles_200n_time_s": 122.11,
+      "far5k_q_best_mse": 0.09305,
+      "far5k_q_v_corr": 0.9346,
+      "npz": "weights\\phase5_job_d\\lean_match2\\1B_soup35_ema_qat_lean3out_q.npz"
+    },
+    {
+      "name": "1B_traj60_jobc40_lean3out_q",
+      "xml": "weights\\phase5_job_d\\lean_match2\\1B_traj60_jobc40_lean3out_q_hybrid_int8.xml",
+      "cache_dir": "weights\\phase5_job_d\\ov_cache\\lean_match2\\1B_traj60_jobc40_lean3out_q",
+      "outputs": [
+        "policy_logits",
+        "value",
+        "action_q"
+      ],
+      "b16_median_ms": 5.5397,
+      "b16_raw_pos_s": 2888.2,
+      "far5k_val_mse": 0.05077,
+      "far5k_sign_pct": 95.83,
+      "far5k_unmasked_top1_pct": 51.16,
+      "puzzles_0n_solved": 1324,
+      "puzzles_0n_pct": 66.9,
+      "puzzles_0n_2100_pct": 51.02,
+      "puzzles_200n_solved": 1690,
+      "puzzles_200n_pct": 85.4,
+      "puzzles_200n_2100_pct": 66.24,
+      "puzzles_200n_nps": 3033.2,
+      "puzzles_200n_time_s": 123.47,
+      "far5k_q_best_mse": 0.15973,
+      "far5k_q_v_corr": 0.821,
+      "npz": "weights\\phase5_job_d\\lean_match2\\1B_traj60_jobc40_lean3out_q.npz"
+    }
+  ]
+}

@@ -187,7 +187,8 @@ struct Node {
     int32_t self_visits;        // Direct evaluations at this node
     int32_t num_legal_moves;    // Legal move count (-1 if unknown)
     int32_t board_idx;          // Index into FastTreeArena::boards (-1 if uninstantiated)
-    float fpu_bias;             // Per-child FPU bias (SEE / lookahead shaping, 0.0f by default)
+    float fpu_bias;             // Per-child FPU bias (SEE / learned Q(s,a) FPU shift, 0.0f by default)
+    float val_sigma;            // HL-Gauss-64 distributional std dev sigma_V(s) (0.18f neutral default)
     uint16_t move_packed;       // from_sq | (to_sq << 6) | (promo << 12)
     uint8_t is_expanded;
     uint8_t is_instantiated;
@@ -195,16 +196,24 @@ struct Node {
     uint8_t is_solved;
     uint8_t path_dep_draw;
     uint8_t has_cache_key;
+    uint8_t has_val_sigma;
+    uint8_t has_action_q;
 };
 
 struct CacheEntry {
     uint64_t key_hi;
     uint64_t key_lo;
     double leaf_val;
+    float val_sigma;
+    float mlh_pred;
+    uint8_t has_val_sigma;
+    uint8_t has_mlh;
+    uint8_t has_action_q;
     size_t byte_size;
     std::vector<uint16_t> unsorted_acts;
     std::vector<uint16_t> unsorted_moves;
     std::vector<float> unsorted_logits;
+    std::vector<float> unsorted_q_vals;
 };
 
 class LruEvalCache {
@@ -248,9 +257,15 @@ public:
         int32_t n_legal,
         const uint16_t* acts,
         const uint16_t* moves_packed,
-        const float* full_logits_4672
+        const float* full_logits_4672,
+        int32_t has_val_sigma = 0,
+        float val_sigma = 0.18f,
+        int32_t has_mlh = 0,
+        float mlh_pred = 60.0f,
+        const float* full_action_q_4672 = nullptr
     ) {
-        size_t eb = 192ULL + (size_t)n_legal * 16ULL;
+        size_t q_bytes = (full_action_q_4672 != nullptr && n_legal > 0) ? (size_t)n_legal * sizeof(float) : 0ULL;
+        size_t eb = 224ULL + (size_t)n_legal * 16ULL + q_bytes;
         if (eb > max_bytes_) {
             return nullptr;
         }
@@ -297,6 +312,11 @@ public:
         entry.key_hi = key_hi;
         entry.key_lo = key_lo;
         entry.leaf_val = leaf_val;
+        entry.val_sigma = val_sigma;
+        entry.mlh_pred = mlh_pred;
+        entry.has_val_sigma = (uint8_t)(has_val_sigma ? 1 : 0);
+        entry.has_mlh = (uint8_t)(has_mlh ? 1 : 0);
+        entry.has_action_q = (uint8_t)((full_action_q_4672 != nullptr && n_legal > 0) ? 1 : 0);
         entry.byte_size = eb;
         if (n_legal > 0) {
             entry.unsorted_acts.assign(acts, acts + n_legal);
@@ -304,6 +324,14 @@ public:
             entry.unsorted_logits.resize((size_t)n_legal);
             for (int32_t i = 0; i < n_legal; ++i) {
                 entry.unsorted_logits[(size_t)i] = full_logits_4672[acts[i]];
+            }
+            if (full_action_q_4672 != nullptr) {
+                entry.unsorted_q_vals.resize((size_t)n_legal);
+                for (int32_t i = 0; i < n_legal; ++i) {
+                    float qv = full_action_q_4672[acts[i]];
+                    if (std::isnan(qv) || std::isinf(qv)) qv = 0.0f;
+                    entry.unsorted_q_vals[(size_t)i] = std::clamp(qv, -1.0f, 1.0f);
+                }
             }
         }
 
@@ -413,6 +441,12 @@ public:
     double root_fpu_reduction;
     int use_exact_solver;
     int use_see_prior_shaping = 0;
+    int use_uncertainty_cpuct = 0;
+    double uncertainty_kappa = 1.25;
+    double uncertainty_center = 0.18;
+    int use_mlh_tiebreak = 0;
+    int use_q_fpu = 0;
+    double q_fpu_lambda = 0.25;
 
     using SyzygyLeafFn = int32_t (*)(
         void* user_ctx,
@@ -711,13 +745,46 @@ public:
         return parent_total / (double)eff_visits;
     }
 
-    inline double child_score_exact(const Node& ch, double fpu_val, double sqrt_n) const noexcept {
+    inline double effective_c_puct(const Node& cn) const noexcept {
+        if (!use_uncertainty_cpuct || !cn.has_val_sigma) {
+            return c_puct;
+        }
+        double sig = (double)cn.val_sigma;
+        if (std::isnan(sig) || std::isinf(sig)) {
+            return c_puct;
+        }
+        double mult = 1.0 + uncertainty_kappa * (sig - uncertainty_center);
+        if (mult < 0.80) mult = 0.80;
+        if (mult > 1.35) mult = 1.35;
+        return c_puct * mult;
+    }
+
+    inline double maybe_apply_mlh_tiebreak(double v, float mlh, int has_mlh) const noexcept {
+        if (!use_mlh_tiebreak || !has_mlh) {
+            return v;
+        }
+        if (std::isnan(v) || std::isinf(v) || std::isnan(mlh) || std::isinf(mlh)) {
+            return v;
+        }
+        if (std::abs(v) > 0.75) {
+            double sign_v = (v > 0.0) ? 1.0 : -1.0;
+            double norm_m = (60.0 - (double)mlh) / 60.0;
+            if (norm_m < -1.0) norm_m = -1.0;
+            if (norm_m > 1.0) norm_m = 1.0;
+            v += sign_v * 0.015 * norm_m;
+            if (v < -1.0) v = -1.0;
+            if (v > 1.0) v = 1.0;
+        }
+        return v;
+    }
+
+    inline double child_score_exact(const Node& ch, double fpu_val, double sqrt_n, double eff_cpuct) const noexcept {
 #if defined(__clang__)
 #pragma float_control(precise, on)
 #endif
         double q_parent = q_from_parent_view_exact(ch, fpu_val);
         int32_t eff_v = ch.visit_count + ch.virtual_loss;
-        double u = c_puct * ch.prior * (sqrt_n / (double)(1 + eff_v));
+        double u = eff_cpuct * ch.prior * (sqrt_n / (double)(1 + eff_v));
         return q_parent + u;
     }
 
@@ -773,8 +840,10 @@ public:
         }
 
         // 2. 8-wide SoA AVX2 Q + U evaluation (`_mm256_fmadd_ps`)
-        const __m256 v_fpu      = _mm256_set1_ps(fpu_f);
-        const __m256 v_c_sqrtn  = _mm256_set1_ps((float)c_puct * sqrt_n_f);
+        const double eff_cpuct  = effective_c_puct(cn);
+        const double fpu_scale  = (use_q_fpu && cn.has_action_q) ? (1.0 - q_fpu_lambda) : 1.0;
+        const __m256 v_fpu      = _mm256_set1_ps(fpu_f * (float)fpu_scale);
+        const __m256 v_c_sqrtn  = _mm256_set1_ps((float)eff_cpuct * sqrt_n_f);
         const __m256 v_one      = _mm256_set1_ps(1.0f);
         const __m256 v_neg_one  = _mm256_set1_ps(-1.0f);
         const __m256 v_zero_f   = _mm256_setzero_ps();
@@ -853,7 +922,7 @@ public:
 
         // Exact IEEE-754 double tie-resolver on ONLY the near-tied candidates
         double exact_sqrt_n = (cn.visit_count > 0) ? std::sqrt((double)cn.visit_count) : 1.0;
-        double exact_fpu = compute_fpu_exact(curr);
+        double exact_fpu = compute_fpu_exact(curr) * fpu_scale;
         double best_exact = -1.0e300;
         int32_t best_child = (first_cand >= 0) ? (fc + first_cand) : fc;
 
@@ -864,7 +933,7 @@ public:
                     int lane = (int)_tzcnt_u32(m);
                     m &= (m - 1U);
                     int32_t c_idx = fc + (b << 3) + lane;
-                    double sc = child_score_exact(nodes[(size_t)c_idx], exact_fpu, exact_sqrt_n);
+                    double sc = child_score_exact(nodes[(size_t)c_idx], exact_fpu, exact_sqrt_n, eff_cpuct);
                     if (sc > best_exact) {
                         best_exact = sc;
                         best_child = c_idx;
@@ -874,7 +943,7 @@ public:
         } else {
             for (int32_t i = 0; i < nc; ++i) {
                 int32_t c_idx = fc + i;
-                double sc = child_score_exact(nodes[(size_t)c_idx], exact_fpu, exact_sqrt_n);
+                double sc = child_score_exact(nodes[(size_t)c_idx], exact_fpu, exact_sqrt_n, eff_cpuct);
                 if (sc > best_exact) {
                     best_exact = sc;
                     best_child = c_idx;
@@ -932,24 +1001,32 @@ public:
 
     double expand_node_from_cache_entry(int32_t node_idx, const CacheEntry& entry, int32_t /*top_k*/) {
         int32_t n_legal = (int32_t)entry.unsorted_acts.size();
-        nodes[(size_t)node_idx].num_legal_moves = n_legal;
+        Node& nd = nodes[(size_t)node_idx];
+        nd.num_legal_moves = n_legal;
+        nd.val_sigma = entry.val_sigma;
+        nd.has_val_sigma = entry.has_val_sigma;
+        double adj_val = maybe_apply_mlh_tiebreak(entry.leaf_val, entry.mlh_pred, (int)entry.has_mlh);
         if (n_legal == 0) {
-            return entry.leaf_val;
+            return adj_val;
         }
 
         float e_l[256];
         float sum_e = 0.0f;
         compute_exact_f32_softmax(entry.unsorted_logits.data(), n_legal, e_l, sum_e);
 
+        const float* q_ptr = (entry.has_action_q && (int32_t)entry.unsorted_q_vals.size() == n_legal)
+            ? entry.unsorted_q_vals.data()
+            : nullptr;
         attach_or_update_children(
             node_idx,
             n_legal,
             entry.unsorted_acts.data(),
             entry.unsorted_moves.data(),
             e_l,
-            sum_e
+            sum_e,
+            q_ptr
         );
-        return entry.leaf_val;
+        return adj_val;
     }
 
     static inline double exact_prior_div(float ev, float sum_exp) noexcept {
@@ -978,14 +1055,29 @@ public:
         const uint16_t* c_acts,
         const uint16_t* c_moves,
         const float* exp_logits,
-        float sum_exp
+        float sum_exp,
+        const float* child_q_vals = nullptr
     ) {
         int32_t old_fc = nodes[(size_t)node_idx].first_child_idx;
         int32_t old_nc = nodes[(size_t)node_idx].num_children;
         int32_t child_ply = nodes[(size_t)node_idx].ply + 1;
         int32_t parent_bidx = (use_see_prior_shaping && native_board_mode) ? nodes[(size_t)node_idx].board_idx : -1;
         const bb::CBoard* parent_cb = (parent_bidx >= 0 && (size_t)parent_bidx < boards.size()) ? &boards[(size_t)parent_bidx] : nullptr;
+        const bool apply_q_fpu = (use_q_fpu != 0) && (child_q_vals != nullptr);
+        const float q_lam = (float)q_fpu_lambda;
         int32_t soa_off = soa.alloc_block(sel_len);
+
+        auto compute_edge_fpu_bias = [&](int32_t i, double pr) noexcept -> float {
+            float fb = compute_see_fpu_bias(parent_cb, c_moves[i], pr);
+            if (apply_q_fpu) {
+                float qv = child_q_vals[i];
+                if (std::isnan(qv) || std::isinf(qv)) qv = 0.0f;
+                if (qv < -1.0f) qv = -1.0f;
+                if (qv > 1.0f) qv = 1.0f;
+                fb += q_lam * qv;
+            }
+            return fb;
+        };
 
         if (old_nc == 0 || old_fc < 0) {
             int32_t new_fc = (int32_t)nodes.size();
@@ -995,7 +1087,8 @@ public:
                 Node ch{};
                 double pr = exact_prior_div(exp_logits[i], sum_exp);
                 ch.prior = pr;
-                ch.fpu_bias = compute_see_fpu_bias(parent_cb, c_moves[i], pr);
+                ch.fpu_bias = compute_edge_fpu_bias(i, pr);
+                ch.val_sigma = 0.18f;
                 ch.first_child_idx = -1;
                 ch.soa_offset = -1;
                 ch.soa_slot = soa_off + i;
@@ -1012,13 +1105,14 @@ public:
             nodes[(size_t)node_idx].num_children = sel_len;
             nodes[(size_t)node_idx].soa_offset = soa_off;
             nodes[(size_t)node_idx].is_expanded = 1;
+            nodes[(size_t)node_idx].has_action_q = apply_q_fpu ? 1 : 0;
         } else {
             int32_t new_fc = (int32_t)nodes.size();
             nodes.resize(nodes.size() + (size_t)sel_len);
             for (int32_t i = 0; i < sel_len; ++i) {
                 int32_t act = (int32_t)c_acts[i];
                 double pr = exact_prior_div(exp_logits[i], sum_exp);
-                float fb = compute_see_fpu_bias(parent_cb, c_moves[i], pr);
+                float fb = compute_edge_fpu_bias(i, pr);
                 int32_t matched_old = -1;
                 for (int32_t j = 0; j < old_nc; ++j) {
                     if (nodes[(size_t)(old_fc + j)].action_from_parent == act) {
@@ -1044,6 +1138,7 @@ public:
                     Node ch{};
                     ch.prior = pr;
                     ch.fpu_bias = fb;
+                    ch.val_sigma = 0.18f;
                     ch.first_child_idx = -1;
                     ch.soa_offset = -1;
                     ch.soa_slot = soa_off + i;
@@ -1061,6 +1156,7 @@ public:
             nodes[(size_t)node_idx].num_children = sel_len;
             nodes[(size_t)node_idx].soa_offset = soa_off;
             nodes[(size_t)node_idx].is_expanded = 1;
+            nodes[(size_t)node_idx].has_action_q = apply_q_fpu ? 1 : 0;
         }
     }
 
@@ -1265,7 +1361,7 @@ public:
         for (const auto& ch : cache_hits_to_process) {
             const CacheEntry* entry = cache ? cache->peek(ch.key_hi, ch.key_lo) : nullptr;
             if (entry == nullptr) continue;
-            double leaf_val = entry->leaf_val;
+            double leaf_val = maybe_apply_mlh_tiebreak(entry->leaf_val, entry->mlh_pred, (int)entry->has_mlh);
             if (nodes[(size_t)ch.leaf_idx].ply < cur_max_depth && !nodes[(size_t)ch.leaf_idx].is_expanded) {
                 int32_t bk = branching_k_for_ply(nodes[(size_t)ch.leaf_idx].ply, (int32_t)entry->unsorted_acts.size());
                 leaf_val = expand_node_from_cache_entry(ch.leaf_idx, *entry, bk);
@@ -1463,6 +1559,82 @@ FT_EXPORT int32_t ft_expand_root_from_cache(void* tree_ptr, uint64_t key_hi, uin
     return 1;
 }
 
+FT_EXPORT double ft_expand_node_with_logits_ext(
+    void* tree_ptr,
+    int32_t node_idx,
+    uint64_t key_hi,
+    uint64_t key_lo,
+    double leaf_val,
+    int32_t n_legal,
+    const uint16_t* acts,
+    const uint16_t* moves_packed,
+    const float* full_logits_4672,
+    int32_t has_val_sigma,
+    float val_sigma,
+    int32_t has_mlh,
+    float mlh_pred,
+    const float* full_action_q_4672,
+    int32_t top_k,
+    int32_t store_in_cache
+) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    if (std::isnan(leaf_val) || std::isinf(leaf_val)) {
+        leaf_val = 0.0;
+    }
+    Node& nd = t->nodes[(size_t)node_idx];
+    nd.num_legal_moves = n_legal;
+    nd.zobrist_hash = key_hi;
+    nd.verify_hash = key_lo;
+    nd.has_cache_key = 1;
+    nd.val_sigma = val_sigma;
+    nd.has_val_sigma = (uint8_t)(has_val_sigma ? 1 : 0);
+
+    if (store_in_cache && t->cache != nullptr) {
+        const CacheEntry* ce = t->cache->put_entry(
+            key_hi,
+            key_lo,
+            leaf_val,
+            n_legal,
+            acts,
+            moves_packed,
+            full_logits_4672,
+            has_val_sigma,
+            val_sigma,
+            has_mlh,
+            mlh_pred,
+            full_action_q_4672
+        );
+        if (ce != nullptr && top_k > 0) {
+            return t->expand_node_from_cache_entry(node_idx, *ce, n_legal);
+        }
+    }
+
+    double adj_val = t->maybe_apply_mlh_tiebreak(leaf_val, mlh_pred, has_mlh);
+    if (n_legal <= 0 || top_k <= 0) {
+        return adj_val;
+    }
+
+    // 100% of legal moves expanded (zero pruning!)
+    float l_sel[256];
+    float e_l[256];
+    float q_sel[256];
+    for (int32_t i = 0; i < n_legal; ++i) {
+        l_sel[i] = full_logits_4672[acts[i]];
+    }
+    const float* q_ptr = nullptr;
+    if (full_action_q_4672 != nullptr) {
+        for (int32_t i = 0; i < n_legal; ++i) {
+            q_sel[i] = full_action_q_4672[acts[i]];
+        }
+        q_ptr = q_sel;
+    }
+    float sum_e = 0.0f;
+    compute_exact_f32_softmax(l_sel, n_legal, e_l, sum_e);
+
+    t->attach_or_update_children(node_idx, n_legal, acts, moves_packed, e_l, sum_e, q_ptr);
+    return adj_val;
+}
+
 FT_EXPORT double ft_expand_node_with_logits(
     void* tree_ptr,
     int32_t node_idx,
@@ -1477,39 +1649,24 @@ FT_EXPORT double ft_expand_node_with_logits(
     int32_t top_k,
     int32_t store_in_cache
 ) {
-    auto* t = static_cast<FastTreeArena*>(tree_ptr);
-    if (std::isnan(leaf_val) || std::isinf(leaf_val)) {
-        leaf_val = 0.0;
-    }
-    t->nodes[(size_t)node_idx].num_legal_moves = n_legal;
-    t->nodes[(size_t)node_idx].zobrist_hash = key_hi;
-    t->nodes[(size_t)node_idx].verify_hash = key_lo;
-    t->nodes[(size_t)node_idx].has_cache_key = 1;
-
-    if (store_in_cache && t->cache != nullptr) {
-        const CacheEntry* ce = t->cache->put_entry(
-            key_hi, key_lo, leaf_val, n_legal, acts, moves_packed, full_logits_4672
-        );
-        if (ce != nullptr && top_k > 0) {
-            return t->expand_node_from_cache_entry(node_idx, *ce, n_legal);
-        }
-    }
-
-    if (n_legal <= 0 || top_k <= 0) {
-        return leaf_val;
-    }
-
-    // 100% of legal moves expanded (zero pruning!)
-    float l_sel[256];
-    float e_l[256];
-    for (int32_t i = 0; i < n_legal; ++i) {
-        l_sel[i] = full_logits_4672[acts[i]];
-    }
-    float sum_e = 0.0f;
-    compute_exact_f32_softmax(l_sel, n_legal, e_l, sum_e);
-
-    t->attach_or_update_children(node_idx, n_legal, acts, moves_packed, e_l, sum_e);
-    return leaf_val;
+    return ft_expand_node_with_logits_ext(
+        tree_ptr,
+        node_idx,
+        key_hi,
+        key_lo,
+        leaf_val,
+        n_legal,
+        acts,
+        moves_packed,
+        full_logits_4672,
+        0,
+        0.18f,
+        0,
+        60.0f,
+        nullptr,
+        top_k,
+        store_in_cache
+    );
 }
 
 static inline int32_t select_begin_impl(
@@ -2345,10 +2502,15 @@ FT_EXPORT int32_t ft_record_seen_root_native(void* tree_ptr) {
     return 1;
 }
 
-FT_EXPORT double ft_expand_root_native(
+FT_EXPORT double ft_expand_root_native_ext(
     void* tree_ptr,
     double root_val,
     const float* full_logits_4672,
+    int32_t has_val_sigma,
+    float val_sigma,
+    int32_t has_mlh,
+    float mlh_pred,
+    const float* full_action_q_4672,
     int32_t store_in_cache
 ) {
     auto* t = static_cast<FastTreeArena*>(tree_ptr);
@@ -2356,7 +2518,7 @@ FT_EXPORT double ft_expand_root_native(
     uint16_t acts[256];
     uint16_t moves[256];
     int32_t n_leg = rb.generate_legal_moves_and_actions(acts, moves);
-    return ft_expand_node_with_logits(
+    return ft_expand_node_with_logits_ext(
         tree_ptr,
         0,
         rb.zobrist_hi,
@@ -2366,10 +2528,23 @@ FT_EXPORT double ft_expand_root_native(
         acts,
         moves,
         full_logits_4672,
-        nullptr,
+        has_val_sigma,
+        val_sigma,
+        has_mlh,
+        mlh_pred,
+        full_action_q_4672,
         n_leg,
         store_in_cache
     );
+}
+
+FT_EXPORT double ft_expand_root_native(
+    void* tree_ptr,
+    double root_val,
+    const float* full_logits_4672,
+    int32_t store_in_cache
+) {
+    return ft_expand_root_native_ext(tree_ptr, root_val, full_logits_4672, 0, 0.18f, 0, 60.0f, nullptr, store_in_cache);
 }
 
 // Writes `(B, 18, 8, 8)` directly into OpenVINO `InferRequest.get_input_tensor().data` pointer!
@@ -2474,12 +2649,15 @@ FT_EXPORT void ft_pack_inflight_batch_native(
     t->pack_leaves_to_tensor(h->leaves.data(), (int32_t)h->leaves.size(), target_batch_size, out_batch_tensors);
 }
 
-FT_EXPORT void ft_backup_batch_native(
+FT_EXPORT void ft_backup_batch_native_ext(
     void* tree_ptr,
     void* batch_handle,
     const float* p_logits_batch,
     const float* val_batch,
     int32_t val_cols,
+    const float* sigma_batch,
+    const float* mlh_batch,
+    const float* action_q_batch,
     int32_t max_depth,
     int32_t store_in_cache,
     int32_t* out_novel_npu,
@@ -2513,6 +2691,11 @@ FT_EXPORT void ft_backup_batch_native(
         const float* v_row = val_batch + (size_t)i * (size_t)val_cols;
         double leaf_val = (val_cols == 3) ? (double)(v_row[0] - v_row[2]) : (double)v_row[0];
         const float* logits_row = p_logits_batch + (size_t)i * 4672ULL;
+        const int32_t has_sig = (sigma_batch != nullptr) ? 1 : 0;
+        const float sig_val = (sigma_batch != nullptr) ? sigma_batch[i] : 0.18f;
+        const int32_t has_m = (mlh_batch != nullptr) ? 1 : 0;
+        const float mlh_val = (mlh_batch != nullptr) ? mlh_batch[i] : 60.0f;
+        const float* q_row = (action_q_batch != nullptr) ? (action_q_batch + (size_t)i * 4672ULL) : nullptr;
 
         int32_t ply = t->nodes[(size_t)leaf_idx].ply;
         int32_t do_expand = (ply < max_depth && !t->nodes[(size_t)leaf_idx].is_expanded) ? 1 : 0;
@@ -2523,7 +2706,7 @@ FT_EXPORT void ft_backup_batch_native(
         }
         int32_t bk = do_expand ? n_leg : 0;
 
-        ft_expand_node_with_logits(
+        double adj_val = ft_expand_node_with_logits_ext(
             tree_ptr,
             leaf_idx,
             cb.zobrist_hi,
@@ -2533,17 +2716,48 @@ FT_EXPORT void ft_backup_batch_native(
             acts,
             moves,
             logits_row,
-            nullptr,
+            has_sig,
+            sig_val,
+            has_m,
+            mlh_val,
+            q_row,
             bk,
             store_in_cache
         );
 
-        t->backup_value(leaf_idx, h->paths[(size_t)i], leaf_val);
+        t->backup_value(leaf_idx, h->paths[(size_t)i], adj_val);
     }
 
     *out_novel_npu = novel;
     *out_wasted_dup = dup;
     ft_destroy_inflight_batch(batch_handle);
+}
+
+FT_EXPORT void ft_backup_batch_native(
+    void* tree_ptr,
+    void* batch_handle,
+    const float* p_logits_batch,
+    const float* val_batch,
+    int32_t val_cols,
+    int32_t max_depth,
+    int32_t store_in_cache,
+    int32_t* out_novel_npu,
+    int32_t* out_wasted_dup
+) {
+    ft_backup_batch_native_ext(
+        tree_ptr,
+        batch_handle,
+        p_logits_batch,
+        val_batch,
+        val_cols,
+        nullptr,
+        nullptr,
+        nullptr,
+        max_depth,
+        store_in_cache,
+        out_novel_npu,
+        out_wasted_dup
+    );
 }
 
 FT_EXPORT int32_t ft_test_generate_moves_native(
@@ -2633,6 +2847,24 @@ FT_EXPORT int32_t ft_test_math_guards_active(double d_val, float f_val) {
 FT_EXPORT void ft_tree_set_see_prior_shaping(void* tree_ptr, int32_t enabled) {
     auto* t = static_cast<FastTreeArena*>(tree_ptr);
     t->use_see_prior_shaping = enabled ? 1 : 0;
+}
+
+FT_EXPORT void ft_tree_set_uncertainty_cpuct(void* tree_ptr, int32_t enabled, double kappa, double center) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    t->use_uncertainty_cpuct = enabled ? 1 : 0;
+    t->uncertainty_kappa = kappa;
+    t->uncertainty_center = center;
+}
+
+FT_EXPORT void ft_tree_set_mlh_tiebreak(void* tree_ptr, int32_t enabled) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    t->use_mlh_tiebreak = enabled ? 1 : 0;
+}
+
+FT_EXPORT void ft_tree_set_q_fpu(void* tree_ptr, int32_t enabled, double lambda_q) {
+    auto* t = static_cast<FastTreeArena*>(tree_ptr);
+    t->use_q_fpu = enabled ? 1 : 0;
+    t->q_fpu_lambda = std::clamp(lambda_q, 0.0, 1.0);
 }
 
 FT_EXPORT void ft_tree_set_syzygy_cb(void* tree_ptr, void* cb_ptr, void* user_ctx, int32_t max_pieces) {

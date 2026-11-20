@@ -1,0 +1,62 @@
+{
+  "power": {
+    "power_plugged": true,
+    "battery_pct": 100.0
+  },
+  "candidates": [
+    {
+      "name": "1B_ema9995_lean2out",
+      "xml": "weights\\phase5_job_d\\lean2out_match3\\1B_ema9995_lean2out_hybrid_int8.xml",
+      "cache_dir": "weights\\phase5_job_d\\ov_cache\\lean2out_match3\\1B_ema9995_lean2out",
+      "outputs": [
+        "policy_logits",
+        "value"
+      ],
+      "b16_median_ms": 5.4574,
+      "b16_raw_pos_s": 2931.8,
+      "far5k_val_mse": 0.05069,
+      "far5k_sign_pct": 95.92,
+      "far5k_unmasked_top1_pct": 51.24,
+      "puzzles_0n_solved": 1330,
+      "puzzles_0n_pct": 67.21,
+      "puzzles_0n_2100_pct": 51.78,
+      "npz": "weights\\phase5_job_d\\lean2out_match3\\1B_ema9995_lean2out.npz"
+    },
+    {
+      "name": "1B_ema65_qat35_lean2out",
+      "xml": "weights\\phase5_job_d\\lean2out_match3\\1B_ema65_qat35_lean2out_hybrid_int8.xml",
+      "cache_dir": "weights\\phase5_job_d\\ov_cache\\lean2out_match3\\1B_ema65_qat35_lean2out",
+      "outputs": [
+        "policy_logits",
+        "value"
+      ],
+      "b16_median_ms": 5.5931,
+      "b16_raw_pos_s": 2860.6,
+      "far5k_val_mse": 0.05116,
+      "far5k_sign_pct": 96.05,
+      "far5k_unmasked_top1_pct": 50.8,
+      "puzzles_0n_solved": 1337,
+      "puzzles_0n_pct": 67.56,
+      "puzzles_0n_2100_pct": 52.28,
+      "npz": "weights\\phase5_job_d\\lean2out_match3\\1B_ema65_qat35_lean2out.npz"
+    },
+    {
+      "name": "1B_ema65_jobc35_lean2out",
+      "xml": "weights\\phase5_job_d\\lean2out_match3\\1B_ema65_jobc35_lean2out_hybrid_int8.xml",
+      "cache_dir": "weights\\phase5_job_d\\ov_cache\\lean2out_match3\\1B_ema65_jobc35_lean2out",
+      "outputs": [
+        "policy_logits",
+        "value"
+      ],
+      "b16_median_ms": 5.4748,
+      "b16_raw_pos_s": 2922.5,
+      "far5k_val_mse": 0.05006,
+      "far5k_sign_pct": 95.74,
+      "far5k_unmasked_top1_pct": 51.24,
+      "puzzles_0n_solved": 1329,
+      "puzzles_0n_pct": 67.16,
+      "puzzles_0n_2100_pct": 52.03,
+      "npz": "weights\\phase5_job_d\\lean2out_match3\\1B_ema65_jobc35_lean2out.npz"
+    }
+  ]
+}

@@ -46,9 +46,11 @@ for _p in [os.getcwd(), "/opt/ml/code", str(Path(__file__).resolve().parents[2])
 from neurachess.training.bitboard_dataset import RECORD_SIZE_V1, RECORD_SIZE_V2, pack_position, unpack_position
 from neurachess.training.phase4_model import (
     ChessSEResNetPhase4,
+    Phase5ActionValueNet,
     apply_middle_w8a8_qat,
     enforce_frozen_bn_eval,
     expand_10x192_to_12x192_identity,
+    export_folded_npz_to_ov,
     export_phase4_to_folded_npz_and_ov,
     extract_10x192_state_dict,
     load_346m_into_10x192_phase4,
@@ -671,6 +673,9 @@ def evaluate_unified_150k(
         dec_cnt = 0
         dec_ok = 0
         max_pol_drift = 0.0
+        has_q_eval = False
+        tot_q_mse = 0.0
+        tot_q_mae = 0.0
 
         for i in range(0, n, batch_size):
             b1 = min(n, i + batch_size)
@@ -680,7 +685,9 @@ def evaluate_unified_150k(
             v_targets = torch.tanh(cps * CP_TANH_SCALE)
 
             with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=(device.type == "cuda")):
-                logits, hl_logits, val_exp, _ = raw_model(inputs)
+                out_t = raw_model(inputs)
+                logits, hl_logits, val_exp = out_t[0], out_t[1], out_t[2]
+                action_q = out_t[4] if len(out_t) >= 5 else None
 
             mask_t = torch.from_numpy(masks_bool[i:b1]).to(device)
             masked_logits = logits.float() + (~mask_t).float() * -10000.0
@@ -700,6 +707,12 @@ def evaluate_unified_150k(
                 dec_ok += int(((vp[dec] * v_targets[dec]) > 0).sum().item())
                 dec_cnt += int(dec.sum().item())
 
+            if action_q is not None:
+                has_q_eval = True
+                q_best = action_q.float().gather(1, acts.unsqueeze(1)).squeeze(1)
+                tot_q_mse += float(((q_best - v_targets) ** 2).sum().item())
+                tot_q_mae += float((q_best - v_targets).abs().sum().item())
+
             if ref_baseline_pol is not None and split_name in ref_baseline_pol and i == 0:
                 ref_slice = ref_baseline_pol[split_name].to(device)
                 k = min(ref_slice.shape[0], logits.shape[0])
@@ -714,6 +727,9 @@ def evaluate_unified_150k(
             "val_mse": round(tot_mse / max(1, n), 5),
             "decisive_sign_pct": round(100.0 * dec_ok / max(1, dec_cnt), 2),
         }
+        if has_q_eval:
+            row["q_best_mse"] = round(tot_q_mse / max(1, n), 5)
+            row["q_best_mae"] = round(tot_q_mae / max(1, n), 4)
         if ref_baseline_pol is not None and split_name in ref_baseline_pol:
             row["max_policy_logit_drift_vs_346m"] = round(max_pol_drift, 6)
         results[split_name] = row
@@ -757,8 +773,10 @@ def _train_step_batch(
     pol_weight: float,
     val_weight: float,
     mlh_weight: float,
+    q_weight: float = 0.0,
     grad_clip: float = 1.0,
-) -> tuple[float, float, float, float]:
+    return_scalars: bool = True,
+) -> tuple[float, float, float, float, float]:
     inp, _, cps = unpack_v1_tensor_to_inputs_and_meta(raw_v1)
     inp = inp.to(device=device, memory_format=torch.channels_last if device.type == "cuda" else torch.contiguous_format)
     acts8, probs8, plies_left, has_mlh = unpack_unified_sidecar_batch(raw_sc, device)
@@ -775,8 +793,11 @@ def _train_step_batch(
             with torch.no_grad():
                 feat = raw_m.forward_trunk(inp)
             pol_logits, hl_logits, val_exp, mlh_pred = raw_m.forward_policy_and_heads(feat)
+            action_q = raw_m.forward_action_q(feat) if (q_weight > 0.0 and hasattr(raw_m, "forward_action_q")) else None
         else:
-            pol_logits, hl_logits, val_exp, mlh_pred = model(inp)
+            out_t = model(inp)
+            pol_logits, hl_logits, val_exp, mlh_pred = out_t[0], out_t[1], out_t[2], out_t[3]
+            action_q = out_t[4] if len(out_t) >= 5 else None
 
         l_hl_ce = -(hl_targets * F.log_softmax(hl_logits.float(), dim=-1)).sum(dim=-1).mean()
         l_val_mse = F.mse_loss(val_exp.squeeze(-1).float(), v_target)
@@ -792,13 +813,38 @@ def _train_step_batch(
             per_ex = F.smooth_l1_loss(mlh_pred.squeeze(-1).float() / 50.0, plies_left / 50.0, reduction="none")
             l_mlh = (per_ex * has_mlh).sum() / mlh_cnt.clamp(min=1.0)
 
-        loss = pol_weight * l_pol + val_weight * l_hl + mlh_weight * l_mlh
+        l_q = torch.tensor(0.0, device=device)
+        if q_weight > 0.0 and action_q is not None:
+            B = raw_sc.shape[0]
+            num_topk = raw_sc[:, 0].long().clamp(1, 8)
+            acts_i16 = raw_sc[:, 4:20].contiguous().view(torch.int16).view(B, 8).long()
+            raw_acts_u16 = torch.where(acts_i16 < 0, acts_i16 + 65536, acts_i16)
+            k_idx = torch.arange(8, device=device).unsqueeze(0)
+            valid_q_mask = ((k_idx < num_topk.unsqueeze(1)) & (raw_acts_u16 < 4672) & (probs8 > 0.0)).float()
+
+            # Logit (atanh) space action-value target:
+            # Q_target(s, a_k) = tanh(atanh(clip(v, -0.995, 0.995)) + tau * clip(ln(max(p_k, 1e-4) / max_j p_j), -6, 0))
+            # tau = 0.25 on Stockfish Multi-PV (has_mlh == 0), tau = 0.35 on Lc0 T80 MCTS (has_mlh == 1)
+            v_clip = v_target.clamp(-0.995, 0.995)
+            z_v = torch.atanh(v_clip).unsqueeze(1)
+            p_max = probs8.amax(dim=-1, keepdim=True).clamp(min=1e-4)
+            log_ratio = torch.log(probs8.clamp(min=1e-4) / p_max).clamp(-6.0, 0.0)
+            tau = torch.where(has_mlh > 0.5, 0.35, 0.25).unsqueeze(1)
+            q_target = torch.tanh(z_v + tau * log_ratio)
+
+            q_pred_8 = action_q.float().gather(1, acts8)
+            per_q = F.smooth_l1_loss(q_pred_8, q_target, reduction="none")
+            l_q = (per_q * valid_q_mask).sum() / valid_q_mask.sum().clamp(min=1.0)
+
+        loss = pol_weight * l_pol + val_weight * l_hl + mlh_weight * l_mlh + q_weight * l_q
 
     loss.backward()
     if grad_clip > 0.0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
-    return float(loss.item()), float(l_pol.item()), float(l_hl.item()), float(l_mlh.item())
+    if not return_scalars:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    return float(loss.item()), float(l_pol.item()), float(l_hl.item()), float(l_mlh.item()), float(l_q.item())
 
 
 def _train_on_pool(
@@ -819,6 +865,7 @@ def _train_on_pool(
     max_positions: int,
     s3_ckpt_fn=None,
     stop_deadline_ts: float = 0.0,
+    q_weight: float = 0.0,
 ) -> bool:
     """Iterate randomized minibatches directly from GPU-pinned uint8 chunk arrays."""
     enforce_frozen_bn_eval(model)
@@ -853,25 +900,29 @@ def _train_on_pool(
             idx = perm[bi * batch_size : (bi + 1) * batch_size]
             rb_v1 = v1_t.index_select(0, idx)
             rb_sc = sc_t.index_select(0, idx)
-            loss_v, lp_v, lh_v, lm_v = _train_step_batch(
+            will_log = ((step_state["step"] + 1) % 500 == 0)
+            loss_v, lp_v, lh_v, lm_v, lq_v = _train_step_batch(
                 model, optimizer, rb_v1, rb_sc, device,
                 freeze_trunk=freeze_trunk,
                 pol_weight=pol_weight,
                 val_weight=val_weight,
                 mlh_weight=mlh_weight,
+                q_weight=q_weight,
+                return_scalars=will_log,
             )
             for ema in ema_list:
                 ema.update(model)
 
             step_state["step"] += 1
             step_state["seen"] += batch_size
-            if step_state["step"] % 500 == 0:
+            if will_log:
                 dt = max(0.1, time.time() - step_state["t0"])
                 rate = step_state["seen"] / dt
                 lrs = [round(pg["lr"], 7) for pg in optimizer.param_groups]
+                q_str = f", q={lq_v:.4f}" if q_weight > 0.0 else ""
                 print(
                     f"  [Step {step_state['step']:6d} | {step_state['seen']:,}/{max_positions:,}] "
-                    f"{rate:7.0f} pos/s | loss={loss_v:.4f} (pol={lp_v:.4f}, hl={lh_v:.4f}, mlh={lm_v:.4f}) | lr={lrs}",
+                    f"{rate:7.0f} pos/s | loss={loss_v:.4f} (pol={lp_v:.4f}, hl={lh_v:.4f}, mlh={lm_v:.4f}{q_str}) | lr={lrs}",
                     flush=True,
                 )
             if s3_ckpt_fn is not None and (time.time() - step_state["last_ckpt"]) >= 900.0:
@@ -895,7 +946,7 @@ def _capture_first_batch_pol_logits(model: nn.Module, eval_files: dict[str, Path
             inp, _, _ = unpack_v1_tensor_to_inputs_and_meta(arr)
             inp = inp.to(device=device, memory_format=torch.channels_last if device.type == "cuda" else torch.contiguous_format)
             with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=(device.type == "cuda")):
-                pol, _, _, _ = raw_m(inp)
+                pol = raw_m(inp)[0]
             out[k] = pol.detach().cpu()
     return out
 
@@ -1230,13 +1281,33 @@ def run_harvest_shards(args: argparse.Namespace, s3_client, dirs: dict) -> None:
                 print(f"[Harvester w={w_id}] Loaded {len(v_init):,} V2 SF seed records (will top up to {sf_per_shard:,} from Lichess stream)", flush=True)
 
     streams_per_worker = 2
-    base_byte_offset = max(3_000_000_000, int(sf_base_offset * 75))
-    region_span_bytes = 3_500_000_000
+    explicit_byte_off = max(0, int(getattr(args, "sf_byte_offset", 0)))
+    base_byte_offset = explicit_byte_off if explicit_byte_off > 0 else max(3_000_000_000, int(sf_base_offset * 75))
+    total_file_bytes = 22_499_667_845
+    try:
+        head_req = urllib.request.Request(LICHESS_EVAL_URL, method="HEAD", headers=UA_HEADER)
+        with urllib.request.urlopen(head_req, timeout=15) as hr:
+            cl = int(hr.headers.get("Content-Length", 0))
+            if cl > 1_000_000_000:
+                total_file_bytes = cl
+    except Exception:
+        pass
+    avail_bytes = max(200_000_000, total_file_bytes - base_byte_offset - 50_000_000)
+    total_streams = max(1, n_workers * streams_per_worker)
+    region_span_bytes = min(3_500_000_000, avail_bytes // total_streams)
     done_before = len(my_shard_ids) - len(todo_ids)
+    print(
+        f"[Harvester w={w_id}] SF byte region: base={base_byte_offset:,}, total={total_file_bytes:,}, "
+        f"span={region_span_bytes:,} bytes/stream ({total_streams} streams)",
+        flush=True,
+    )
 
     def _harv_sf_worker(stream_idx: int):
         g_idx = w_id * streams_per_worker + stream_idx
-        start_byte = base_byte_offset + g_idx * region_span_bytes + (done_before // streams_per_worker) * int(sf_per_shard * 75)
+        start_byte = min(
+            total_file_bytes - 60_000_000,
+            base_byte_offset + g_idx * region_span_bytes + (done_before // streams_per_worker) * int(sf_per_shard * 52),
+        )
         st = LichessContinuousStream(
             sf_exe, excl_hashes, excl_bin,
             initial_skip=1, threads=2,
@@ -1275,12 +1346,12 @@ def run_harvest_shards(args: argparse.Namespace, s3_client, dirs: dict) -> None:
                         sf_seq += 1
                     else:
                         st.close()
-                        st.byte_offset = start_byte + int(sf_streamed_total * 75)
+                        st.byte_offset = min(total_file_bytes - 60_000_000, start_byte + int(sf_streamed_total * 52))
                         time.sleep(2.0)
                 except Exception as exc:
                     print(f"[Harvester SF w={w_id} s={stream_idx}] Stream reopen ({exc})", flush=True)
                     st.close()
-                    st.byte_offset = start_byte + int(sf_streamed_total * 75)
+                    st.byte_offset = min(total_file_bytes - 60_000_000, start_byte + int(sf_streamed_total * 52))
                     time.sleep(3.0)
         finally:
             st.close()
@@ -2120,9 +2191,474 @@ def run_job_c_10x192_mastery(args: argparse.Namespace, device: torch.device, s3_
                 print(f"  [S3 Upload] checkpoints/phase4_job_c/{rel}", flush=True)
 
 
+def run_job_d_1b_qhead(args: argparse.Namespace, device: torch.device, s3_client, dirs: dict) -> None:
+    """Phase 5 ("Job D"): +214M Scale-Up (786M -> 1.00B) + Parallel Conv73 Action-Value Head Q(s,a)."""
+    tmp_dir: Path = dirs["tmp"]
+    model_dir: Path = dirs["model"]
+    ckpt_dir: Path = dirs["ckpt"]
+    eval_files: dict[str, Path] = dirs["eval_files"]
+    t0_job = time.time()
+
+    jc_s3_key = getattr(
+        args,
+        "job_c_init_s3_key",
+        "checkpoints/phase4_job_c/stage1_fp16/10x192_mastery_ema09999_fp16.pt",
+    )
+    jc_init_pt = _download_or_locate(
+        dirs["search"],
+        "10x192_mastery_ema09999_fp16.pt",
+        s3_client,
+        args.bucket,
+        jc_s3_key,
+        tmp_dir / "10x192_mastery_ema09999_fp16.pt",
+    )
+
+    m10_q = Phase5ActionValueNet(
+        num_blocks=10, channels=192, use_bn=False, conv_bias=True, q_use_bn=True
+    ).to(device)
+    n_copied = m10_q.load_phase4_backbone_and_heads(jc_init_pt)
+    if device.type == "cuda":
+        m10_q = m10_q.to(memory_format=torch.channels_last)
+
+    # Verify exact Step-0 policy & value preservation against Job C ema09999
+    m_ref = ChessSEResNetPhase4(num_blocks=10, channels=192, use_bn=False, conv_bias=True).to(device)
+    raw_jc = torch.load(str(jc_init_pt), map_location="cpu", weights_only=False)
+    m_ref.load_state_dict(extract_10x192_state_dict(raw_jc), strict=True)
+    if device.type == "cuda":
+        m_ref = m_ref.to(memory_format=torch.channels_last)
+    ref_pol = _capture_first_batch_pol_logits(m_ref, eval_files, device)
+    del m_ref
+
+    # Stage split: 184M BF16 + 30M Middle-2..7 W8A8 QAT (proportional for small local smoke tests)
+    if args.total_positions >= 50_000_000:
+        qat_pos = 30_000_000
+        q_warmup_pos = 20_000_000
+    else:
+        qat_pos = max(args.batch_size, args.total_positions // 7)
+        q_warmup_pos = max(args.batch_size, args.total_positions // 10)
+    stage1_pos = max(args.batch_size, args.total_positions - qat_pos)
+
+    eval_logs: dict = {}
+    stage1_done = False
+
+    s3_s1_done_key = "checkpoints/phase5_job_d/stage1_complete.pt"
+    s3_resume_key = "checkpoints/phase5_job_d/latest.pt"
+    local_s1_done = ckpt_dir / "job_d_stage1_complete.pt"
+    local_resume = ckpt_dir / "job_d_latest.pt"
+
+    q_head_params = list(m10_q.q_conv.parameters()) + list(m10_q.q_bn.parameters())
+    q_ids = {id(p) for p in q_head_params}
+    base_params = [p for p in m10_q.parameters() if p.requires_grad and id(p) not in q_ids]
+
+    ema_9995 = FastModelEMA(m10_q, decay=0.9995)
+    ema_9999 = FastModelEMA(m10_q, decay=0.9999)
+    opt = torch.optim.AdamW(
+        [{"params": q_head_params, "lr": 1e-4}, {"params": base_params, "lr": 5e-5}],
+        weight_decay=1e-4,
+        fused=(device.type == "cuda"),
+    )
+    step_state = {"step": 0, "seen": 0, "seed": args.seed, "t0": time.time(), "last_ckpt": time.time()}
+
+    if args.resume and s3_client and args.bucket:
+        try:
+            s3_client.download_file(args.bucket, s3_s1_done_key, str(local_s1_done))
+            ck_done = torch.load(str(local_s1_done), map_location=device, weights_only=False)
+            ema_9995.load_shadow_dict(ck_done["ema_09995_state_dict"], m10_q)
+            ema_9999.load_shadow_dict(ck_done["ema_09999_state_dict"], m10_q)
+            step_state["step"] = int(ck_done.get("step", 0))
+            step_state["seen"] = int(ck_done.get("seen", stage1_pos))
+            eval_logs.update(ck_done.get("eval_logs", {}))
+            stage1_done = True
+            print(f"[Job D Resume] Stage 2a already complete (seen={step_state['seen']:,}); resuming into Stage 2b QAT!", flush=True)
+        except Exception:
+            stage1_done = False
+
+    if not stage1_done and args.resume and s3_client and args.bucket:
+        try:
+            s3_client.download_file(args.bucket, s3_resume_key, str(local_resume))
+            ck = torch.load(str(local_resume), map_location=device, weights_only=False)
+            m10_q.load_state_dict(ck["model_state_dict"])
+            ema_9995.load_shadow_dict(ck["ema_09995_state_dict"], m10_q)
+            ema_9999.load_shadow_dict(ck["ema_09999_state_dict"], m10_q)
+            opt.load_state_dict(ck["optimizer_state_dict"])
+            step_state["step"] = int(ck.get("step", 0))
+            step_state["seen"] = int(ck.get("seen", 0))
+            eval_logs.update(ck.get("eval_logs", {}))
+            print(f"[Job D Resume OK] Stage 2a step={step_state['step']:,}, seen={step_state['seen']:,}", flush=True)
+        except Exception as e:
+            print(f"[Job D Resume Note] Starting fresh ({e})", flush=True)
+
+    if not stage1_done and step_state["seen"] == 0:
+        print(f"\n=== [Job D Step 0] Verifying 10x192-Q Warm-Start ({n_copied} tensors copied from Job C ema09999) ===", flush=True)
+        ev0 = evaluate_unified_150k(m10_q, eval_files, device, ref_baseline_pol=ref_pol)
+        mse0 = _mean_150k_val_mse(ev0)
+        max_drift0 = max(
+            float(v.get("max_policy_logit_drift_vs_346m", 0.0))
+            for v in ev0.values()
+            if isinstance(v, dict)
+        )
+        eval_logs["step0_job_c_warmstart"] = ev0
+        print(f"[Job D Step-0 Eval] mean_mse={mse0:.5f} | max_pol_drift={max_drift0:.3e} | {json.dumps(ev0)}", flush=True)
+        if max_drift0 > 1e-5:
+            raise RuntimeError(f"Job D Step-0 policy drift check FAILED: {max_drift0:.3e} > 1e-5")
+
+    # Async S3 double-buffered shard prefetcher across the 55 fresh 60/40 shards (110M unique pos)
+    pool_q: queue.Queue = queue.Queue(maxsize=4)
+    stop_prod = threading.Event()
+    s3_pref = args.s3_shard_prefix.strip("/")
+
+    def _s3_shard_producer_d():
+        dl_dir = tmp_dir / "job_d_s3_prefetch"
+        pass_idx = step_state["seen"] // 110_000_000
+        seen_in_pass: set[str] = set()
+        wait_logged = False
+        while not stop_prod.is_set():
+            ready_keys = list_ready_s3_mix_shards(s3_client, args.bucket, s3_pref)
+            unseen = [k for k in ready_keys if k not in seen_in_pass]
+            if not unseen and ready_keys:
+                seen_in_pass.clear()
+                pass_idx += 1
+                unseen = list(ready_keys)
+                print(f"[Job D Data] Starting shuffled pass #{pass_idx} over {len(ready_keys)} S3 shards ({len(ready_keys) * 2}M pos)", flush=True)
+
+            if not unseen:
+                if not wait_logged:
+                    print(f"[Job D Data] Waiting for S3 shards under s3://{args.bucket}/{s3_pref}/ ...", flush=True)
+                    wait_logged = True
+                time.sleep(5.0)
+                continue
+            wait_logged = False
+
+            rng_p = random.Random(args.seed + pass_idx * 1009 + len(seen_in_pass))
+            rng_p.shuffle(unseen)
+            for bkey in unseen:
+                if stop_prod.is_set():
+                    break
+                try:
+                    mv1, msc = download_s3_mix_shard(s3_client, args.bucket, bkey, dl_dir)
+                    seen_in_pass.add(bkey)
+                    while not stop_prod.is_set():
+                        try:
+                            pool_q.put((mv1, msc), timeout=2.0)
+                            break
+                        except queue.Full:
+                            continue
+                except Exception as exc:
+                    print(f"[Job D S3 Prefetch Warning] {bkey}: {exc}", flush=True)
+                if pass_idx == 0 and (len(seen_in_pass) % 4 == 0):
+                    break
+        pool_q.put(None)
+
+    prod_th = threading.Thread(target=_s3_shard_producer_d, daemon=True)
+    prod_th.start()
+
+    calib_inputs = None
+    last_pool_pair: tuple[np.ndarray, np.ndarray] | None = None
+
+    def _capture_calib(mv1: np.ndarray) -> None:
+        nonlocal calib_inputs
+        if calib_inputs is None and len(mv1) >= 500:
+            cx = unpack_v1_tensor_to_inputs_and_meta(torch.from_numpy(mv1[:500].copy()))[0].numpy().astype(np.float32)
+            calib_inputs = [cx[i : i + 1] for i in range(len(cx))]
+
+    # -------------------- Stage 2a: 184M BF16 Scale-Up + Parallel Conv73 Q(s,a) --------------------
+    if not stage1_done:
+        fwd_m10: nn.Module = m10_q
+        if device.type == "cuda" and os.name != "nt":
+            try:
+                fwd_m10 = torch.compile(m10_q, mode="default")
+                print("[Job D Stage 2a] Enabled torch.compile(mode='default') on CUDA L40S!", flush=True)
+            except Exception as exc:
+                print(f"[Job D Stage 2a Note] Using eager CUDA ({exc})", flush=True)
+                fwd_m10 = m10_q
+
+        tot_steps_s1 = max(1, (stage1_pos + args.batch_size - 1) // args.batch_size)
+        warmup_s1 = min(300, max(1, tot_steps_s1 // 20))
+
+        def _lr_d1(o, stp, seen):
+            base_lr = compute_cosine_lr(stp, tot_steps_s1, warmup_s1, 5e-5, 3e-6)
+            q_mult = 2.0 if seen < q_warmup_pos else 1.0
+            o.param_groups[0]["lr"] = base_lr * q_mult
+            o.param_groups[1]["lr"] = base_lr
+
+        def _save_d1_ckpt(st):
+            ck_p = ckpt_dir / "job_d_latest.pt"
+            torch.save({
+                "stage": "stage2a",
+                "step": st["step"],
+                "seen": st["seen"],
+                "eval_logs": eval_logs,
+                "model_state_dict": m10_q.state_dict(),
+                "ema_09995_state_dict": ema_9995.shadow,
+                "ema_09999_state_dict": ema_9999.shadow,
+                "optimizer_state_dict": opt.state_dict(),
+            }, ck_p)
+            if s3_client and args.bucket:
+                try:
+                    s3_client.upload_file(str(ck_p), args.bucket, s3_resume_key)
+                    print(f"  [Checkpoint] Uploaded {s3_resume_key} at seen={st['seen']:,}", flush=True)
+                except Exception as e:
+                    print(f"  [Checkpoint Warning] {e}", flush=True)
+
+        # Reserve 35 min before MaxRuntimeInSeconds for Stage 2a exports + Stage 2b 30M QAT + final NNCF exports
+        s1_deadline = t0_job + max(600, args.max_runtime_sec - 2100)
+        print(
+            f"\n=== [Job D Stage 2a] 10x192-Q BF16 1.00B Scale-Up "
+            f"({stage1_pos:,} pos, B={args.batch_size}, cosine 5e-5 -> 3e-6, q_head 2x first {q_warmup_pos:,}, logit-atanh Q) ===",
+            flush=True,
+        )
+        m10_q.train()
+        while step_state["seen"] < stage1_pos:
+            item = pool_q.get()
+            if item is None:
+                break
+            mv1, msc = item
+            _capture_calib(mv1)
+            hit_dl = _train_on_pool(
+                fwd_m10, mv1, msc, device, opt,
+                batch_size=args.batch_size, freeze_trunk=False,
+                pol_weight=1.0, val_weight=1.0, mlh_weight=0.05, q_weight=0.50,
+                ema_list=[ema_9995, ema_9999], step_state=step_state, lr_fn=_lr_d1,
+                max_positions=stage1_pos, s3_ckpt_fn=_save_d1_ckpt,
+                stop_deadline_ts=s1_deadline,
+            )
+            last_pool_pair = (mv1, msc)
+            if hit_dl:
+                print("[Job D Stage 2a] Reached Stage 2a graceful deadline; exporting Pure FP16 & proceeding to Stage 2b QAT!", flush=True)
+                break
+
+        _save_d1_ckpt(step_state)
+
+        s1_dir = model_dir / "stage1_fp16"
+        s1_dir.mkdir(parents=True, exist_ok=True)
+        for lbl, prefix_lbl, shadow in [
+            ("stage2a_ema09995", "10x192_1B_ema09995", ema_9995.shadow),
+            ("stage2a_ema09999", "10x192_1B_ema09999", ema_9999.shadow),
+        ]:
+            m10_q.load_state_dict(shadow)
+            ev = evaluate_unified_150k(m10_q, eval_files, device, ref_baseline_pol=ref_pol)
+            eval_logs[lbl] = ev
+            print(f"[Job D {lbl} 150K Eval] mean_mse={_mean_150k_val_mse(ev):.5f} | {json.dumps(ev)}", flush=True)
+            # Export folded NPZ + standard 3-head FP16 IR
+            exp_std = export_phase4_to_folded_npz_and_ov(
+                m10_q, s1_dir, prefix_lbl,
+                export_uncertainty=True, export_mlh=True, export_q_head=False,
+            )
+            shutil.copy2(exp_std["folded_npz"], s1_dir / f"{prefix_lbl}_fp16.npz")
+            # Export 4-head (+Q) FP16 IR from the exact same folded weights
+            export_folded_npz_to_ov(
+                exp_std["folded_npz"], s1_dir, f"{prefix_lbl}_qhead",
+                num_blocks=10, channels=192, se_reduction=4,
+                export_uncertainty=True, export_mlh=True, export_q_head=True,
+            )
+            torch.save({
+                "architecture": "10x192_phase5_qhead_hl64_mlh",
+                "label": lbl,
+                "seen": step_state["seen"],
+                "model_state_dict": shadow,
+                "eval_150k": ev,
+            }, s1_dir / f"{prefix_lbl}_fp16.pt")
+
+        torch.save({
+            "step": step_state["step"],
+            "seen": step_state["seen"],
+            "eval_logs": eval_logs,
+            "ema_09995_state_dict": ema_9995.shadow,
+            "ema_09999_state_dict": ema_9999.shadow,
+        }, local_s1_done)
+        if s3_client and args.bucket:
+            s3_client.upload_file(str(local_s1_done), args.bucket, s3_s1_done_key)
+            for p in s1_dir.glob("*"):
+                if p.is_file():
+                    s3_client.upload_file(str(p), args.bucket, f"checkpoints/phase5_job_d/stage1_fp16/{p.name}")
+                    print(f"  [S3 Upload] checkpoints/phase5_job_d/stage1_fp16/{p.name}", flush=True)
+
+    # -------------------- Stage 2b: 30M Middle-Block (2..7) W8A8 QAT Polish --------------------
+    mse_95 = _mean_150k_val_mse(eval_logs.get("stage2a_ema09995", {}))
+    mse_99 = _mean_150k_val_mse(eval_logs.get("stage2a_ema09999", {}))
+    best_s1_lbl = "stage2a_ema09995" if mse_95 <= mse_99 else "stage2a_ema09999"
+    best_s1_shadow = ema_9995.shadow if mse_95 <= mse_99 else ema_9999.shadow
+    print(
+        f"\n=== [Job D Stage 2b] Selected best 184M EMA: {best_s1_lbl} "
+        f"(ema09995 MSE={mse_95:.5f} vs ema09999 MSE={mse_99:.5f}) ===",
+        flush=True,
+    )
+
+    s2_deadline = t0_job + max(300, args.max_runtime_sec - 360)
+    if qat_pos > 0 and time.time() < s2_deadline:
+        print(f"=== [Job D Stage 2b] Middle-Block (2..7) W8A8 QAT Polish ({qat_pos:,} pos, cosine LR 1.2e-5 -> 1e-6) ===", flush=True)
+        m10_qat = Phase5ActionValueNet(
+            num_blocks=10, channels=192, use_bn=False, conv_bias=True, q_use_bn=True
+        ).to(device)
+        m10_qat.load_state_dict(best_s1_shadow)
+        for p in m10_qat.parameters():
+            p.requires_grad_(True)
+        # Folds q_bn cleanly into q_conv (kept FP16) and wraps middle blocks 2..7 in W8A8FakeQuantConv2d
+        apply_middle_w8a8_qat(m10_qat, qat_blocks=(2, 3, 4, 5, 6, 7))
+        if device.type == "cuda":
+            m10_qat = m10_qat.to(memory_format=torch.channels_last)
+        m10_qat.train()
+        enforce_frozen_bn_eval(m10_qat)
+
+        if calib_inputs is None:
+            first_item = pool_q.get()
+            if first_item is not None:
+                _capture_calib(first_item[0])
+                last_pool_pair = first_item
+
+        if calib_inputs:
+            with torch.no_grad():
+                cx_t = torch.from_numpy(np.concatenate(calib_inputs[:256], axis=0)).to(
+                    device=device, memory_format=torch.channels_last if device.type == "cuda" else torch.contiguous_format
+                )
+                m10_qat(cx_t)
+
+        ema_qat = FastModelEMA(m10_qat, decay=0.9995)
+        opt_qat = torch.optim.AdamW(
+            [p for p in m10_qat.parameters() if p.requires_grad],
+            lr=1.2e-5, weight_decay=1e-4, fused=(device.type == "cuda"),
+        )
+        tot_qat_steps = max(1, (qat_pos + args.batch_size - 1) // args.batch_size)
+        warmup_qat = min(250, max(1, tot_qat_steps // 10))
+        st_qat = {"step": 0, "seen": 0, "seed": args.seed + 777, "t0": time.time(), "last_ckpt": time.time()}
+        s3_s2_key = "checkpoints/phase5_job_d/stage2_latest.pt"
+
+        if args.resume and s3_client and args.bucket:
+            try:
+                loc_s2 = ckpt_dir / "job_d_stage2_latest.pt"
+                s3_client.download_file(args.bucket, s3_s2_key, str(loc_s2))
+                ck2 = torch.load(str(loc_s2), map_location=device, weights_only=False)
+                m10_qat.load_state_dict(ck2["model_state_dict"])
+                ema_qat.load_shadow_dict(ck2["ema_09995_state_dict"], m10_qat)
+                opt_qat.load_state_dict(ck2["optimizer_state_dict"])
+                st_qat["step"] = int(ck2.get("step", 0))
+                st_qat["seen"] = int(ck2.get("seen", 0))
+                print(f"[Job D Stage 2b Resume OK] step={st_qat['step']:,}, seen={st_qat['seen']:,}", flush=True)
+            except Exception:
+                pass
+
+        def _lr_d2(o, stp, _seen):
+            lr_q = compute_cosine_lr(stp, tot_qat_steps, warmup_qat, 1.2e-5, 1e-6)
+            for pg in o.param_groups:
+                pg["lr"] = lr_q
+
+        def _save_d2_ckpt(st):
+            ck2_p = ckpt_dir / "job_d_stage2_latest.pt"
+            torch.save({
+                "stage": "stage2b_qat",
+                "step": st["step"],
+                "seen": st["seen"],
+                "model_state_dict": m10_qat.state_dict(),
+                "ema_09995_state_dict": ema_qat.shadow,
+                "optimizer_state_dict": opt_qat.state_dict(),
+            }, ck2_p)
+            if s3_client and args.bucket:
+                try:
+                    s3_client.upload_file(str(ck2_p), args.bucket, s3_s2_key)
+                    print(f"  [Checkpoint] Uploaded {s3_s2_key} at qat_seen={st['seen']:,}", flush=True)
+                except Exception as e:
+                    print(f"  [Checkpoint Warning] {e}", flush=True)
+
+        while st_qat["seen"] < qat_pos and time.time() < s2_deadline:
+            try:
+                q_item = pool_q.get(timeout=10.0)
+            except queue.Empty:
+                q_item = last_pool_pair
+            if q_item is None:
+                q_item = last_pool_pair
+            if q_item is None:
+                break
+            qv1, qsc = q_item
+            _capture_calib(qv1)
+            hit_q = _train_on_pool(
+                m10_qat, qv1, qsc, device, opt_qat,
+                batch_size=args.batch_size, freeze_trunk=False,
+                pol_weight=1.0, val_weight=1.0, mlh_weight=0.05, q_weight=0.50,
+                ema_list=[ema_qat], step_state=st_qat, lr_fn=_lr_d2,
+                max_positions=qat_pos, s3_ckpt_fn=_save_d2_ckpt,
+                stop_deadline_ts=s2_deadline,
+            )
+            last_pool_pair = (qv1, qsc)
+            if hit_q:
+                print("[Job D Stage 2b] Hit Stage 2b graceful deadline; exporting final 1.00B QAT IRs!", flush=True)
+                break
+
+        m10_qat.load_state_dict(ema_qat.shadow)
+        ev_qat = evaluate_unified_150k(m10_qat, eval_files, device, ref_baseline_pol=ref_pol)
+        eval_logs["stage2b_qat_mid2_7"] = ev_qat
+        print(f"[Job D Stage 2b qat_mid2_7 150K Eval] mean_mse={_mean_150k_val_mse(ev_qat):.5f} | {json.dumps(ev_qat)}", flush=True)
+
+        out_qat = model_dir / "qat_mid2_7"
+        # 1. Export folded .npz + standard 3-head (Policy + HL-Gauss-64 [+sigma] + MLH) FP16 & Middle-2..7 INT8
+        exp_3h = export_phase4_to_folded_npz_and_ov(
+            m10_qat, out_qat, "10x192_1B_qat_mid2_7",
+            calib_inputs=calib_inputs, int8_blocks=(2, 3, 4, 5, 6, 7),
+            export_uncertainty=True, export_mlh=True, export_q_head=False,
+        )
+        # Provide exact requested filename aliases (`10x192_1B_qat_mid2_7_int8.{xml,bin}`)
+        if "hybrid_int8_xml" in exp_3h:
+            shutil.copy2(exp_3h["hybrid_int8_xml"], out_qat / "10x192_1B_qat_mid2_7_int8.xml")
+            shutil.copy2(exp_3h["hybrid_int8_bin"], out_qat / "10x192_1B_qat_mid2_7_int8.bin")
+
+        # 2. Export 4-head (+Q) FP16 & Middle-2..7 INT8 from exact same folded .npz
+        exp_4h = export_folded_npz_to_ov(
+            exp_3h["folded_npz"], out_qat, "10x192_1B_qhead_qat_mid2_7",
+            num_blocks=10, channels=192, se_reduction=4,
+            calib_inputs=calib_inputs, int8_blocks=(2, 3, 4, 5, 6, 7),
+            export_uncertainty=True, export_mlh=True, export_q_head=True,
+        )
+        if "hybrid_int8_xml" in exp_4h:
+            shutil.copy2(exp_4h["hybrid_int8_xml"], out_qat / "10x192_1B_qhead_qat_mid2_7_int8.xml")
+            shutil.copy2(exp_4h["hybrid_int8_bin"], out_qat / "10x192_1B_qhead_qat_mid2_7_int8.bin")
+
+        # 3. Also export clean 2-output standard [policy, value] INT8 for pure DMA comparison
+        exp_2out = export_folded_npz_to_ov(
+            exp_3h["folded_npz"], out_qat, "10x192_1B_qat_mid2_7_2out",
+            num_blocks=10, channels=192, se_reduction=4,
+            calib_inputs=calib_inputs, int8_blocks=(2, 3, 4, 5, 6, 7),
+            export_uncertainty=False, export_mlh=False, export_q_head=False,
+        )
+
+        torch.save({
+            "architecture": "10x192_phase5_1B_mid2_7_qat_qhead_hl64_mlh",
+            "best_stage2a_ema": best_s1_lbl,
+            "stage2a_seen": step_state["seen"],
+            "stage2b_qat_seen": st_qat["seen"],
+            "model_state_dict": m10_qat.state_dict(),
+            "ema_09995_state_dict": ema_qat.shadow,
+            "eval_150k": ev_qat,
+            "export_3head": exp_3h,
+            "export_4head": exp_4h,
+            "export_2out": exp_2out,
+        }, out_qat / "10x192_1B_qat_mid2_7.pt")
+
+    stop_prod.set()
+    last_pool_pair = None
+    gc.collect()
+
+    rep_d = {
+        "mode": "job_d_1b_qhead",
+        "best_stage2a_ema": best_s1_lbl,
+        "stage2a_seen": step_state["seen"],
+        "stage2b_qat_target": qat_pos,
+        "cumulative_positions_millions": round(786.0 + (step_state["seen"] + qat_pos) / 1e6, 2),
+        "q_target_formulation": "atanh_logit_space (tau_sf=0.25, tau_lc0=0.35, clip_v=0.995, clip_logp=[-6,0])",
+        "elapsed_sec": round(time.time() - t0_job, 1),
+        "eval_150k": eval_logs,
+    }
+    (model_dir / "phase5_job_d_report.json").write_text(json.dumps(rep_d, indent=2), encoding="utf-8")
+
+    if s3_client and args.bucket:
+        for p in model_dir.rglob("*"):
+            if p.is_file():
+                rel = p.relative_to(model_dir).as_posix()
+                s3_client.upload_file(str(p), args.bucket, f"checkpoints/phase5_job_d/{rel}")
+                print(f"  [S3 Upload] checkpoints/phase5_job_d/{rel}", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["job_a", "job_b", "job_c_10x192_mastery", "harvest_shards"], required=True)
+    parser.add_argument("--mode", choices=["job_a", "job_b", "job_c_10x192_mastery", "job_d_1b_qhead", "harvest_shards"], required=True)
     parser.add_argument("--bucket", type=str, default=DEFAULT_BUCKET)
     parser.add_argument("--region", type=str, default=DEFAULT_REGION)
     parser.add_argument("--batch_size", type=int, default=512)
@@ -2137,8 +2673,11 @@ def main() -> None:
     parser.add_argument("--sf_ratio", type=float, default=0.50)
     parser.add_argument("--t80_skip", type=int, default=40)
     parser.add_argument("--sf_line_offset", type=int, default=40_000_000)
+    parser.add_argument("--sf_byte_offset", type=int, default=0)
+    parser.add_argument("--skip_v2_seeds", type=lambda x: str(x).lower() in ("true", "1", "yes"), default=False)
     parser.add_argument("--a2_soup75_s3_key", type=str, default="checkpoints/phase4_job_c/init/A2_soup75_10x192.pt")
     parser.add_argument("--job_b_ema95_s3_key", type=str, default="checkpoints/phase4_job_c/init/12x192_mid2_9_hl64_ema_09995.pt")
+    parser.add_argument("--job_c_init_s3_key", type=str, default="checkpoints/phase4_job_c/stage1_fp16/10x192_mastery_ema09999_fp16.pt")
     args = parser.parse_args()
     _ensure_runtime_deps()
 
@@ -2173,8 +2712,11 @@ def main() -> None:
     v2_shards = []
     s3_v2_names = ("shard_000.bin", "shard_001.bin")
     if args.mode == "harvest_shards":
-        my_v2 = [s3_v2_names[i] for i in range(len(s3_v2_names)) if (i % max(1, int(args.num_workers))) == int(args.worker_id)]
-    elif args.mode == "job_c_10x192_mastery":
+        if args.skip_v2_seeds:
+            my_v2 = []
+        else:
+            my_v2 = [s3_v2_names[i] for i in range(len(s3_v2_names)) if (i % max(1, int(args.num_workers))) == int(args.worker_id)]
+    elif args.mode in ("job_c_10x192_mastery", "job_d_1b_qhead"):
         my_v2 = []
     else:
         my_v2 = list(s3_v2_names)
@@ -2193,6 +2735,8 @@ def main() -> None:
         run_job_a(args, device, s3_client, dirs)
     elif args.mode == "job_c_10x192_mastery":
         run_job_c_10x192_mastery(args, device, s3_client, dirs)
+    elif args.mode == "job_d_1b_qhead":
+        run_job_d_1b_qhead(args, device, s3_client, dirs)
     else:
         run_job_b(args, device, s3_client, dirs)
 

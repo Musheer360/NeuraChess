@@ -141,7 +141,15 @@ def _build_se_resnet_core(
     return inp, x, policy_logits, model_tag, get_w, maybe_add_bias, maybe_add_dense_bias
 
 
-def _build_standard_value_head(x, channels, weights_dict, get_w, maybe_add_bias, maybe_add_dense_bias):
+def _build_standard_value_head(
+    x,
+    channels,
+    weights_dict,
+    get_w,
+    maybe_add_bias,
+    maybe_add_dense_bias,
+    export_uncertainty: bool = False,
+):
     val_ch = int(weights_dict["val_conv_w"].shape[0]) if (weights_dict and "val_conv_w" in weights_dict) else 16
     val_h = int(weights_dict["val_dense1_w"].shape[0]) if (weights_dict and "val_dense1_w" in weights_dict) else 128
     val_dim = int(weights_dict["val_dense2_w"].shape[0]) if (weights_dict and "val_dense2_w" in weights_dict) else 1
@@ -166,6 +174,7 @@ def _build_standard_value_head(x, channels, weights_dict, get_w, maybe_add_bias,
     val_logits = ops.matmul(val_d1, w_val_d2, transpose_a=False, transpose_b=True, name="val_dense2")
     val_logits = maybe_add_dense_bias(val_logits, "val_dense2_b", val_dim, op_name="val_dense2_add")
 
+    val_sigma = None
     if val_dim == 1:
         val_out = ops.tanh(val_logits, name="value")
     elif weights_dict and "val_hl_z" in weights_dict:
@@ -173,9 +182,58 @@ def _build_standard_value_head(x, channels, weights_dict, get_w, maybe_add_bias,
         val_probs = ops.softmax(val_logits, axis=1, name="val_hl_probs")
         z_const = ops.constant(z_arr, ov.Type.f32, name="val_hl_z")
         val_out = ops.matmul(val_probs, z_const, transpose_a=False, transpose_b=False, name="value")
+        if export_uncertainty:
+            z2_arr = (z_arr * z_arr).astype(np.float32)
+            z2_const = ops.constant(z2_arr, ov.Type.f32, name="val_hl_z2")
+            ez2 = ops.matmul(val_probs, z2_const, transpose_a=False, transpose_b=False, name="val_hl_ez2")
+            v_sq = ops.multiply(val_out, val_out, name="val_hl_v_sq")
+            var = ops.subtract(ez2, v_sq, name="val_hl_var")
+            eps = ops.constant(np.array([[1e-6]], dtype=np.float32), ov.Type.f32, name="val_hl_eps")
+            var_clamped = ops.maximum(var, eps, name="val_hl_var_clamped")
+            val_sigma = ops.sqrt(var_clamped, name="val_sigma")
     else:
         val_out = ops.softmax(val_logits, axis=1, name="wdl")
-    return val_d1, val_out
+    return val_d1, val_out, val_sigma
+
+
+def _build_mlh_head(x, channels, weights_dict, get_w, maybe_add_bias, maybe_add_dense_bias):
+    mlh_ch = int(weights_dict["mlh_conv_w"].shape[0]) if (weights_dict and "mlh_conv_w" in weights_dict) else 8
+    mlh_h = int(weights_dict["mlh_d1_w"].shape[0]) if (weights_dict and "mlh_d1_w" in weights_dict) else 64
+    w_mc = get_w("mlh_conv_w", (mlh_ch, channels, 1, 1))
+    mc = ops.convolution(
+        x, w_mc, strides=[1, 1], pads_begin=[0, 0], pads_end=[0, 0], dilations=[1, 1], name="mlh_conv"
+    )
+    mc = maybe_add_bias(mc, "mlh_conv_b", mlh_ch, op_name="mlh_conv_add")
+    mc = ops.relu(mc, name="mlh_conv_relu")
+    m_flat = ops.reshape(
+        mc,
+        ops.constant(np.array([0, mlh_ch * 8 * 8], dtype=np.int64), name="mlh_flat_shape"),
+        True,
+        name="mlh_flat",
+    )
+    w_md1 = get_w("mlh_d1_w", (mlh_h, mlh_ch * 8 * 8))
+    md1 = ops.matmul(m_flat, w_md1, transpose_a=False, transpose_b=True, name="mlh_d1")
+    md1 = maybe_add_dense_bias(md1, "mlh_d1_b", mlh_h, op_name="mlh_d1_add")
+    md1 = ops.relu(md1, name="mlh_d1_relu")
+    w_md2 = get_w("mlh_d2_w", (1, mlh_h))
+    md2 = ops.matmul(md1, w_md2, transpose_a=False, transpose_b=True, name="mlh_d2")
+    md2 = maybe_add_dense_bias(md2, "mlh_d2_b", 1, op_name="mlh_d2_add")
+    return ops.relu(md2, name="moves_left")
+
+
+def _build_action_q_head(x, channels, get_w, maybe_add_bias):
+    w_q = get_w("q_73_w", (73, channels, 1, 1))
+    qc = ops.convolution(
+        x, w_q, strides=[1, 1], pads_begin=[0, 0], pads_end=[0, 0], dilations=[1, 1], name="q_73_conv"
+    )
+    qc = maybe_add_bias(qc, "q_73_b", 73, op_name="q_73_add")
+    qt = ops.transpose(
+        qc, ops.constant(np.array([0, 2, 3, 1], dtype=np.int64), name="q_perm"), name="q_trans"
+    )
+    qf = ops.reshape(
+        qt, ops.constant(np.array([0, 4672], dtype=np.int64), name="q_shape"), True, name="q_reshape"
+    )
+    return ops.tanh(qf, name="action_q")
 
 
 def build_openvino_se_resnet(
@@ -187,10 +245,18 @@ def build_openvino_se_resnet(
     policy_head: str = "conv73",
     weights_dict: dict[str, np.ndarray] | None = None,
     model_name: str = "NeuraChess_SE_ResNet",
+    export_uncertainty: bool = False,
+    export_mlh: bool = False,
+    export_q_head: bool = False,
 ) -> ov.Model:
     """
-    Constructs an OpenVINO Model with SE blocks and 3-way WDL value head,
+    Constructs an OpenVINO Model with SE blocks and scalar/WDL/HL-Gauss-64 value head,
     strictly compliant with Intel NPU 3720 constraints.
+
+    Optional auxiliary outputs (preserving [policy_logits, value] as outputs 0 and 1):
+      - `export_uncertainty=True`: appends `val_sigma` [B, 1] from HL-Gauss-64 second moment.
+      - `export_mlh=True`: appends `moves_left` [B, 1] from the trained Moves-Left head.
+      - `export_q_head=True`: appends `action_q` [B, 4672] from the parallel Conv73 Q(s,a) head.
     """
     inp, x, policy_logits, model_tag, get_w, maybe_add_bias, maybe_add_dense_bias = _build_se_resnet_core(
         batch_size=batch_size,
@@ -202,8 +268,30 @@ def build_openvino_se_resnet(
         weights_dict=weights_dict,
         model_name=model_name,
     )
-    _, val_out = _build_standard_value_head(x, channels, weights_dict, get_w, maybe_add_bias, maybe_add_dense_bias)
-    return ov.Model([ops.result(policy_logits), ops.result(val_out)], [inp], model_tag)
+    _, val_out, val_sigma = _build_standard_value_head(
+        x,
+        channels,
+        weights_dict,
+        get_w,
+        maybe_add_bias,
+        maybe_add_dense_bias,
+        export_uncertainty=export_uncertainty,
+    )
+    policy_logits.output(0).set_names({"policy_logits"})
+    val_out.output(0).set_names({"value"})
+    results = [ops.result(policy_logits, name="policy_logits_out"), ops.result(val_out, name="value_out")]
+    if export_uncertainty and val_sigma is not None:
+        val_sigma.output(0).set_names({"val_sigma"})
+        results.append(ops.result(val_sigma, name="val_sigma_out"))
+    if export_mlh and weights_dict and "mlh_conv_w" in weights_dict:
+        mlh_out = _build_mlh_head(x, channels, weights_dict, get_w, maybe_add_bias, maybe_add_dense_bias)
+        mlh_out.output(0).set_names({"moves_left"})
+        results.append(ops.result(mlh_out, name="moves_left_out"))
+    if export_q_head and weights_dict and "q_73_w" in weights_dict:
+        q_out = _build_action_q_head(x, channels, get_w, maybe_add_bias)
+        q_out.output(0).set_names({"action_q"})
+        results.append(ops.result(q_out, name="action_q_out"))
+    return ov.Model(results, [inp], model_tag)
 
 
 def build_openvino_research_head_variant(
@@ -235,7 +323,7 @@ def build_openvino_research_head_variant(
         return ops.constant((rng_h.standard_normal(shape) * std).astype(np.float32), ov.Type.f32, name=name)
 
     if variant == "baseline_scalar":
-        _, val_out = _build_standard_value_head(x, channels, weights_dict, get_w, maybe_add_bias, maybe_add_dense_bias)
+        _, val_out, _ = _build_standard_value_head(x, channels, weights_dict, get_w, maybe_add_bias, maybe_add_dense_bias)
         return ov.Model([ops.result(policy_logits), ops.result(val_out)], [inp], model_tag)
 
     if variant == "hl_gauss_mlh":
@@ -280,7 +368,7 @@ def build_openvino_research_head_variant(
         q_out = ops.tanh(q_flat, name="action_q")
         if variant == "dual_conv73_only":
             return ov.Model([ops.result(policy_logits), ops.result(q_out)], [inp], model_tag)
-        _, val_out = _build_standard_value_head(x, channels, weights_dict, get_w, maybe_add_bias, maybe_add_dense_bias)
+        _, val_out, _ = _build_standard_value_head(x, channels, weights_dict, get_w, maybe_add_bias, maybe_add_dense_bias)
         return ov.Model([ops.result(policy_logits), ops.result(q_out), ops.result(val_out)], [inp], model_tag)
 
     raise ValueError(f"Unknown research head variant: {variant}")

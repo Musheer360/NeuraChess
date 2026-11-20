@@ -193,10 +193,102 @@ class ChessSEResNetPhase4(nn.Module):
         feat = self.forward_trunk(x)
         return self.forward_policy_and_heads(feat)
 
+    def compute_value_uncertainty(self, hl_logits: torch.Tensor, val_exp: torch.Tensor | None = None) -> torch.Tensor:
+        """Compute HL-Gauss-64 distributional standard deviation sigma_V(s) = sqrt(max(1e-6, E[z^2] - E[z]^2))."""
+        probs = F.softmax(hl_logits.float(), dim=-1)
+        z = self.hl_z.float()
+        if val_exp is None:
+            v = torch.matmul(probs, z).unsqueeze(-1)
+        else:
+            v = val_exp.float()
+        ez2 = torch.matmul(probs, z * z).unsqueeze(-1)
+        var = (ez2 - v * v).clamp(min=1e-6)
+        return torch.sqrt(var)
+
     def forward_eval_only(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compatibility helper returning `(policy_logits, val_expectation)` for standard 2-output evals."""
         pol, _, val_exp, _ = self.forward(x)
         return pol, val_exp
+
+
+class Phase5ActionValueNet(ChessSEResNetPhase4):
+    """Phase 5 (`10x192-Q`): 10x192 SE-ResNet + Conv73 Policy + HL-Gauss-64 + MLH + parallel Conv73 Action-Value Q(s,a)."""
+
+    def __init__(
+        self,
+        num_blocks: int = 10,
+        channels: int = 192,
+        se_reduction: int = 4,
+        use_bn: bool = False,
+        val_channels: int = 16,
+        val_hidden: int = 256,
+        num_bins: int = 64,
+        conv_bias: bool = True,
+        q_use_bn: bool = True,
+    ):
+        super().__init__(
+            num_blocks=num_blocks,
+            channels=channels,
+            se_reduction=se_reduction,
+            use_bn=use_bn,
+            val_channels=val_channels,
+            val_hidden=val_hidden,
+            num_bins=num_bins,
+            conv_bias=conv_bias,
+        )
+        self.q_use_bn = bool(q_use_bn)
+        self.q_conv = nn.Conv2d(self.channels, 73, kernel_size=1, bias=not self.q_use_bn)
+        self.q_bn = nn.BatchNorm2d(73) if self.q_use_bn else nn.Identity()
+        nn.init.kaiming_normal_(self.q_conv.weight, mode="fan_out", nonlinearity="linear")
+        self.q_conv.weight.data.mul_(0.1)
+        if self.q_conv.bias is not None:
+            self.q_conv.bias.data.zero_()
+
+    def fold_q_bn_inplace(self) -> None:
+        if isinstance(self.q_bn, nn.BatchNorm2d):
+            self.q_conv = _fold_conv_bn_inplace(self.q_conv, self.q_bn)
+            self.q_bn = nn.Identity()
+            self.q_use_bn = False
+
+    def forward_action_q(self, feat: torch.Tensor) -> torch.Tensor:
+        q = self.q_bn(self.q_conv(feat))
+        q = q.permute(0, 2, 3, 1).contiguous().reshape(feat.shape[0], 4672)
+        return torch.tanh(q)
+
+    def forward_with_q(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        feat = self.forward_trunk(x)
+        pol, hl_logits, val_exp, mlh_pred = self.forward_policy_and_heads(feat)
+        action_q = self.forward_action_q(feat)
+        return pol, hl_logits, val_exp, mlh_pred, action_q
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.forward_with_q(x)
+
+    def forward_eval_only(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        pol, _, val_exp, _, _ = self.forward_with_q(x)
+        return pol, val_exp
+
+    def load_phase4_backbone_and_heads(self, ckpt_or_sd: str | Path | dict[str, torch.Tensor]) -> int:
+        """Load 100% of converged Phase 4 trunk + Conv73 + HL-Gauss-64 + MLH weights with 0.000e+00 drift."""
+        if isinstance(ckpt_or_sd, (str, Path)):
+            raw = torch.load(str(ckpt_or_sd), map_location="cpu", weights_only=False)
+            src_sd = extract_10x192_state_dict(raw)
+        else:
+            src_sd = extract_10x192_state_dict(ckpt_or_sd)
+        copied = 0
+        dst_sd = self.state_dict()
+        with torch.no_grad():
+            for k, dst_t in dst_sd.items():
+                if k.startswith(("q_conv.", "q_bn.")):
+                    continue
+                if k in src_sd:
+                    if tuple(src_sd[k].shape) != tuple(dst_t.shape):
+                        raise ValueError(f"Phase5 init shape mismatch on {k}: src={tuple(src_sd[k].shape)} vs dst={tuple(dst_t.shape)}")
+                    dst_t.copy_(src_sd[k].to(device=dst_t.device, dtype=dst_t.dtype))
+                    copied += 1
+        if copied == 0:
+            raise RuntimeError("No matching Phase 4 tensors loaded into Phase5ActionValueNet")
+        return copied
 
 
 def _fold_conv_bn_inplace(conv: nn.Conv2d, bn: nn.Module) -> nn.Conv2d:
@@ -223,6 +315,8 @@ def _fold_conv_bn_inplace(conv: nn.Conv2d, bn: nn.Module) -> nn.Conv2d:
 def apply_middle_w8a8_qat(model: ChessSEResNetPhase4, qat_blocks: tuple[int, ...] = (2, 3, 4, 5, 6, 7)) -> ChessSEResNetPhase4:
     """Fold trunk BNs in middle blocks cleanly and replace `conv1`/`conv2` in `qat_blocks` with W8A8 FakeQuant."""
     model.eval()
+    if hasattr(model, "fold_q_bn_inplace"):
+        model.fold_q_bn_inplace()
     for b_idx in qat_blocks:
         blk = model.res_blocks[b_idx]
         if isinstance(blk.bn1, nn.BatchNorm2d):
@@ -429,12 +523,112 @@ def unwrap_qat_conv(conv: nn.Module) -> nn.Conv2d:
     return conv.to_plain_conv2d() if isinstance(conv, W8A8FakeQuantConv2d) else conv
 
 
+def _build_nncf_ignored_patterns(
+    num_blocks: int,
+    int8_blocks: tuple[int, ...],
+    *,
+    has_mlh: bool = False,
+    has_q_head: bool = False,
+) -> list[str]:
+    fp16_blocks = [j for j in range(num_blocks) if j not in int8_blocks]
+    ig_patterns = [
+        "^init_.*",
+        ".*_se_.*",
+        "^pol_.*",
+        "^val_.*",
+        "^(value|wdl)$",
+        ".*_out_.*",
+    ] + [f"^res_{j}_.*" for j in fp16_blocks]
+    if has_mlh:
+        ig_patterns.extend(["^mlh_.*", "^moves_left$"])
+    if has_q_head:
+        ig_patterns.extend(["^q_.*", "^action_q$"])
+    return ig_patterns
+
+
+def export_folded_npz_to_ov(
+    npz_or_weights: str | Path | dict[str, np.ndarray],
+    out_dir: str | Path,
+    prefix: str,
+    *,
+    num_blocks: int = 10,
+    channels: int = 192,
+    se_reduction: int = 4,
+    calib_inputs: list[np.ndarray] | None = None,
+    int8_blocks: tuple[int, ...] | None = None,
+    export_uncertainty: bool = False,
+    export_mlh: bool = False,
+    export_q_head: bool = False,
+) -> dict[str, str]:
+    """Export an existing folded `.npz` weights dict to OpenVINO FP16 and optional Middle-INT8 Hybrid IR."""
+    out_p = Path(out_dir)
+    out_p.mkdir(parents=True, exist_ok=True)
+    if isinstance(npz_or_weights, (str, Path)):
+        with np.load(str(npz_or_weights)) as z:
+            weights = {k: z[k] for k in z.files}
+    else:
+        weights = dict(npz_or_weights)
+
+    has_mlh = bool(export_mlh and "mlh_conv_w" in weights)
+    has_q = bool(export_q_head and "q_73_w" in weights)
+
+    ov_fp16 = build_openvino_se_resnet(
+        batch_size=-1,
+        num_blocks=num_blocks,
+        channels=channels,
+        in_channels=18,
+        se_reduction=se_reduction,
+        policy_head="conv73",
+        weights_dict=weights,
+        model_name=f"NeuraChess_{prefix}_FP16",
+        export_uncertainty=export_uncertainty,
+        export_mlh=has_mlh,
+        export_q_head=has_q,
+    )
+    fp16_xml = out_p / f"{prefix}_fp16.xml"
+    ov.save_model(ov_fp16, str(fp16_xml), compress_to_fp16=True)
+
+    outputs = {
+        "fp16_xml": str(fp16_xml),
+        "fp16_bin": str(fp16_xml.with_suffix(".bin")),
+    }
+
+    if calib_inputs and int8_blocks:
+        try:
+            import nncf
+
+            ig_patterns = _build_nncf_ignored_patterns(
+                num_blocks, int8_blocks, has_mlh=has_mlh, has_q_head=has_q
+            )
+            ig = nncf.IgnoredScope(patterns=ig_patterns, validate=True)
+            calib_ds = nncf.Dataset(calib_inputs, lambda a: {"board_state": a})
+            q_ov = nncf.quantize(
+                ov_fp16,
+                calib_ds,
+                target_device=nncf.TargetDevice.NPU,
+                subset_size=len(calib_inputs),
+                fast_bias_correction=True,
+                ignored_scope=ig,
+            )
+            hyb_xml = out_p / f"{prefix}_hybrid_int8.xml"
+            ov.save_model(q_ov, str(hyb_xml), compress_to_fp16=True)
+            outputs["hybrid_int8_xml"] = str(hyb_xml)
+            outputs["hybrid_int8_bin"] = str(hyb_xml.with_suffix(".bin"))
+        except Exception as e:
+            outputs["hybrid_int8_error"] = f"{type(e).__name__}: {e}"
+
+    return outputs
+
+
 def export_phase4_to_folded_npz_and_ov(
     model: ChessSEResNetPhase4,
     out_dir: str | Path,
     prefix: str,
     calib_inputs: list[np.ndarray] | None = None,
     int8_blocks: tuple[int, ...] | None = None,
+    export_uncertainty: bool = False,
+    export_mlh: bool = False,
+    export_q_head: bool = False,
 ) -> dict[str, str]:
     """Fold BatchNorms cleanly into `.npz`, save FP16 OpenVINO IR, and optionally export Middle-INT8 Hybrid IR."""
     out_p = Path(out_dir)
@@ -465,6 +659,12 @@ def export_phase4_to_folded_npz_and_ov(
     if bp is not None:
         weights["pol_73_b"] = bp.astype(np.float32)
 
+    if hasattr(raw, "q_conv"):
+        wq, bq = fold_conv_bn(unwrap_qat_conv(raw.q_conv), getattr(raw, "q_bn", nn.Identity()))
+        weights["q_73_w"] = wq.astype(np.float32)
+        if bq is not None:
+            weights["q_73_b"] = bq.astype(np.float32)
+
     weights["val_conv_w"] = raw.hl_head.val_conv.weight.detach().cpu().numpy().astype(np.float32)
     weights["val_conv_b"] = raw.hl_head.val_conv.bias.detach().cpu().numpy().astype(np.float32)
     weights["val_dense1_w"] = raw.hl_head.val_fc1.weight.detach().cpu().numpy().astype(np.float32)
@@ -486,53 +686,18 @@ def export_phase4_to_folded_npz_and_ov(
     npz_p = out_p / f"{prefix}_folded.npz"
     np.savez_compressed(npz_p, **weights)
 
-    ov_fp16 = build_openvino_se_resnet(
-        batch_size=-1,
+    outputs = export_folded_npz_to_ov(
+        weights,
+        out_p,
+        prefix,
         num_blocks=raw.num_blocks,
         channels=raw.channels,
-        in_channels=18,
         se_reduction=raw.se_reduction,
-        policy_head="conv73",
-        weights_dict=weights,
-        model_name=f"NeuraChess_{prefix}_FP16",
+        calib_inputs=calib_inputs,
+        int8_blocks=int8_blocks,
+        export_uncertainty=export_uncertainty,
+        export_mlh=export_mlh,
+        export_q_head=export_q_head,
     )
-    fp16_xml = out_p / f"{prefix}_fp16.xml"
-    ov.save_model(ov_fp16, str(fp16_xml), compress_to_fp16=True)
-
-    outputs = {
-        "folded_npz": str(npz_p),
-        "fp16_xml": str(fp16_xml),
-        "fp16_bin": str(fp16_xml.with_suffix(".bin")),
-    }
-
-    if calib_inputs and int8_blocks:
-        try:
-            import nncf
-
-            fp16_blocks = [j for j in range(raw.num_blocks) if j not in int8_blocks]
-            ig_patterns = [
-                "^init_.*",
-                ".*_se_.*",
-                "^pol_.*",
-                "^val_.*",
-                "^(value|wdl)$",
-                ".*_out_.*",
-            ] + [f"^res_{j}_.*" for j in fp16_blocks]
-            ig = nncf.IgnoredScope(patterns=ig_patterns, validate=True)
-            calib_ds = nncf.Dataset(calib_inputs, lambda a: {"board_state": a})
-            q_ov = nncf.quantize(
-                ov_fp16,
-                calib_ds,
-                target_device=nncf.TargetDevice.NPU,
-                subset_size=len(calib_inputs),
-                fast_bias_correction=True,
-                ignored_scope=ig,
-            )
-            hyb_xml = out_p / f"{prefix}_hybrid_int8.xml"
-            ov.save_model(q_ov, str(hyb_xml), compress_to_fp16=True)
-            outputs["hybrid_int8_xml"] = str(hyb_xml)
-            outputs["hybrid_int8_bin"] = str(hyb_xml.with_suffix(".bin"))
-        except Exception as e:
-            outputs["hybrid_int8_error"] = f"{type(e).__name__}: {e}"
-
+    outputs["folded_npz"] = str(npz_p)
     return outputs

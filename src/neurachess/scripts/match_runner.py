@@ -203,6 +203,11 @@ def _build_engine(
     cache_dir: str | None = None,
     fpu_reduction: float | None = None,
     syzygy_path: str | None = None,
+    use_uncertainty_cpuct: bool = False,
+    uncertainty_kappa: float = 1.25,
+    use_mlh_tiebreak: bool = False,
+    use_q_fpu: bool = False,
+    q_fpu_lambda: float = 0.25,
 ) -> NPUBatchedPUCTSearch:
     resolved_xml = xml_path or resolve_default_model_paths()[0]
     eff_cache = cache_dir or DEFAULT_CACHE_DIR
@@ -253,6 +258,11 @@ def _build_engine(
         "use_ponder": bool(use_ponder),
         "batch_models": batch_models,
         "syzygy_path": syzygy_path,
+        "use_uncertainty_cpuct": bool(use_uncertainty_cpuct),
+        "uncertainty_kappa": float(uncertainty_kappa),
+        "use_mlh_tiebreak": bool(use_mlh_tiebreak),
+        "use_q_fpu": bool(use_q_fpu),
+        "q_fpu_lambda": float(q_fpu_lambda),
     }
     if fpu_reduction is not None:
         kw["fpu_reduction"] = float(fpu_reduction)
@@ -296,6 +306,11 @@ def run_stockfish_match(args: argparse.Namespace) -> dict:
         cache_dir=getattr(args, "cache_dir", None),
         fpu_reduction=getattr(args, "fpu_reduction", None),
         syzygy_path=getattr(args, "syzygy_path", None),
+        use_uncertainty_cpuct=bool(getattr(args, "use_uncertainty_cpuct", False)),
+        uncertainty_kappa=float(getattr(args, "uncertainty_kappa", 1.25)),
+        use_mlh_tiebreak=bool(getattr(args, "use_mlh_tiebreak", False)),
+        use_q_fpu=bool(getattr(args, "use_q_fpu", False)),
+        q_fpu_lambda=float(getattr(args, "q_fpu_lambda", 0.25)),
     )
     ponder = PonderManager(searcher, use_ponder=args.ponder)
     book_driver = UCIEngine(own_book=True, book_seed=42) if getattr(args, "own_book", False) else None
@@ -463,6 +478,11 @@ def run_h2h_match(args: argparse.Namespace) -> dict:
         cache_dir=getattr(args, "cache_dir_a", None),
         fpu_reduction=fpu_red,
         syzygy_path=syz_path,
+        use_uncertainty_cpuct=bool(getattr(args, "use_uncertainty_cpuct_a", False)),
+        uncertainty_kappa=float(getattr(args, "uncertainty_kappa_a", 1.25)),
+        use_mlh_tiebreak=bool(getattr(args, "use_mlh_tiebreak_a", False)),
+        use_q_fpu=bool(getattr(args, "use_q_fpu_a", False)),
+        q_fpu_lambda=float(getattr(args, "q_fpu_lambda_a", 0.25)),
     )
     eng_b = _build_engine(
         str(args.xml_b),
@@ -473,6 +493,11 @@ def run_h2h_match(args: argparse.Namespace) -> dict:
         cache_dir=getattr(args, "cache_dir_b", None),
         fpu_reduction=fpu_red,
         syzygy_path=syz_path,
+        use_uncertainty_cpuct=bool(getattr(args, "use_uncertainty_cpuct_b", False)),
+        uncertainty_kappa=float(getattr(args, "uncertainty_kappa_b", 1.25)),
+        use_mlh_tiebreak=bool(getattr(args, "use_mlh_tiebreak_b", False)),
+        use_q_fpu=bool(getattr(args, "use_q_fpu_b", False)),
+        q_fpu_lambda=float(getattr(args, "q_fpu_lambda_b", 0.25)),
     )
     book_driver = UCIEngine(own_book=True, book_seed=42) if getattr(args, "own_book", False) else None
     warm_t = board_to_tensor(chess.Board(), layout=eng_a.encoder_layout)
@@ -609,6 +634,11 @@ def main() -> None:
     p_sf.add_argument("--syzygy-path", type=str, default=None, help="Syzygy tablebase directory or 'auto'/'none' (default: disabled unless NEURACHESS_SYZYGY_PATH set)")
     p_sf.add_argument("--own-book", action="store_true", help="Use bundled CC0 Lichess opening book up to ply 15")
     p_sf.add_argument("--python-tree", action="store_true")
+    p_sf.add_argument("--use-uncertainty-cpuct", action="store_true")
+    p_sf.add_argument("--uncertainty-kappa", type=float, default=1.25)
+    p_sf.add_argument("--use-mlh-tiebreak", action="store_true")
+    p_sf.add_argument("--use-q-fpu", action="store_true")
+    p_sf.add_argument("--q-fpu-lambda", type=float, default=0.25)
     p_sf.add_argument("--output", type=Path, default=None)
 
     p_h2h = sub.add_parser("h2h", help="Play paired head-to-head match between two OpenVINO IR models")
@@ -629,6 +659,16 @@ def main() -> None:
     p_h2h.add_argument("--fpu-reduction", type=float, default=None, help="Override PUCT fpu_reduction")
     p_h2h.add_argument("--syzygy-path", type=str, default=None, help="Syzygy tablebase directory")
     p_h2h.add_argument("--own-book", action="store_true", help="Use bundled CC0 Lichess opening book up to ply 15")
+    p_h2h.add_argument("--use-uncertainty-cpuct-a", action="store_true")
+    p_h2h.add_argument("--uncertainty-kappa-a", type=float, default=1.25)
+    p_h2h.add_argument("--use-mlh-tiebreak-a", action="store_true")
+    p_h2h.add_argument("--use-q-fpu-a", action="store_true")
+    p_h2h.add_argument("--q-fpu-lambda-a", type=float, default=0.25)
+    p_h2h.add_argument("--use-uncertainty-cpuct-b", action="store_true")
+    p_h2h.add_argument("--uncertainty-kappa-b", type=float, default=1.25)
+    p_h2h.add_argument("--use-mlh-tiebreak-b", action="store_true")
+    p_h2h.add_argument("--use-q-fpu-b", action="store_true")
+    p_h2h.add_argument("--q-fpu-lambda-b", type=float, default=0.25)
     p_h2h.add_argument("--output", type=Path, default=None)
 
     args = parser.parse_args()
