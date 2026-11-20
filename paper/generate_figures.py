@@ -774,70 +774,61 @@ def make_fig4() -> None:
     ax2.spines["right"].set_visible(False)
     ax2.legend(loc="lower right", fontsize=6.9)
 
-    # --- Panel (c): Stockfish 19 Ladder & go nodes 3500 Crossover ---
+    # --- Panel (c): Stockfish 19 150-Game Calibration Ladder (3-Model Progression) ---
     ax3 = fig.add_subplot(gs[2])
+    ladder_386m = load_json("v1_1_stockfish_ladder_150g.json")
     ladder_786m = load_json("job_c_stockfish_ladder_150g.json")
-    cats = ["SF19\nElo 2800\n(50g)", "SF19\nElo 3000\n(50g)", "SF19\nElo 3190\n(50g)", "SF19\nNodes 3500\n(40g)"]
-    v10_scores = [62.0, 49.0, 39.0, 37.50]
-    v11_scores = [
-        float(ladder_786m["tiers"]["2800"]["score_pct"]),
-        float(ladder_786m["tiers"]["3000"]["score_pct"]),
-        float(ladder_786m["tiers"]["3190"]["score_pct"]),
-        float(nodes3500["score_pct"]),
-    ]
-    v11_cis = [
-        ladder_786m["tiers"]["2800"]["wilson_95_ci_pct"],
-        ladder_786m["tiers"]["3000"]["wilson_95_ci_pct"],
-        ladder_786m["tiers"]["3190"]["wilson_95_ci_pct"],
-        nodes3500["wilson_95_ci_pct"],
-    ]
-    yerr_lo = [s - ci[0] for s, ci in zip(v11_scores, v11_cis)]
-    yerr_hi = [ci[1] - s for s, ci in zip(v11_scores, v11_cis)]
+    cats = ["SF19\nElo 2800\n(50g)", "SF19\nElo 3000\n(50g)", "SF19\nElo 3190\n(50g)"]
+    tier_keys = ["2800", "3000", "3190"]
+
+    v10_scores = [62.0, 49.0, 39.0]
+    v10_cis = [[48.15, 74.14], [35.72, 62.42], [26.73, 52.84]]
+
+    v386_scores = [float(ladder_386m["tiers"][k]["score_pct"]) for k in tier_keys]
+    v386_cis = [ladder_386m["tiers"][k]["wilson_95_ci_pct"] for k in tier_keys]
+
+    v786_scores = [float(ladder_786m["tiers"][k]["score_pct"]) for k in tier_keys]
+    v786_cis = [ladder_786m["tiers"][k]["wilson_95_ci_pct"] for k in tier_keys]
+
+    def _yerr(scores, cis):
+        return [[s - ci[0] for s, ci in zip(scores, cis)], [ci[1] - s for s, ci in zip(scores, cis)]]
 
     x3 = np.arange(len(cats))
-    w3 = 0.34
-    ax3.axvline(2.5, color="#9CA3AF", linestyle="--", linewidth=1.0, zorder=2)
+    w3 = 0.265
     ax3.axhline(50.0, color=COLORS["charcoal"], linestyle=":", linewidth=0.9, zorder=1)
 
-    r_old = ax3.bar(x3 - w3 / 2, v10_scores, width=w3, color="#CBD5E1", edgecolor="#333333",
-                    linewidth=0.65, label="v1.0.x Scalar FP16*", zorder=3)
-    r_new = ax3.bar(x3 + w3 / 2, v11_scores, width=w3,
-                    color=[COLORS["blue"], COLORS["blue"], COLORS["blue"], COLORS["green"]],
-                    edgecolor="#111111", linewidth=0.65,
-                    yerr=[yerr_lo, yerr_hi], capsize=3.0, error_kw=dict(lw=1.0, ecolor="#111111"),
-                    label="10x192-MidQAT-786M (95% CI)", zorder=4)
+    series = [
+        (x3 - w3, v10_scores, v10_cis, "#CBD5E1", "#4B5563", "v1.0.x Scalar FP16 (346M)*", False),
+        (x3,      v386_scores, v386_cis, COLORS["sky"], "#0C4A6E",
+         f"10x192-MidQAT-Soup (386M, {ladder_386m['mean_implied_elo']:,.0f} Elo)", False),
+        (x3 + w3, v786_scores, v786_cis, COLORS["blue"], COLORS["blue"],
+         f"10x192-MidQAT-786M (786M, {ladder_786m['mean_implied_elo']:,.0f} Elo, {ladder_786m['mean_effective_nps']:,.0f} NPS)", True),
+    ]
 
-    for r, v in zip(r_old, v10_scores):
-        ax3.text(r.get_x() + r.get_width() / 2, v + 1.4, f"{v:.1f}%",
-                 ha="center", va="bottom", fontsize=7.0, color="#4B5563")
-    for idx_b, (r, v, hi) in enumerate(zip(r_new, v11_scores, yerr_hi)):
-        ax3.text(r.get_x() + r.get_width() / 2, v + hi + 1.6, f"{v:.1f}%",
-                 ha="center", va="bottom", fontsize=7.4, fontweight="bold",
-                 color="#006B4F" if idx_b == 3 else COLORS["blue"])
-
-    ax3.text(
-        1.15, 113.0,
-        f"Mean Implied Elo: {ladder_786m['mean_implied_elo']:.0f}\n({ladder_786m['mean_effective_nps']:,.0f} pondered NPS, 150g)",
-        ha="center", va="top", fontsize=7.0, color="#1F2937",
-        bbox=dict(boxstyle="round,pad=0.24", fc="#F8FAFC", ec="#CBD5E1", lw=0.75),
-    )
-    ax3.annotate(
-        "+46.3 pp\n(incl. Syzygy)",
-        xy=(3 + w3 / 2 - 0.14, 83.0), xytext=(2.18, 76.0),
-        ha="center", fontsize=7.1, fontweight="bold", color="#006B4F",
-        bbox=dict(boxstyle="round,pad=0.22", fc="#E6F7F1", ec=COLORS["green"], lw=0.8),
-        arrowprops=dict(arrowstyle="->", color=COLORS["green"], lw=1.15),
-    )
+    for xs, sc, cis, fcol, tcol, lbl, is_bold in series:
+        ye = _yerr(sc, cis)
+        rects = ax3.bar(
+            xs, sc, width=w3, color=fcol,
+            edgecolor="#111111" if is_bold else "#333333", linewidth=0.65,
+            yerr=ye, capsize=2.3, error_kw=dict(lw=0.85, ecolor="#1F2937"),
+            label=lbl, zorder=4 if is_bold else 3,
+        )
+        for idx_t, (r, v, hi) in enumerate(zip(rects, sc, ye[1])):
+            ax3.text(
+                r.get_x() + r.get_width() / 2, v + hi + 1.6, f"{v:.0f}%",
+                ha="center", va="bottom", fontsize=6.7 if is_bold else 6.4,
+                fontweight="bold" if is_bold else "normal", color=tcol,
+            )
 
     ax3.set_xticks(x3)
-    ax3.set_xticklabels(cats, fontsize=7.7)
-    ax3.set_ylim(0, 117.0)
+    ax3.set_xticklabels(cats, fontsize=7.8)
+    ax3.set_ylim(0, 118.0)
     ax3.set_ylabel("Match Score vs. Stockfish 19 (%)")
-    ax3.set_title("(c) Stockfish 19 Ladder & Fixed-Node Eval", pad=8)
+    ax3.set_title("(c) Stockfish 19 Calibration Ladder (150g)", pad=8)
     ax3.grid(axis="y", zorder=1)
     ax3.spines["top"].set_visible(False)
     ax3.spines["right"].set_visible(False)
-    ax3.legend(loc="lower left", fontsize=6.9)
+    ax3.legend(loc="upper right", fontsize=6.25, framealpha=0.95)
 
     save_figure(fig, "fig4_puzzles_and_ladder")
 
